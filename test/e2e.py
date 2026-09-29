@@ -17,6 +17,7 @@ p.add_argument('--lab-tool', required=True)
 p.add_argument('--cli', default='roamvm')
 p.add_argument('--disk-root', default='.lab-disks')
 p.add_argument('--node-failure', action='store_true', help='kill and restart one kind worker container')
+p.add_argument('--object-store-container', default='roamvm-s3')
 a = p.parse_args()
 
 def run(args, data=None, check=True):
@@ -135,7 +136,7 @@ try:
 
     # Pause S3 during stop. A paused test server is a real network failure, not a
     # mocked successful PUT. The working copy and runner must remain available.
-    run(['docker', 'pause', 'roamvm-s3'])
+    run(['docker', 'pause', a.object_store_container])
     try:
         power('Stopped')
         wait('Checkpointing', timeout=45)
@@ -143,7 +144,7 @@ try:
         check('S3 outage never reports Stopped', vm()['status']['phase'] == 'Checkpointing')
         check('runner retained during failed upload', bool(k('get', 'pods', '-l', f'vm.roamvm.io/uid={uid}', '-o', 'name').strip()))
     finally:
-        run(['docker', 'unpause', 'roamvm-s3'])
+        run(['docker', 'unpause', a.object_store_container])
     wait('Stopped', timeout=90)
     check('upload retries commit exactly one generation', head()['checkpoint']['generation'] == first['checkpoint']['generation'] + 1)
     start()

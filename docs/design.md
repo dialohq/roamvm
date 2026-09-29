@@ -33,17 +33,37 @@ claim. The VM API does not expose host command execution or arbitrary host paths
 
 ## Durable state
 
-`vm/<VM UID>/head.json` is authoritative. Kubernetes status is a projection. The
-head identifies the base digest, owner Pod UID, node, epoch and current checkpoint.
-Each acquisition uses S3 `If-Match` compare-and-swap; initial creation uses
-`If-None-Match: *`. There is no expiring lease that permits a second writer.
+The head is authoritative; VM status is a projection. The head identifies the
+base digest, owner Pod UID, node, epoch and current checkpoint. Acquisition and
+checkpoint publication both require compare-and-swap on that same record.
+There is no expiring lease that permits a second writer.
+
+`STATE_BACKEND=s3` stores the head at `vm/<VM UID>/head.json` with S3 `If-Match`;
+initial creation uses `If-None-Match: *`. `STATE_BACKEND=kubernetes` stores it in
+the `roamvm-<VM UID>` ConfigMap in `STATE_NAMESPACE` (default `roamvm-system`),
+using Kubernetes resourceVersion preconditions. Disk objects stay in S3 in both
+modes. The Kubernetes mode supports stores such as Garage 2.3.0 that do not
+implement conditional S3 writes. These ConfigMaps deliberately outlive the VM;
+include them in control-plane backups. Neither VM status nor a bucket listing
+can replace a lost head. Do not switch backends, namespaces or buckets for an
+existing deployment without an offline metadata migration with all VMs stopped.
 
 Checkpoints are immutable objects named by generation, epoch and SHA-256. The
 runtime uploads the compact QCOW2 overlay, reads it back and verifies its full
 hash and size, then conditionally replaces the head. Only that last write commits
-Stopped. A lost response is reconciled by reading the head. Multipart completion
-also uses conditional headers. These operations rely on the backend's
+Stopped. A lost response is reconciled by reading the head. In S3 mode these
+operations rely on the backend's
 [conditional write semantics](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
+In Kubernetes mode, S3 conditional headers are only an additional safeguard:
+epoch and content hash distinguish checkpoint keys, and retrying a key writes
+the same bytes. Only the Kubernetes head determines which object is committed.
+
+Ownership can change while an upload is in flight. The check before upload is
+not sufficient: the final head update must compare the exact revision acquired
+by that runner, without retrying against a newly read revision. A stale upload
+can leave an unreferenced object, but cannot change the current checkpoint.
+Compare-and-swap fences publication, not execution. Recovery still requires
+proof that the previous VMM has terminated or its node has been fenced.
 
 Restore checks size, hash and object version, rewrites the backing reference to
 the locally cached pinned base, validates QCOW2 metadata, and then starts the VMM.
@@ -68,7 +88,7 @@ must not erase local files; the node may still hold the only newest copy.
 | Failure | Behavior |
 | --- | --- |
 | Missing OCI base | Pull on the chosen node; no scheduling dependency |
-| Duplicate start | One runner name plus conditional S3 ownership; second owner rejected |
+| Duplicate start | One runner name plus conditional head ownership; second owner rejected |
 | S3 unavailable during stop | Guest exits, Pod stays Checkpointing, local state retained, upload retried |
 | Daemon restarts | Same runner/epoch resumes using saved metadata |
 | Control contact lost for 30 seconds | Runner requests guest shutdown; ownership stays held |
@@ -96,7 +116,7 @@ roamvm start --namespace NAMESPACE VM_NAME
 
 This is an explicit decision to discard uncommitted changes and restore the last
 checkpoint. It never runs automatically. It first requests Stopped, removes the
-old incarnation, advances the S3 epoch, and resets Kubernetes status. Retained
+old incarnation, advances the head's epoch, and resets Kubernetes status. Retained
 local failed disks are not automatically adopted; preserve them for investigation
 before recovery if the uncommitted work matters.
 

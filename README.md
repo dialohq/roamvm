@@ -74,11 +74,19 @@ Build with Go 1.26.7 (`make build`) and publish `make image IMAGE=YOUR_REGISTRY/
 In `config/install.yaml`, replace all three `roamvm:dev` container image references
 and the controller's `RUNNER_IMAGE` value with the same published digest.
 
-Create a dedicated S3 bucket. The store must implement strongly consistent reads,
+Create a dedicated S3 bucket. With the default `STATE_BACKEND=s3`, the store must implement strongly consistent reads,
 conditional `PutObject`, and conditional `CompleteMultipartUpload` with `If-Match`
 and `If-None-Match`. The daemon probes basic conditional semantics on startup;
 `TEST_S3_ENDPOINT=... TEST_S3_BUCKET=... go test ./internal/state -run TestS3 -count=1`
 also checks multipart behavior against your backend.
+
+For object stores without conditional writes (including Garage 2.3.0), set
+`STATE_BACKEND=kubernetes`. Ownership and the current checkpoint pointer then
+use a retained ConfigMap in `STATE_NAMESPACE` (default `roamvm-system`); only
+immutable disk objects go to S3. Back up these ConfigMaps along with the bucket.
+The daemon verifies object upload/readback at startup. Configure every daemon
+and recovery command with the same backend; changing it requires an offline
+metadata migration, not an environment-variable rollout.
 
 ```sh
 kubectl apply --server-side -f config/crd

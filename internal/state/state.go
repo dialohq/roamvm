@@ -1,5 +1,5 @@
 // Package state implements the durable state machine. Kubernetes status is only
-// a projection: the conditional S3 head is authoritative, including ownership.
+// a projection: the conditionally updated head is authoritative, including ownership.
 package state
 
 import (

@@ -143,7 +143,11 @@ func Run() error {
 	}
 	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
 	if _, e := os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); e == nil {
-		args = append(args, "--kernel", filepath.Join(p.Base.Dir, "vmlinux"), "--cmdline", p.Base.Manifest.Cmdline)
+		cmdline := p.Base.Manifest.Cmdline
+		if p.Spec.Hostname != "" {
+			cmdline += " systemd.hostname=" + p.Spec.Hostname
+		}
+		args = append(args, "--kernel", filepath.Join(p.Base.Dir, "vmlinux"), "--cmdline", cmdline)
 		if _, e = os.Stat(filepath.Join(p.Base.Dir, "initrd")); e == nil {
 			args = append(args, "--initramfs", filepath.Join(p.Base.Dir, "initrd"))
 		}
@@ -170,6 +174,13 @@ func Run() error {
 			return err
 		}
 		args = append(args, "--disk", "path="+configDisk+",image_type=raw,readonly=on")
+	}
+	for _, disk := range p.Spec.ConfigDisks {
+		path := "/tmp/config-" + disk.Name + ".iso"
+		if err = command(ctx, "genisoimage", "-quiet", "-follow-links", "-rock", "-joliet", "-V", disk.Label, "-o", path, "/config-disks/"+disk.Name); err != nil {
+			return err
+		}
+		args = append(args, "--disk", "path="+path+",image_type=raw,readonly=on")
 	}
 	hypervisor := exec.Command("cloud-hypervisor", args...)
 	hypervisor.Stdout = os.Stdout

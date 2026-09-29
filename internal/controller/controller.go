@@ -282,6 +282,11 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		return err
 	}
 	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: vm.Namespace, Labels: map[string]string{Label: string(vm.UID), "vm.roamvm.io/name": vm.Name}, Annotations: map[string]string{SecretAnnotation: name, SpecAnnotation: string(bootSpec)}, Finalizers: []string{Finalizer}}}
+	for key, value := range vm.Labels {
+		if key != Label && key != "vm.roamvm.io/name" {
+			pod.Labels[key] = value
+		}
+	}
 	dirType := core.HostPathDirectoryOrCreate
 	root := r.Root
 	if root == "" {
@@ -289,7 +294,8 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	}
 	pod.Spec = core.PodSpec{
 		RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: ptr.To(false), TerminationGracePeriodSeconds: ptr.To(int64(3600)),
-		NodeSelector: vm.Spec.NodeSelector, Affinity: vm.Spec.Affinity, Tolerations: vm.Spec.Tolerations, TopologySpreadConstraints: vm.Spec.TopologySpreadConstraints,
+		ImagePullSecrets: vm.Spec.ImagePullSecrets,
+		NodeSelector:     vm.Spec.NodeSelector, Affinity: vm.Spec.Affinity, Tolerations: vm.Spec.Tolerations, TopologySpreadConstraints: vm.Spec.TopologySpreadConstraints,
 		SecurityContext: &core.PodSecurityContext{Sysctls: []core.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}, {Name: "net.ipv4.conf.all.route_localnet", Value: "1"}}},
 		Volumes: []core.Volume{
 			{Name: "socket", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: "/run/roamvm", Type: &dirType}}},
@@ -321,6 +327,10 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	if vm.Spec.Config != nil {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "config", VolumeSource: core.VolumeSource{Projected: vm.Spec.Config}})
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, core.VolumeMount{Name: "config", MountPath: "/config", ReadOnly: true})
+	}
+	for _, disk := range vm.Spec.ConfigDisks {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "config-" + disk.Name, VolumeSource: core.VolumeSource{Projected: &disk.Projection}})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, core.VolumeMount{Name: "config-" + disk.Name, MountPath: "/config-disks/" + disk.Name, ReadOnly: true})
 	}
 	if err = controllerutil.SetControllerReference(vm, pod, r.Scheme); err != nil {
 		return err

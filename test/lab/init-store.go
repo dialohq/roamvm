@@ -7,7 +7,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/dialohq/roamvm/internal/state"
 	"io"
+	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"os"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func main() {
@@ -15,6 +19,20 @@ func main() {
 	s, e := state.NewS3(ctx, os.Getenv("S3_ENDPOINT"), os.Getenv("S3_BUCKET"))
 	if e != nil {
 		panic(e)
+	}
+	var metadata state.Store = s
+	if os.Getenv("STATE_BACKEND") == "kubernetes" {
+		scheme := runtime.NewScheme()
+		core.AddToScheme(scheme)
+		c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+		if err != nil {
+			panic(err)
+		}
+		ns := os.Getenv("STATE_NAMESPACE")
+		if ns == "" {
+			ns = "roamvm-system"
+		}
+		metadata = &state.Kubernetes{Client: c, Namespace: ns, Objects: s}
 	}
 	mode := "init"
 	if len(os.Args) > 1 {
@@ -27,13 +45,13 @@ func main() {
 			_, e = s.Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: &s.Bucket})
 		}
 	case "read":
-		head, err := (state.Manager{Store: s}).Read(ctx, os.Args[2])
+		head, err := (state.Manager{Store: metadata}).Read(ctx, os.Args[2])
 		e = err
 		if e == nil {
 			e = json.NewEncoder(os.Stdout).Encode(head.Head)
 		}
 	case "corrupt", "restore":
-		head, err := (state.Manager{Store: s}).Read(ctx, os.Args[2])
+		head, err := (state.Manager{Store: metadata}).Read(ctx, os.Args[2])
 		if err != nil {
 			panic(err)
 		}

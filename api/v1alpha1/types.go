@@ -32,6 +32,10 @@ type VirtualMachine struct {
 }
 
 type VirtualMachineSpec struct {
+	// Hostname is applied at guest boot; it does not change the Pod's DNS name.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Hostname string `json:"hostname,omitempty"`
 	// +kubebuilder:validation:Enum=Running;Stopped
 	// +kubebuilder:default=Stopped
 	PowerState string `json:"powerState"`
@@ -70,6 +74,20 @@ type VirtualMachineSpec struct {
 	// Projected files become a read-only ISO disk labelled ROAMVM_CONFIG.
 	// Secrets and ConfigMaps are resolved by kubelet and refreshed at next boot.
 	Config *corev1.ProjectedVolumeSource `json:"config,omitempty"`
+	// ConfigDisks exposes named projected sources as individually labelled ISO disks.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.filter(y, y.label == x.label).size() == 1)",message="config disk labels must be unique"
+	ConfigDisks []ConfigDisk `json:"configDisks,omitempty"`
+}
+
+type ConfigDisk struct {
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,30}$`
+	Name string `json:"name"`
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]{1,32}$`
+	Label      string                       `json:"label"`
+	Projection corev1.ProjectedVolumeSource `json:"projection"`
 }
 
 type SecondaryDisk struct {
