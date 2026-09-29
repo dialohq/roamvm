@@ -28,6 +28,8 @@ func TestRejectUnsafeArtifactEntries(t *testing.T) {
 		limit int64
 	}{
 		{"disk/../../escape", tar.TypeReg, "bad", 100},
+		{"/disk/../../escape", tar.TypeReg, "bad", 100},
+		{"/disk/root.raw", tar.TypeSymlink, "", 100},
 		{"disk/root.raw", tar.TypeSymlink, "", 100},
 		{"disk/root.raw", tar.TypeLink, "", 100},
 		{"disk/root.raw", tar.TypeChar, "", 100},
@@ -130,22 +132,26 @@ func TestPrivateRegistryConcurrentPullAndOfflineCache(t *testing.T) {
 	}
 }
 func TestExtractOnlyDiskPayload(t *testing.T) {
-	var b bytes.Buffer
-	w := tar.NewWriter(&b)
-	for _, n := range []string{"etc/passwd", "disk/root.raw", "disk/manifest.json", "disk/vmlinux"} {
-		data := []byte("test")
-		w.WriteHeader(&tar.Header{Name: n, Mode: 0644, Size: int64(len(data))})
-		w.Write(data)
-	}
-	w.Close()
-	dir := t.TempDir()
-	if e := extract(&b, dir, 100); e != nil {
-		t.Fatal(e)
-	}
-	if _, e := os.Stat(filepath.Join(dir, "root.raw")); e != nil {
-		t.Fatal(e)
-	}
-	if _, e := os.Stat(filepath.Join(dir, "etc")); !os.IsNotExist(e) {
-		t.Fatal("OCI rootfs unpacked outside disk payload")
+	for _, prefix := range []string{"", "./", "/"} {
+		t.Run(prefix, func(t *testing.T) {
+			var b bytes.Buffer
+			w := tar.NewWriter(&b)
+			for _, n := range []string{"etc/passwd", "disk/root.raw", "disk/manifest.json", "disk/vmlinux"} {
+				data := []byte("test")
+				w.WriteHeader(&tar.Header{Name: prefix + n, Mode: 0644, Size: int64(len(data))})
+				w.Write(data)
+			}
+			w.Close()
+			dir := t.TempDir()
+			if e := extract(&b, dir, 100); e != nil {
+				t.Fatal(e)
+			}
+			if _, e := os.Stat(filepath.Join(dir, "root.raw")); e != nil {
+				t.Fatal(e)
+			}
+			if _, e := os.Stat(filepath.Join(dir, "etc")); !os.IsNotExist(e) {
+				t.Fatal("OCI rootfs unpacked outside disk payload")
+			}
+		})
 	}
 }

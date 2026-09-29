@@ -151,7 +151,7 @@ func extract(r io.Reader, dir string, limit int64) error {
 		if err != nil {
 			return err
 		}
-		clean := strings.TrimPrefix(h.Name, "./")
+		clean := strings.TrimPrefix(strings.TrimPrefix(h.Name, "./"), "/")
 		if !strings.HasPrefix(clean, "disk/") {
 			continue
 		}
