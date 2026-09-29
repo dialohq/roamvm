@@ -2,11 +2,11 @@ package images
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/dialohq/roamvm/internal/fileio"
 	"github.com/dialohq/roamvm/internal/qcow"
 	"io"
 	"os"
@@ -177,7 +177,7 @@ func extract(r io.Reader, dir string, limit int64) error {
 		if err != nil {
 			return err
 		}
-		_, err = copySparse(f, t)
+		_, err = fileio.CopySparse(f, t)
 		if err == nil {
 			err = f.Sync()
 		}
@@ -187,35 +187,6 @@ func extract(r io.Reader, dir string, limit int64) error {
 		}
 		if ce != nil {
 			return ce
-		}
-	}
-}
-
-// OCI tar streams contain zero-filled regions of raw disks. Preserve those as
-// holes instead of allocating the entire virtual disk on the local filesystem.
-func copySparse(dst *os.File, src io.Reader) (int64, error) {
-	buf := make([]byte, 64<<10)
-	zero := make([]byte, len(buf))
-	var total int64
-	for {
-		n, err := io.ReadFull(src, buf)
-		if n > 0 {
-			var e error
-			if bytes.Equal(buf[:n], zero[:n]) {
-				_, e = dst.Seek(int64(n), io.SeekCurrent)
-			} else {
-				_, e = dst.Write(buf[:n])
-			}
-			if e != nil {
-				return total, e
-			}
-			total += int64(n)
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return total, dst.Truncate(total)
-		}
-		if err != nil {
-			return total, err
 		}
 	}
 }

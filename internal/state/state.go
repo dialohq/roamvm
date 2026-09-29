@@ -15,6 +15,7 @@ import (
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/dialohq/roamvm/internal/fileio"
 )
 
 var ErrNotFound = errors.New("object not found")
@@ -147,7 +148,7 @@ func (m Manager) Restore(ctx context.Context, s Session, path string) error {
 	}
 	defer os.Remove(path + ".partial")
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(obj.Body, cp.Size+1))
+	n, err := fileio.CopySparse(f, io.TeeReader(io.LimitReader(obj.Body, cp.Size+1), h))
 	if err == nil && (n != cp.Size || hex.EncodeToString(h.Sum(nil)) != cp.SHA256) {
 		err = errors.New("checkpoint integrity mismatch")
 	}

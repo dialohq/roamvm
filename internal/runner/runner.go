@@ -141,7 +141,7 @@ func Run() error {
 			return e
 		}
 	}
-	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
+	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on,direct=on", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
 	if _, e := os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); e == nil {
 		cmdline := p.Base.Manifest.Cmdline
 		if p.Spec.Hostname != "" {

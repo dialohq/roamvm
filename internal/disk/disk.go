@@ -39,7 +39,7 @@ func Compact(ctx context.Context, base images.Base, path string) (string, error)
 	if err := Check(ctx, path); err != nil {
 		return "", err
 	}
-	if err := run(ctx, "convert", "-f", "qcow2", "-O", "qcow2", "-B", base.Disk(), "-F", base.Manifest.Format, path, target+".partial"); err != nil {
+	if err := run(ctx, "convert", "-t", "directsync", "-f", "qcow2", "-O", "qcow2", "-B", base.Disk(), "-F", base.Manifest.Format, path, target+".partial"); err != nil {
 		return "", err
 	}
 	if err := Check(ctx, target+".partial"); err != nil {
