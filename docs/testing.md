@@ -26,7 +26,7 @@ make test
 
 `up.py` builds the actual multi-stage Dockerfile, loads it into kind, creates the
 bucket/credentials, installs the generated CRD and controllers, and checks their
-rollouts. `--skip-build` uses an already built `roamvm:dev` image. 
+rollouts. `--skip-build` uses an already built `roamvm:dev` image.
 
 Build the small, deliberately unauthenticated **test-only** VM fixture using a
 matching Linux kernel and module tree, a static BusyBox, and Linux's
