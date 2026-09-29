@@ -1,0 +1,5 @@
+/bin/
+/.lab/
+/.lab-disks/
+/test-results/
+*.test

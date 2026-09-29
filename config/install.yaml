@@ -1,0 +1,198 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: roamvm-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller
+  namespace: roamvm-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: daemon
+  namespace: roamvm-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roamvm-controller
+rules:
+- apiGroups: [vm.roamvm.io]
+  resources: [virtualmachines, virtualmachines/status, virtualmachines/finalizers]
+  verbs: [get, list, watch, update, patch]
+- apiGroups: [""]
+  resources: [pods, secrets]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: leader-election
+  namespace: roamvm-system
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: leader-election
+  namespace: roamvm-system
+subjects:
+- kind: ServiceAccount
+  name: controller
+  namespace: roamvm-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: leader-election
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roamvm-controller
+subjects:
+- kind: ServiceAccount
+  name: controller
+  namespace: roamvm-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roamvm-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roamvm-daemon
+rules:
+- apiGroups: [vm.roamvm.io]
+  resources: [virtualmachines]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, update, patch]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roamvm-daemon
+subjects:
+- kind: ServiceAccount
+  name: daemon
+  namespace: roamvm-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roamvm-daemon
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller
+  namespace: roamvm-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: roamvm-controller}
+  template:
+    metadata:
+      labels: {app: roamvm-controller}
+    spec:
+      serviceAccountName: controller
+      containers:
+      - name: controller
+        image: roamvm:dev
+        imagePullPolicy: IfNotPresent
+        args: [controller]
+        env:
+        - name: RUNNER_IMAGE
+          value: roamvm:dev
+        - name: GOMEMLIMIT
+          value: 128MiB
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {memory: 256Mi}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        readinessProbe:
+          httpGet: {path: /readyz, port: 8081}
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8081}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: daemon
+  namespace: roamvm-system
+spec:
+  selector:
+    matchLabels: {app: roamvm-daemon}
+  template:
+    metadata:
+      labels: {app: roamvm-daemon}
+    spec:
+      serviceAccountName: daemon
+      nodeSelector:
+        vm.roamvm.io/enabled: "true"
+      containers:
+      - name: daemon
+        image: roamvm:dev
+        imagePullPolicy: IfNotPresent
+        args: [daemon]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef: {fieldPath: spec.nodeName}
+        - name: GOMEMLIMIT
+          value: 256MiB
+        envFrom:
+        - secretRef: {name: object-store}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {memory: 512Mi}
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/roamvm}
+        - {name: socket, mountPath: /run/roamvm}
+      - name: device-plugin
+        image: roamvm:dev
+        imagePullPolicy: IfNotPresent
+        args: [device-plugin]
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {memory: 96Mi}
+        volumeMounts:
+        - {name: devices, mountPath: /var/lib/kubelet/device-plugins}
+        - {name: kvm, mountPath: /dev/kvm}
+        - {name: socket, mountPath: /run/roamvm, readOnly: true}
+      volumes:
+      - name: data
+        hostPath: {path: /var/lib/roamvm, type: DirectoryOrCreate}
+      - name: socket
+        hostPath: {path: /run/roamvm, type: DirectoryOrCreate}
+      - name: devices
+        hostPath: {path: /var/lib/kubelet/device-plugins, type: Directory}
+      - name: kvm
+        hostPath: {path: /dev/kvm, type: CharDevice}

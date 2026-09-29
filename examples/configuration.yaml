@@ -1,0 +1,12 @@
+# Add this configuration to a VM's spec. The guest mounts the read-only disk
+# labelled ROAMVM_CONFIG; configure your Nix image to consume these files.
+config:
+  sources:
+  - configMap:
+      name: devbox-config
+  - secret:
+      name: devbox-credentials
+disks:
+- name: workspace
+  claimName: shared-workspace
+  volumeMode: Filesystem # PVC contains a raw disk file named disk.img

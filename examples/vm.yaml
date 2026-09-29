@@ -1,0 +1,26 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: devbox
+spec:
+  powerState: Stopped
+  # Replace with the immutable reference printed by roamvm image-push.
+  image: registry.example.com/vm-images/devbox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  cpus: 4
+  memory: 8Gi
+  # 4 guest vCPUs, 1 CPU reserved. Remove to reserve all 4 CPUs.
+  resources:
+    requests:
+      cpu: "1"
+  readinessPort: 22
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: devbox
+spec:
+  selector:
+    vm.roamvm.io/name: devbox
+  ports:
+  - name: ssh
+    port: 22
