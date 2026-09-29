@@ -47,8 +47,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if vm.DeletionTimestamp == nil && !controllerutil.ContainsFinalizer(&vm, Finalizer) {
+		before := vm.DeepCopy()
 		controllerutil.AddFinalizer(&vm, Finalizer)
-		return ctrl.Result{}, r.Update(ctx, &vm)
+		return ctrl.Result{}, r.Patch(ctx, &vm, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 	}
 	var pods core.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(vm.Namespace), client.MatchingLabels{Label: string(vm.UID)}); err != nil {
@@ -64,8 +65,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				return r.status(ctx, &vm, "RecoveryRequired", "runner vanished without a committed checkpoint; fence its runtime before recovery", nil)
 			}
 			if vm.DeletionTimestamp != nil {
+				before := vm.DeepCopy()
 				controllerutil.RemoveFinalizer(&vm, Finalizer)
-				return ctrl.Result{}, r.Update(ctx, &vm)
+				return ctrl.Result{}, r.Patch(ctx, &vm, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 			}
 			return r.status(ctx, &vm, "Stopped", "", nil)
 		}

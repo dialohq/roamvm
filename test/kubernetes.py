@@ -97,12 +97,15 @@ try:
         'volumes': [{'name': 'disk', 'persistentVolumeClaim': {'claimName': name}}]}})
     k('wait', 'pod/' + helper, '--for=condition=Ready', '--timeout=90s')
     k('delete', 'pod', helper, '--grace-period=1', '--wait=true', '--timeout=30s')
-    apply(spec(name, configDisks=config_disks, disks=[{'name': 'workspace', 'claimName': name, 'volumeMode': 'Filesystem'}], config={
-        'sources': [{'configMap': {'name': name}}, {'secret': {'name': name}}]}))
+    vm_spec = spec(name, resources={'limits': {'cpu': 2}}, configDisks=config_disks, disks=[{'name': 'workspace', 'claimName': name, 'volumeMode': 'Filesystem'}], config={
+        'sources': [{'configMap': {'name': name}}, {'secret': {'name': name}}]})
+    k('apply', '--server-side', '--field-manager=roamvm-test', '-f', '-', data=json.dumps(vm_spec).encode())
     apply({'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name}, 'spec': {
         'selector': {'vm.roamvm.io/name': name}, 'ports': [{'port': 8080}]}})
     obj = wait(name, 'Running')
     uid = obj['metadata']['uid']
+    check('controller finalizer preserves numeric quantities and declarative field ownership',
+          k('apply', '--server-side', '--dry-run=server', '--field-manager=roamvm-test', '-f', '-', data=json.dumps(vm_spec).encode(), check=False).returncode == 0)
     k('wait', 'rvm/' + name, '--for=condition=Ready', '--timeout=30s')
     def http(path, body=None):
         args = ['exec']
