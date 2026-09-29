@@ -298,6 +298,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		NodeSelector:     vm.Spec.NodeSelector, Affinity: vm.Spec.Affinity, Tolerations: vm.Spec.Tolerations, TopologySpreadConstraints: vm.Spec.TopologySpreadConstraints,
 		SecurityContext: &core.PodSecurityContext{Sysctls: []core.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}, {Name: "net.ipv4.conf.all.route_localnet", Value: "1"}}},
 		Volumes: []core.Volume{
+			{Name: "tmp", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{}}},
 			{Name: "socket", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: "/run/roamvm", Type: &dirType}}},
 			{Name: "images", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: root + "/images", Type: &dirType}}},
 			{Name: "working", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: root + "/running/" + string(vm.UID), Type: &dirType}}},
@@ -306,7 +307,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		Containers: []core.Container{{Name: "runner", Image: r.Image, ImagePullPolicy: core.PullIfNotPresent, Args: []string{"runner"}, Resources: resources,
 			Env:             []core.EnvVar{{Name: "POD_NAME", Value: name}, {Name: "POD_NAMESPACE", Value: vm.Namespace}, {Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "metadata.uid"}}}},
 			SecurityContext: &core.SecurityContext{RunAsUser: ptr.To(int64(0)), AllowPrivilegeEscalation: ptr.To(false), Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"NET_ADMIN", "NET_RAW"}}, SeccompProfile: &core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}},
-			VolumeMounts:    []core.VolumeMount{{Name: "socket", MountPath: "/run/roamvm", ReadOnly: true}, {Name: "images", MountPath: root + "/images", ReadOnly: true}, {Name: "working", MountPath: root + "/running/" + string(vm.UID)}, {Name: "auth", MountPath: "/run/roamvm-auth", ReadOnly: true}},
+			VolumeMounts:    []core.VolumeMount{{Name: "tmp", MountPath: "/tmp"}, {Name: "socket", MountPath: "/run/roamvm", ReadOnly: true}, {Name: "images", MountPath: root + "/images", ReadOnly: true}, {Name: "working", MountPath: root + "/running/" + string(vm.UID)}, {Name: "auth", MountPath: "/run/roamvm-auth", ReadOnly: true}},
 			ReadinessProbe:  &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: []string{"/bin/sh", "-c", "test -f /tmp/guest-ready"}}}, PeriodSeconds: 1, FailureThreshold: 1},
 		}},
 	}
