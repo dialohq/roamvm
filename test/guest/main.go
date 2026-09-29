@@ -11,11 +11,41 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
 
 func main() {
+	http.HandleFunc("/cpu", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		seconds, err := strconv.Atoi(r.URL.Query().Get("seconds"))
+		if err != nil || seconds < 1 || seconds > 15 {
+			http.Error(w, "seconds must be between 1 and 15", http.StatusBadRequest)
+			return
+		}
+		deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+		counts := make([]uint64, runtime.NumCPU())
+		var workers sync.WaitGroup
+		for i := range counts {
+			workers.Go(func() {
+				hash := [32]byte{byte(i)}
+				for time.Now().Before(deadline) && r.Context().Err() == nil {
+					for range 1024 {
+						hash = sha256.Sum256(hash[:])
+					}
+					counts[i] += 1024
+				}
+			})
+		}
+		workers.Wait()
+		json.NewEncoder(w).Encode(map[string]any{"cpus": runtime.NumCPU(), "iterations": counts})
+	})
 	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ready\n")) })
 	http.HandleFunc("/config-disks", func(w http.ResponseWriter, r *http.Request) {
 		values := map[string]string{}

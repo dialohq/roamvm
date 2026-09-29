@@ -152,9 +152,13 @@ create a new VM to change the base, or install packages into its current overlay
 
 ## Kubernetes integration
 
-- `cpus` defines vCPUs. CPU requests default to that count; lower requests allow
-  overcommit. CPU limits are optional. Memory reserves guest RAM plus 192 MiB VMM
-  overhead. Adjust upward if your workload/devices need more host memory.
+- `cpus` defines guest vCPUs, independently of `resources.requests.cpu` (scheduler
+  reservation and CPU weight) and `resources.limits.cpu` (optional CPU ceiling).
+  Requests default to the vCPU count. Set a lower request to oversubscribe CPUs;
+  the sum of guest vCPUs/limits may exceed the node's CPUs. Requests still have
+  to fit. KVM slots are shared access tokens, not dedicated physical CPUs.
+  Memory reserves guest RAM plus 192 MiB VMM overhead and is not overcommitted.
+  Adjust upward if your workload/devices need more host memory.
 - Affinity, node selectors, tolerations and topology spread pass to the runner Pod.
   Each incarnation captures its boot configuration when the Pod is created;
   later spec edits apply at the next start, keeping boot RAM/CPU and reservations
@@ -177,6 +181,26 @@ create a new VM to change the base, or install packages into its current overlay
 
 See [configuration fields](api/v1alpha1/types.go), [state/failure model](docs/design.md),
 and [local testing](docs/testing.md).
+
+For example, this guest sees four vCPUs while Kubernetes reserves half a CPU.
+It can burst up to four CPUs when capacity is available; contending VMs share
+host CPU time through their runner cgroups. Omitting the CPU limit removes that
+quota without changing the guest's vCPU count.
+
+```yaml
+spec:
+  cpus: 4
+  memory: 4Gi
+  resources:
+    requests:
+      cpu: 500m
+    limits:
+      cpu: "4"
+```
+
+The runner reserves and limits 4288 MiB of RAM for this example. CPU sharing does
+not make guest RAM shareable. Hugepages and passed-through devices retain native
+Kubernetes reservations.
 
 ## Current limits
 

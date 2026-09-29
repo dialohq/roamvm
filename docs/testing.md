@@ -46,6 +46,9 @@ python3 test/e2e.py --image "$(cat .lab/guest-ref)" \
   --lab-tool bin/lab-tool --node-failure
 python3 test/kubernetes.py --image "$(cat .lab/guest-ref)" \
   --lab-tool bin/lab-tool
+# Use an idle worker; this temporarily restricts its CPUs and kubelet reservation.
+python3 test/oversubscription.py --image "$(cat .lab/guest-ref)" \
+  --node roamvm-worker2
 # After creating an SSH-enabled VM from your own image, initially Stopped:
 python3 test/existing-vm.py --vm YOUR_VM_NAME
 ```
@@ -83,6 +86,12 @@ Keep `.lab/s3` and `.lab-disks` until their contents are no longer needed.
   port forwarding, and durable VM deletion.
 - Existing NixOS 26.05 disk: actual boot to SSH, ACPI shutdown, checkpoint commit,
   restart and identical generated SSH host key after restore.
+- CPU oversubscription: two four-vCPU guests on a worker restricted to two CPU
+  threads and two allocatable CPUs, each requesting 500m. Checks idle bursting,
+  concurrent CPU work, enforcement of an explicit 250m limit, rejection of an
+  excessive scheduler request, and checkpoint/restore after contention. The test
+  restores the worker's cpuset and kubelet configuration on exit. RAM stays fully
+  reserved; this does not test memory overcommit.
 
 The Kubernetes suite also passed on Cilium **1.20.1** with kube-proxy replacement
 and `socketLB.hostNamespaceOnly=true`: Service/DNS reachability, port forwarding,

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -63,6 +64,36 @@ func TestRejectMemoryUnderAccounting(t *testing.T) {
 	vm.Spec.Resources.Requests[core.ResourceMemory] = resource.MustParse("512Mi")
 	if e := r.createPod(context.Background(), vm); e == nil {
 		t.Fatal("memory request below guest RAM accepted")
+	}
+}
+
+func TestCPUReservationDoesNotSetGuestSizeOrImplicitQuota(t *testing.T) {
+	for _, limit := range []string{"", "4", "500m"} {
+		t.Run("limit="+limit, func(t *testing.T) {
+			r, vm := setup(t)
+			if limit != "" {
+				vm.Spec.Resources.Limits = core.ResourceList{core.ResourceCPU: resource.MustParse(limit)}
+			}
+			if err := r.createPod(context.Background(), vm); err != nil {
+				t.Fatal(err)
+			}
+			var pod core.Pod
+			if err := r.Get(context.Background(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod); err != nil {
+				t.Fatal(err)
+			}
+			resources := pod.Spec.Containers[0].Resources
+			var boot api.VirtualMachineSpec
+			if err := json.Unmarshal([]byte(pod.Annotations[SpecAnnotation]), &boot); err != nil {
+				t.Fatal(err)
+			}
+			if resources.Requests.Cpu().MilliValue() != 250 || boot.CPUs != 4 {
+				t.Fatal("guest size and scheduler request were coupled")
+			}
+			quota, present := resources.Limits[core.ResourceCPU]
+			if present != (limit != "") || (present && quota.Cmp(resource.MustParse(limit)) != 0) {
+				t.Fatal("explicit CPU quota was not preserved")
+			}
+		})
 	}
 }
 
