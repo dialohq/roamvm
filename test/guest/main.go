@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,22 @@ import (
 
 func main() {
 	http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ready\n")) })
+	http.HandleFunc("/config-disks", func(w http.ResponseWriter, r *http.Request) {
+		values := map[string]string{}
+		for label, path := range map[string]string{"agent": "/agent-config/credential", "tool": "/tool-config/setting"} {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			if err = os.WriteFile(path, []byte("must not be writable"), 0600); !errors.Is(err, syscall.EROFS) {
+				http.Error(w, "configuration disk is not read-only", 500)
+				return
+			}
+			values[label] = string(data)
+		}
+		json.NewEncoder(w).Encode(values)
+	})
 	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
 		values := map[string]string{}
 		for _, name := range []string{"setting", "credential"} {

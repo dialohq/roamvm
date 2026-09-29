@@ -52,9 +52,13 @@ ip link set lo up
 ip link set eth0 up
 udhcpc -i eth0 -s /etc/udhcpc -b
 acpid -d -c /etc/acpi /dev/input/event0 &
-mkdir -p /config /secondary
+mkdir -p /config /secondary /agent-config /tool-config
 for d in /dev/vd?; do
  [ "$d" = /dev/vda ] && continue
+ case "$(blkid "$d")" in
+  *TEST_AGENT*) mount -t iso9660 -o ro "$d" /agent-config; continue ;;
+  *TEST_TOOL*) mount -t iso9660 -o ro "$d" /tool-config; continue ;;
+ esac
  mount -t iso9660 -o ro "$d" /config 2>/dev/null && continue
  mount -t ext4 "$d" /secondary 2>/dev/null || true
 done

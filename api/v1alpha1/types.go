@@ -83,8 +83,10 @@ type VirtualMachineSpec struct {
 }
 
 type ConfigDisk struct {
+	// +kubebuilder:validation:MaxLength=31
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,30}$`
 	Name string `json:"name"`
+	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]{1,32}$`
 	Label      string                       `json:"label"`
 	Projection corev1.ProjectedVolumeSource `json:"projection"`

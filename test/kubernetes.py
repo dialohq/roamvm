@@ -69,6 +69,14 @@ try:
     bad = spec(name + '-unpinned')
     bad['spec']['image'] = 'registry.invalid/devbox:latest'
     check('CRD rejects mutable image references', k('apply', '-f', '-', data=json.dumps(bad).encode(), check=False).returncode != 0)
+    config_disks = [
+        {'name': 'agent', 'label': 'TEST_AGENT', 'projection': {'sources': [{'secret': {'name': name}}]}},
+        {'name': 'tool', 'label': 'TEST_TOOL', 'projection': {'sources': [{'configMap': {'name': name}}]}},
+    ]
+    bad = spec(name + '-duplicate-label', configDisks=config_disks)
+    bad = json.loads(json.dumps(bad))
+    bad['spec']['configDisks'][1]['label'] = 'TEST_AGENT'
+    check('CRD rejects ambiguous configuration disk labels', k('apply', '--dry-run=server', '-f', '-', data=json.dumps(bad).encode(), check=False).returncode != 0)
     apply({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': name}, 'data': {'setting': 'first'}})
     apply({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': name}, 'stringData': {'credential': 'local-fixture-only'}})
     apply({'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim', 'metadata': {'name': name}, 'spec': {
@@ -83,7 +91,7 @@ try:
         'volumes': [{'name': 'disk', 'persistentVolumeClaim': {'claimName': name}}]}})
     k('wait', 'pod/' + helper, '--for=condition=Ready', '--timeout=90s')
     k('delete', 'pod', helper, '--grace-period=1', '--wait=true', '--timeout=30s')
-    apply(spec(name, disks=[{'name': 'workspace', 'claimName': name, 'volumeMode': 'Filesystem'}], config={
+    apply(spec(name, configDisks=config_disks, disks=[{'name': 'workspace', 'claimName': name, 'volumeMode': 'Filesystem'}], config={
         'sources': [{'configMap': {'name': name}}, {'secret': {'name': name}}]}))
     apply({'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name}, 'spec': {
         'selector': {'vm.roamvm.io/name': name}, 'ports': [{'port': 8080}]}})
@@ -99,6 +107,7 @@ try:
             args += ['--data-binary', '@-']
         return k(*args, f'http://{name}.default.svc.cluster.local:8080{path}', data=body).stdout
     check('ConfigMap and Secret delivered to guest ISO', json.loads(http('/config')) == {'setting': 'first', 'credential': 'local-fixture-only'})
+    check('labelled configuration disks stay distinct and read-only', json.loads(http('/config-disks')) == {'agent': 'local-fixture-only', 'tool': 'first'})
     check('secondary PVC disk is mounted in guest', http('/secondary') == b'prepared-by-kubernetes')
     check('guest writes secondary PVC', http('/secondary', b'guest-pvc-write') == b'guest-pvc-write')
     patch = {'spec': {'image': a.image.split('@')[0] + '@sha256:' + '0' * 64}}
