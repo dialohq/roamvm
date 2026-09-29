@@ -21,7 +21,7 @@ in pkgs.buildGoModule {
   vendorHash = "sha256-RgcIlgEK4qtQ7YJhaOS1w6xwffXcfnCBMNgqwveejPw=";
   subPackages = ["cmd/roamvm"];
   nativeBuildInputs = [pkgs.makeWrapper];
-  nativeCheckInputs = [pkgs.qemu];
+  nativeCheckInputs = [pkgs.qemu-utils];
   ldflags = ["-s" "-w"];
   doCheck = true;
   checkPhase = ''
@@ -30,7 +30,7 @@ in pkgs.buildGoModule {
     runHook postCheck
   '';
   postInstall = ''
-    wrapProgram $out/bin/roamvm --prefix PATH : ${pkgs.lib.makeBinPath [hypervisor pkgs.qemu pkgs.iproute2 pkgs.iptables pkgs.dnsmasq pkgs.cdrkit pkgs.coreutils]}
+    wrapProgram $out/bin/roamvm --prefix PATH : ${pkgs.lib.makeBinPath [hypervisor pkgs.qemu-utils pkgs.iproute2 pkgs.iptables pkgs.dnsmasq pkgs.cdrkit pkgs.coreutils]}
   '';
   passthru = {inherit hypervisor;};
   meta.platforms = ["x86_64-linux"];
