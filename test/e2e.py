@@ -31,6 +31,7 @@ def k(*args, data=None):
 
 assert k('config', 'current-context').strip() == b'kind-roamvm', 'refusing to touch another cluster'
 name = 'e2e-' + str(int(time.time()))
+network_client = name + '-client'
 results = {'vm': name, 'image': a.image, 'checks': [], 'timings': []}
 
 def check(name, condition):
@@ -57,10 +58,10 @@ def power(state):
     k('patch', 'rvm', name, '--type=merge', '-p', json.dumps({'spec': {'powerState': state}}))
 
 def http(path, data=None):
-    cmd = ['kubectl', '-n', 'roamvm-system', 'exec']
+    cmd = ['kubectl', 'exec']
     if data is not None:
         cmd.append('-i')
-    cmd += ['deployment/controller', '--', 'curl', '-fsS', '--max-time', '10']
+    cmd += [network_client, '--', 'curl', '-fsS', '--max-time', '10']
     if data is not None:
         cmd += ['--data-binary', '@-']
     cmd += [f'http://{name}.default.svc.cluster.local:8080{path}']
@@ -100,6 +101,12 @@ def start():
     return result
 
 try:
+    apply({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': network_client}, 'spec': {
+        'nodeSelector': {'kubernetes.io/hostname': 'roamvm-control-plane'},
+        'tolerations': [{'key': 'node-role.kubernetes.io/control-plane', 'operator': 'Exists', 'effect': 'NoSchedule'}],
+        'automountServiceAccountToken': False,
+        'containers': [{'name': 'curl', 'image': 'curlimages/curl:8.17.0', 'command': ['sh', '-c', 'exec sleep 3600']}]}})
+    k('wait', 'pod/' + network_client, '--for=condition=Ready', '--timeout=90s')
     before = time.monotonic()
     apply({'apiVersion': 'vm.roamvm.io/v1alpha1', 'kind': 'VirtualMachine', 'metadata': {'name': name}, 'spec': {
         'powerState': 'Running', 'image': a.image, 'cpus': 2, 'memory': '512Mi', 'readinessPort': 8080,
@@ -184,7 +191,13 @@ try:
     obj = vm()
     pod_name = obj['status']['podName']
     pod_uid = json.loads(k('get', 'pod', pod_name, '-o', 'json'))['metadata']['uid']
-    k('exec', pod_name, '--', 'sh', '-c', 'kill -KILL $(pidof cloud-hypervisor)')
+    k('exec', pod_name, '--', '/bin/sh', '-ec', '''
+        for process in /proc/[0-9]*; do
+            read -r name < "$process/comm" || continue
+            case "$name" in cloud-hypervis*) kill -KILL "${process##*/}"; exit 0;; esac
+        done
+        exit 1
+    ''')
     wait('RecoveryRequired')
     check('crash retains last checkpoint', head()['checkpoint'] == before_failure)
     check('crash does not release ownership', head()['owner'] == pod_uid)
@@ -216,6 +229,7 @@ try:
     results['finalCheckpoint'] = head()['checkpoint']
     results['success'] = True
 finally:
+    run(['kubectl', 'delete', 'pod', network_client, '--ignore-not-found', '--wait=false'], check=False)
     for node in ['roamvm-worker', 'roamvm-worker2']:
         run(['kubectl', 'uncordon', node], check=False)
     Path(a.output).parent.mkdir(parents=True, exist_ok=True)
