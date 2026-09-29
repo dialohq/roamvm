@@ -152,14 +152,7 @@ func (m Manager) Restore(ctx context.Context, s Session, path string) error {
 	if err == nil && (n != cp.Size || hex.EncodeToString(h.Sum(nil)) != cp.SHA256) {
 		err = errors.New("checkpoint integrity mismatch")
 	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
+	if err = fileio.SyncClose(f, err); err != nil {
 		return err
 	}
 	return os.Rename(path+".partial", path)

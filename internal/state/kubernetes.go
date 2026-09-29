@@ -1,7 +1,6 @@
 package state
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -87,21 +86,9 @@ func (s *Kubernetes) Put(ctx context.Context, key string, body io.ReadSeeker, si
 
 // CheckObjects verifies the data path without assuming S3 provides the CAS.
 func (s *Kubernetes) CheckObjects(ctx context.Context, key string) error {
-	data := []byte("roamvm-object-store-probe")
-	if _, err := s.Objects.Put(ctx, key, bytes.NewReader(data), int64(len(data)), ""); err != nil {
+	const data = "roamvm-object-store-probe"
+	if _, err := s.Objects.Put(ctx, key, strings.NewReader(data), int64(len(data)), ""); err != nil {
 		return err
 	}
-	obj, err := s.Objects.Get(ctx, key)
-	if err != nil {
-		return err
-	}
-	defer obj.Body.Close()
-	got, err := io.ReadAll(io.LimitReader(obj.Body, int64(len(data)+1)))
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(got, data) {
-		return errors.New("object store probe integrity mismatch")
-	}
-	return nil
+	return checkObject(ctx, s.Objects, key, data)
 }

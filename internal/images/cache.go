@@ -112,7 +112,8 @@ func (c Cache) Ensure(ctx context.Context, reference string, keys authn.Keychain
 	if err = os.Rename(tmp, dir); err != nil {
 		return Base{}, err
 	}
-	return readBase(dir)
+	b.Dir = dir
+	return b, nil
 }
 
 func readBase(dir string) (Base, error) {
@@ -142,7 +143,6 @@ func extract(r io.Reader, dir string, limit int64) error {
 	t := tar.NewReader(r)
 	seen := map[string]bool{}
 	var total int64
-	allowed := map[string]bool{"root.raw": true, "root.qcow2": true, "manifest.json": true, "vmlinux": true, "initrd": true, "firmware": true}
 	for {
 		h, err := t.Next()
 		if errors.Is(err, io.EOF) {
@@ -152,14 +152,16 @@ func extract(r io.Reader, dir string, limit int64) error {
 			return err
 		}
 		clean := strings.TrimPrefix(strings.TrimPrefix(h.Name, "./"), "/")
-		if !strings.HasPrefix(clean, "disk/") {
+		leaf, insideDisk := strings.CutPrefix(clean, "disk/")
+		if !insideDisk {
 			continue
 		}
-		leaf := strings.TrimPrefix(clean, "disk/")
 		if h.Typeflag == tar.TypeDir {
 			continue
 		}
-		if !allowed[leaf] {
+		switch leaf {
+		case "root.raw", "root.qcow2", "manifest.json", "vmlinux", "initrd", "firmware":
+		default:
 			return fmt.Errorf("unexpected disk artifact entry %q", h.Name)
 		}
 		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
@@ -178,15 +180,8 @@ func extract(r io.Reader, dir string, limit int64) error {
 			return err
 		}
 		_, err = fileio.CopySparse(f, t)
-		if err == nil {
-			err = f.Sync()
-		}
-		ce := f.Close()
-		if err != nil {
+		if err = fileio.SyncClose(f, err); err != nil {
 			return err
-		}
-		if ce != nil {
-			return ce
 		}
 	}
 }

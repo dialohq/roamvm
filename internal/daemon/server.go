@@ -17,6 +17,7 @@ import (
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/disk"
+	"github.com/dialohq/roamvm/internal/fileio"
 	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/state"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -191,15 +192,8 @@ func (s *Server) save(p Prepared) error {
 		return err
 	}
 	_, err = f.Write(b)
-	if err == nil {
-		err = f.Sync()
-	}
-	ce := f.Close()
-	if err != nil {
+	if err = fileio.SyncClose(f, err); err != nil {
 		return err
-	}
-	if ce != nil {
-		return ce
 	}
 	return os.Rename(path+".partial", path)
 }

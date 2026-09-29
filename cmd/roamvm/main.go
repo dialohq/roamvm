@@ -51,6 +51,9 @@ func scheme() *runtime.Scheme {
 	_ = api.AddToScheme(s)
 	return s
 }
+func kubeClient() (client.Client, error) {
+	return client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+}
 func run() error {
 	if len(os.Args) < 2 {
 		return errors.New("usage: roamvm controller|daemon|runner|device-plugin|start|stop|image-push|state|recover")
@@ -75,7 +78,7 @@ func run() error {
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
 	case "daemon":
-		c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+		c, err := kubeClient()
 		if err != nil {
 			return err
 		}
@@ -112,7 +115,7 @@ func run() error {
 		if f.NArg() != 1 {
 			return errors.New("specify one VM name")
 		}
-		c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+		c, err := kubeClient()
 		if err != nil {
 			return err
 		}
@@ -145,7 +148,7 @@ func run() error {
 		}
 		var c client.Client
 		if os.Args[1] == "recover" || os.Getenv("STATE_BACKEND") == "kubernetes" {
-			c, err = client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+			c, err = kubeClient()
 			if err != nil {
 				return err
 			}

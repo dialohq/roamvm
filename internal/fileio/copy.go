@@ -7,6 +7,17 @@ import (
 	"os"
 )
 
+// SyncClose closes a completed write, preserving the first write or sync error.
+func SyncClose(f *os.File, err error) error {
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
 // OCI tar streams contain zero-filled regions of raw disks. Preserve those as
 // holes instead of allocating the entire virtual disk on the local filesystem.
 func CopySparse(dst *os.File, src io.Reader) (int64, error) {

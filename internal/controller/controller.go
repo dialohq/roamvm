@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
@@ -78,9 +79,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// two incarnations while the first Pod is not yet visible in the cache.
 		if vm.Status.PodName == "" {
 			suffix := make([]byte, 6)
-			if _, err := rand.Read(suffix); err != nil {
-				return ctrl.Result{}, err
-			}
+			rand.Read(suffix)
 			name := vm.Name
 			if len(name) > 40 {
 				name = name[:40]
@@ -114,12 +113,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if _, err := r.status(ctx, &vm, "Stopped", "Cancelled before scheduling", nil); err != nil {
 			return ctrl.Result{}, err
 		}
-		controllerutil.RemoveFinalizer(pod, Finalizer)
-		if err := r.Update(ctx, pod); err != nil {
-			return ctrl.Result{}, err
-		}
-		secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: pod.Annotations[SecretAnnotation], Namespace: pod.Namespace}}
-		return ctrl.Result{RequeueAfter: time.Second}, client.IgnoreNotFound(r.Delete(ctx, secret))
+		return r.releasePod(ctx, pod)
 	}
 	if pod.Annotations[Phase] == "Stopped" {
 		if pod.Status.Phase != core.PodSucceeded && pod.Status.Phase != core.PodFailed {
@@ -134,18 +128,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if _, err := r.status(ctx, &vm, "Stopped", "", pod, &cp); err != nil {
 			return ctrl.Result{}, err
 		}
-		controllerutil.RemoveFinalizer(pod, Finalizer)
-		if err := r.Update(ctx, pod); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-		secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: pod.Annotations[SecretAnnotation], Namespace: vm.Namespace}}
-		if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return r.releasePod(ctx, pod)
 	}
 	if stopping || pod.DeletionTimestamp != nil {
 		if pod.Annotations[Stop] != "true" {
@@ -169,6 +152,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		message = "runner exited without durable commit; local data and ownership are retained"
 	}
 	return r.status(ctx, &vm, phase, message, pod)
+}
+
+func (r *Reconciler) releasePod(ctx context.Context, pod *core.Pod) (ctrl.Result, error) {
+	controllerutil.RemoveFinalizer(pod, Finalizer)
+	if err := r.Update(ctx, pod); err != nil {
+		return ctrl.Result{}, err
+	}
+	if pod.DeletionTimestamp == nil {
+		if err := client.IgnoreNotFound(r.Delete(ctx, pod)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: pod.Annotations[SecretAnnotation], Namespace: pod.Namespace}}
+	return ctrl.Result{RequeueAfter: time.Second}, client.IgnoreNotFound(r.Delete(ctx, secret))
 }
 
 func (r *Reconciler) status(ctx context.Context, vm *api.VirtualMachine, phase, message string, pod *core.Pod, checkpoint ...*api.Checkpoint) (ctrl.Result, error) {
@@ -269,26 +266,19 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		return fmt.Errorf("runner name must be persisted before Pod creation")
 	}
 	token := make([]byte, 32)
-	if _, err = rand.Read(token); err != nil {
-		return err
-	}
+	rand.Read(token)
 	secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: vm.Namespace}, Data: map[string][]byte{"token": []byte(hex.EncodeToString(token))}}
-	if err = controllerutil.SetControllerReference(vm, secret, r.Scheme); err != nil {
-		return err
-	}
-	if err = r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err = r.createOwned(ctx, vm, secret); err != nil {
 		return err
 	}
 	bootSpec, err := json.Marshal(vm.Spec)
 	if err != nil {
 		return err
 	}
-	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: vm.Namespace, Labels: map[string]string{Label: string(vm.UID), "vm.roamvm.io/name": vm.Name}, Annotations: map[string]string{SecretAnnotation: name, SpecAnnotation: string(bootSpec)}, Finalizers: []string{Finalizer}}}
-	for key, value := range vm.Labels {
-		if key != Label && key != "vm.roamvm.io/name" {
-			pod.Labels[key] = value
-		}
-	}
+	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: vm.Namespace, Labels: map[string]string{}, Annotations: map[string]string{SecretAnnotation: name, SpecAnnotation: string(bootSpec)}, Finalizers: []string{Finalizer}}}
+	maps.Copy(pod.Labels, vm.Labels)
+	pod.Labels[Label] = string(vm.UID)
+	pod.Labels["vm.roamvm.io/name"] = vm.Name
 	dirType := core.HostPathDirectoryOrCreate
 	root := r.Root
 	if root == "" {
@@ -299,46 +289,55 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		ImagePullSecrets: vm.Spec.ImagePullSecrets,
 		NodeSelector:     vm.Spec.NodeSelector, Affinity: vm.Spec.Affinity, Tolerations: vm.Spec.Tolerations, TopologySpreadConstraints: vm.Spec.TopologySpreadConstraints,
 		SecurityContext: &core.PodSecurityContext{Sysctls: []core.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}, {Name: "net.ipv4.conf.all.route_localnet", Value: "1"}}},
-		Volumes: []core.Volume{
-			{Name: "tmp", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{}}},
-			{Name: "socket", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: "/run/roamvm", Type: &dirType}}},
-			{Name: "images", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: root + "/images", Type: &dirType}}},
-			{Name: "working", VolumeSource: core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: root + "/running/" + string(vm.UID), Type: &dirType}}},
-			{Name: "auth", VolumeSource: core.VolumeSource{Secret: &core.SecretVolumeSource{SecretName: name, DefaultMode: ptr.To(int32(0400))}}},
-		},
 		Containers: []core.Container{{Name: "runner", Image: r.Image, ImagePullPolicy: core.PullIfNotPresent, Args: []string{"runner"}, Resources: resources,
 			Env:             []core.EnvVar{{Name: "POD_NAME", Value: name}, {Name: "POD_NAMESPACE", Value: vm.Namespace}, {Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "metadata.uid"}}}},
 			SecurityContext: &core.SecurityContext{RunAsUser: ptr.To(int64(0)), AllowPrivilegeEscalation: ptr.To(false), Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}, Add: []core.Capability{"NET_ADMIN", "NET_RAW"}}, SeccompProfile: &core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}},
-			VolumeMounts:    []core.VolumeMount{{Name: "tmp", MountPath: "/tmp"}, {Name: "socket", MountPath: "/run/roamvm", ReadOnly: true}, {Name: "images", MountPath: root + "/images", ReadOnly: true}, {Name: "working", MountPath: root + "/running/" + string(vm.UID)}, {Name: "auth", MountPath: "/run/roamvm-auth", ReadOnly: true}},
 			ReadinessProbe:  &core.Probe{ProbeHandler: core.ProbeHandler{Exec: &core.ExecAction{Command: []string{"/bin/sh", "-c", "test -f /tmp/guest-ready"}}}, PeriodSeconds: 1, FailureThreshold: 1},
 		}},
 	}
+	runner := &pod.Spec.Containers[0]
+	mount := func(name, path string, source core.VolumeSource, readOnly bool) {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: name, VolumeSource: source})
+		runner.VolumeMounts = append(runner.VolumeMounts, core.VolumeMount{Name: name, MountPath: path, ReadOnly: readOnly})
+	}
+	mount("tmp", "/tmp", core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{}}, false)
+	for _, disk := range []core.VolumeMount{
+		{Name: "socket", MountPath: "/run/roamvm", ReadOnly: true},
+		{Name: "images", MountPath: root + "/images", ReadOnly: true},
+		{Name: "working", MountPath: root + "/running/" + string(vm.UID)},
+	} {
+		mount(disk.Name, disk.MountPath, core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: disk.MountPath, Type: &dirType}}, disk.ReadOnly)
+	}
+	mount("auth", "/run/roamvm-auth", core.VolumeSource{Secret: &core.SecretVolumeSource{SecretName: name, DefaultMode: ptr.To(int32(0400))}}, true)
 	if vm.Spec.Hugepages != "" || len(vm.Spec.Devices) > 0 {
-		pod.Spec.Containers[0].SecurityContext.Capabilities.Add = append(pod.Spec.Containers[0].SecurityContext.Capabilities.Add, "IPC_LOCK")
+		runner.SecurityContext.Capabilities.Add = append(runner.SecurityContext.Capabilities.Add, "IPC_LOCK")
 	}
 	if len(vm.Spec.Devices) > 0 {
-		pod.Spec.Containers[0].SecurityContext.Capabilities.Add = append(pod.Spec.Containers[0].SecurityContext.Capabilities.Add, "SYS_RESOURCE")
+		runner.SecurityContext.Capabilities.Add = append(runner.SecurityContext.Capabilities.Add, "SYS_RESOURCE")
 	}
 	for _, d := range vm.Spec.Disks {
-		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: d.Name, VolumeSource: core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: d.ClaimName, ReadOnly: d.ReadOnly}}})
+		source := core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: d.ClaimName, ReadOnly: d.ReadOnly}}
 		if d.VolumeMode == "Block" {
-			pod.Spec.Containers[0].VolumeDevices = append(pod.Spec.Containers[0].VolumeDevices, core.VolumeDevice{Name: d.Name, DevicePath: "/dev/disks/" + d.Name})
+			pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: d.Name, VolumeSource: source})
+			runner.VolumeDevices = append(runner.VolumeDevices, core.VolumeDevice{Name: d.Name, DevicePath: "/dev/disks/" + d.Name})
 		} else {
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, core.VolumeMount{Name: d.Name, MountPath: "/disks/" + d.Name, ReadOnly: d.ReadOnly})
+			mount(d.Name, "/disks/"+d.Name, source, d.ReadOnly)
 		}
 	}
 	if vm.Spec.Config != nil {
-		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "config", VolumeSource: core.VolumeSource{Projected: vm.Spec.Config}})
-		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, core.VolumeMount{Name: "config", MountPath: "/config", ReadOnly: true})
+		mount("config", "/config", core.VolumeSource{Projected: vm.Spec.Config}, true)
 	}
 	for _, disk := range vm.Spec.ConfigDisks {
-		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "config-" + disk.Name, VolumeSource: core.VolumeSource{Projected: &disk.Projection}})
-		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, core.VolumeMount{Name: "config-" + disk.Name, MountPath: "/config-disks/" + disk.Name, ReadOnly: true})
+		mount("config-"+disk.Name, "/config-disks/"+disk.Name, core.VolumeSource{Projected: &disk.Projection}, true)
 	}
-	if err = controllerutil.SetControllerReference(vm, pod, r.Scheme); err != nil {
+	return r.createOwned(ctx, vm, pod)
+}
+
+func (r *Reconciler) createOwned(ctx context.Context, vm *api.VirtualMachine, object client.Object) error {
+	if err := controllerutil.SetControllerReference(vm, object, r.Scheme); err != nil {
 		return err
 	}
-	if err = r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := r.Create(ctx, object); !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
