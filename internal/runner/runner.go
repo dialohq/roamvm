@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -67,6 +68,7 @@ func (c *Client) status(phase, message string) {
 }
 
 func Run() error {
+	started := time.Now()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread() // Keep the Pdeathsig parent thread alive.
 	token, err := os.ReadFile("/run/roamvm-auth/token")
@@ -100,6 +102,7 @@ func Run() error {
 		return errors.New("daemon returned no prepared VM")
 	}
 	p := response.Prepared
+	log.Printf("startup stage=prepared elapsed=%s", time.Since(started))
 	lock, err := os.OpenFile(filepath.Join(p.Dir, "runner.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return err
@@ -114,14 +117,10 @@ func Run() error {
 		c.status("Error", err.Error())
 		return err
 	}
+	log.Printf("startup stage=network elapsed=%s", time.Since(started))
 	dnsExited := make(chan error, 1)
 	go func() { dnsExited <- dns.Wait() }()
 	defer dns.Process.Kill()
-	select {
-	case e := <-dnsExited:
-		return fmt.Errorf("DHCP server failed: %w", e)
-	case <-time.After(100 * time.Millisecond):
-	}
 	socket := filepath.Join(p.Dir, "ch.sock")
 	_ = os.Remove(socket)
 	memory, err := resource.ParseQuantity(p.Spec.Memory)
@@ -141,7 +140,7 @@ func Run() error {
 			return e
 		}
 	}
-	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on,direct=on", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
+	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on,direct=off", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
 	if _, e := os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); e == nil {
 		cmdline := p.Base.Manifest.Cmdline
 		if p.Spec.Hostname != "" {
@@ -190,6 +189,7 @@ func Run() error {
 	if err = hypervisor.Start(); err != nil {
 		return err
 	}
+	log.Printf("startup stage=hypervisor elapsed=%s", time.Since(started))
 	defer hypervisor.Process.Kill()
 	exited := make(chan error, 1)
 	go func() { exited <- hypervisor.Wait() }()
@@ -206,10 +206,12 @@ func Run() error {
 	ch := unixHTTP(socket)
 	ch.Timeout = 3 * time.Second
 	lastContact := time.Now()
+	var lastHeartbeat time.Time
+	stopRequested := false
 	var stopping time.Time
 	powerSent := false
 	runningReported := false
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {
@@ -225,13 +227,17 @@ func Run() error {
 			}
 			return finish(c)
 		case <-tick.C:
-			heartbeatCtx, done := context.WithTimeout(context.Background(), 3*time.Second)
-			h, e := c.Call(heartbeatCtx, "heartbeat")
-			done()
-			if e == nil {
-				lastContact = time.Now()
+			if time.Since(lastHeartbeat) >= time.Second {
+				lastHeartbeat = time.Now()
+				heartbeatCtx, done := context.WithTimeout(context.Background(), 3*time.Second)
+				h, e := c.Call(heartbeatCtx, "heartbeat")
+				done()
+				if e == nil {
+					lastContact = time.Now()
+				}
+				stopRequested = h.Stop
 			}
-			shouldStop := h.Stop || ctx.Err() != nil || time.Since(lastContact) > 30*time.Second
+			shouldStop := stopRequested || ctx.Err() != nil || time.Since(lastContact) > 30*time.Second
 			if shouldStop && stopping.IsZero() {
 				stopping = time.Now()
 				setReady(false)
@@ -239,7 +245,7 @@ func Run() error {
 			}
 			if !stopping.IsZero() {
 				if !powerSent {
-					if e = chCall(ch, "PUT", "vm.power-button", nil); e == nil {
+					if e := chCall(ch, "PUT", "vm.power-button", nil); e == nil {
 						powerSent = true
 					}
 				}
@@ -255,8 +261,10 @@ func Run() error {
 					conn.Close()
 					setReady(true)
 					if !runningReported {
+						log.Printf("startup stage=guest-ready elapsed=%s", time.Since(started))
 						c.status("Running", "")
 						runningReported = true
+						tick.Reset(time.Second)
 					}
 				} else {
 					setReady(false)
@@ -265,7 +273,7 @@ func Run() error {
 			var info struct {
 				State string `json:"state"`
 			}
-			if e = chCall(ch, "GET", "vm.info", &info); e == nil && strings.EqualFold(info.State, "Shutdown") {
+			if e := chCall(ch, "GET", "vm.info", &info); e == nil && strings.EqualFold(info.State, "Shutdown") {
 				_ = chCall(ch, "PUT", "vmm.shutdown", nil)
 			}
 		}

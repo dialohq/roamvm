@@ -2,8 +2,8 @@
 
 The test lab is a dedicated `kind-roamvm` cluster: one control plane and two worker
 containers on one physical Linux machine. Workers receive real `/dev/kvm`; their
-runtime disks are bind-mounted directories on the host's NVMe-backed ext4
-filesystem. They are separate scheduling targets, not separate physical servers.
+runtime disks are bind-mounted directories on the host's ext4 filesystem. The
+benchmark host exposes Amazon EBS through NVMe; it is not local NVMe storage. They are separate scheduling targets, not separate physical servers.
 The registry and MinIO are separate containers on the kind Docker network, with
 host ports bound only to loopback.
 
@@ -51,6 +51,11 @@ python3 test/oversubscription.py --image "$(cat .lab/guest-ref)" \
   --node roamvm-worker2
 # After creating an SSH-enabled VM from your own image, initially Stopped:
 python3 test/existing-vm.py --vm YOUR_VM_NAME
+# Controlled create/restore benchmark, timed through an actual guest response:
+python3 test/startup.py --image "$(cat .lab/guest-ref)" \
+  --node roamvm-worker --runs 5 --output test-results/startup.json
+# SSH-enabled images: add --port 22 --cpus 4 --memory 4Gi.
+# --cold-cache evicts only this image on the idle test node before each start.
 ```
 
 The integration scripts refuse unrelated Kubernetes contexts. The Kubernetes
@@ -111,28 +116,38 @@ production S3 latency/durability and physical-machine failure have **not** been
 qualified. CI runs unit/race/disk tests, schema regeneration and container build;
 it does not pretend ordinary hosted runners run these KVM integration tests.
 
-## Measurements
+## Startup measurements
 
-The small fixture has a 256 MiB virtual root. With cached bases and no reserved
-VMs, repeated completed runs measured request-to-Service-ready starts of
-5.0–6.1 seconds, and graceful durable stops of 4.0–4.9 seconds. The first request
-immediately following the final controller rollout took 21.6 seconds: the
-controller logs show it was waiting to acquire the Kubernetes leader lease for
-most of the extra time. Do not count that deployment transition as a 6-second
-start. About 1 MiB of
-random guest data produced checkpoints of 1.9–3.1 MiB after filesystem metadata
-and repeated writes. These include scheduling, Pod startup, disk restore, guest
-boot and readiness—not just hypervisor launch time.
+Measure from the Kubernetes create/start request to an HTTP response or SSH
+banner through a NodePort Service. `test/startup.py` records scheduling, runner,
+and VM readiness observations separately, saves startup logs, and durably stops
+between boots. No VM pool, paused guests, or reserved guest RAM is used. A cached
+base is still a cold VM boot; `--cold-cache` includes pulling the base again.
 
-The existing 16 GiB virtual NixOS image (about 2.1 GiB base data) started to SSH
-readiness in **6.82 seconds** in each of two final runs. Durable stops took
-**2.96 and 2.99 seconds**, producing 13.9 and 15.3 MiB checkpoints. The base was
-cached; these are cold VM starts, not cold registry downloads. SSH host keys
-matched across the two runs. The NixOS test restored on the same worker; the
-smaller guest separately exercised cross-worker placement and failure recovery.
+The controlled September 2026 comparison uses baseline `4221e6b` and the optimized
+Nix-built runtime on the same worker. The Nix guest has four vCPUs and 4 GiB RAM;
+the small test guest has two vCPUs and 512 MiB. Medians include the first create
+and subsequent checkpoint restores:
 
-The local object store was RAM-backed for this run. These numbers do not predict
-WAN/object-store performance or power-loss durability, and are not a controlled
-comparison with KubeVirt. Larger changed disks require proportionally more
-upload/download work. See the per-operation results in `test-results/` for the
-latest run; no warm VM pool or preallocated guest RAM was used.
+| Actual guest response | Before | After | Runs per version |
+| --- | ---: | ---: | ---: |
+| Small guest, cached base | 5.814 s | 2.104 s | 5 |
+| NixOS SSH, cached base | 7.880 s | 4.021 s | 3 |
+| NixOS SSH, uncached base | 23.518 s | 19.085 s | 3 |
+
+The small guest's final range was 2.076–3.151 seconds; report the slower initial
+Service setup along with the median. The runtime changes disable dnsmasq's
+redundant address-conflict ping on the one-guest TAP, probe startup readiness at
+100 ms while retaining one-second ownership heartbeats, and use buffered root
+disk I/O. Guest flushes and checkpoint integrity/commit rules remain unchanged.
+Startup logs expose base download, prepare, network, hypervisor and guest-ready
+stages. The tested full Nix guest also passed a memory-pressure workload holding
+about 3.4 GB, reading 851 MB, and writing/fsyncing 32 MiB with no cgroup OOM.
+
+Base download remains bandwidth-bound: this worker uses Amazon EBS exposed as
+NVMe, not physical local NVMe. The registry and object store are local; the
+object store is RAM-backed. These measurements do not predict WAN performance,
+production storage durability, or physical-host failure, and are not a controlled
+comparison with KubeVirt. Larger writable checkpoints add transfer work. Wait for
+controller leadership after a rollout before benchmarking; lease handover is a
+deployment transition, separate from steady-state VM startup.

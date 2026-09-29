@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -198,6 +199,7 @@ func (s *Server) save(p Prepared) error {
 	return os.Rename(path+".partial", path)
 }
 func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) (*Prepared, error) {
+	started := time.Now()
 	if vm.Spec.PowerState != "Running" || vm.DeletionTimestamp != nil || pod.DeletionTimestamp != nil {
 		return nil, errors.New("VM no longer requests a start")
 	}
@@ -224,6 +226,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("startup pod=%s stage=base elapsed=%s", pod.Name, time.Since(started))
 	session, err := s.State.Acquire(ctx, string(vm.UID), vm.Spec.Image, string(pod.UID), s.Node)
 	if err != nil {
 		return nil, err
@@ -253,6 +256,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
+	log.Printf("startup pod=%s stage=prepared elapsed=%s", pod.Name, time.Since(started))
 	return &prepared, nil
 }
 

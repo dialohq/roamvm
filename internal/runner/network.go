@@ -64,7 +64,8 @@ func network(ctx context.Context) (*exec.Cmd, error) {
 			search = strings.Join(f[1:], ",")
 		}
 	}
-	args := []string{"--no-daemon", "--log-facility=-", "--port=0", "--interface=vm-tap", "--bind-interfaces", "--except-interface=lo", "--dhcp-range=" + GuestIP + "," + GuestIP + ",255.255.255.252,12h", "--dhcp-option=option:router," + gatewayIP, "--dhcp-option=option:dns-server," + dns, "--dhcp-option=26," + mtu, "--dhcp-authoritative", "--user=root", "--no-hosts", "--pid-file=", "--dhcp-leasefile=/tmp/dnsmasq.leases"}
+	// Each private TAP has exactly one guest; address-conflict probes only delay DHCP.
+	args := []string{"--no-daemon", "--log-facility=-", "--port=0", "--interface=vm-tap", "--bind-interfaces", "--except-interface=lo", "--dhcp-range=" + GuestIP + "," + GuestIP + ",255.255.255.252,12h", "--dhcp-option=option:router," + gatewayIP, "--dhcp-option=option:dns-server," + dns, "--dhcp-option=26," + mtu, "--dhcp-authoritative", "--no-ping", "--user=root", "--no-hosts", "--pid-file=", "--dhcp-leasefile=/tmp/dnsmasq.leases"}
 	if search != "" {
 		args = append(args, "--dhcp-option=option:domain-search,"+search)
 	}
