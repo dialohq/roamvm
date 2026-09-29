@@ -66,7 +66,8 @@ allowedUnsafeSysctls:
 
 The first enables guest forwarding. The second lets Kubernetes port forwarding
 reach the guest through the Pod loopback address. Pods keep CNI's original IP,
-interface and routes. Guest virtio-net uses DHCP, TAP, and NAT inside the Pod.
+interface and routes. Guest virtio-net uses DHCP, TAP, and NAT inside the Pod. Its private transit
+subnet is `192.168.127.0/30`; do not use those addresses for external dependencies.
 The runtime grants NET_ADMIN/NET_RAW to the runner; it is not a privileged Pod.
 Namespaces admitting VMs must allow its capabilities, sysctls and hostPath mounts.
 
