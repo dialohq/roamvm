@@ -26,9 +26,7 @@ make test
 
 `up.py` builds the actual multi-stage Dockerfile, loads it into kind, creates the
 bucket/credentials, installs the generated CRD and controllers, and checks their
-rollouts. `--skip-build` uses an already built `roamvm:dev` image. The current
-workspace's original isolated Docker daemon is selected by
-`source /dev/shm/roamvm-lab/env`; that machine-local file is not part of the repo.
+rollouts. `--skip-build` uses an already built `roamvm:dev` image. 
 
 Build the small, deliberately unauthenticated **test-only** VM fixture using a
 matching Linux kernel and module tree, a static BusyBox, and Linux's
@@ -52,7 +50,8 @@ python3 test/kubernetes.py --image "$(cat .lab/guest-ref)" \
 python3 test/existing-vm.py --vm YOUR_VM_NAME
 ```
 
-Both integration scripts refuse a Kubernetes context other than `kind-roamvm`.
+The integration scripts refuse unrelated Kubernetes contexts. The Kubernetes
+suite also accepts `kind-roamvm-cilium` for CNI policy testing.
 `--node-failure` kills one **kind worker container**, verifies fenced recovery,
 and restarts it. The scripts create uniquely named fixtures and leave stopped VM
 records/checkpoints for inspection. The configuration/PVC suite deletes its
@@ -85,7 +84,20 @@ Keep `.lab/s3` and `.lab-disks` until their contents are no longer needed.
 - Existing NixOS 26.05 disk: actual boot to SSH, ACPI shutdown, checkpoint commit,
   restart and identical generated SSH host key after restore.
 
-GPU/VFIO passthrough, reserved hugepages, block-mode PVCs, UEFI, Cilium policy,
+The Kubernetes suite also passed on Cilium **1.20.1** with kube-proxy replacement
+and `socketLB.hostNamespaceOnly=true`: Service/DNS reachability, port forwarding,
+deny/allow NetworkPolicy enforcement, projected configuration disks, secondary
+PVCs and durable deletion. Run it with `--check-network-policy` on a Cilium kind
+cluster named `roamvm-cilium`; disable kind's default CNI and kube-proxy before
+installing the Cilium chart. The default kind CNI does not enforce NetworkPolicy.
+
+Garage **2.3.0** passed the lifecycle/failure and Kubernetes integration suites
+using `STATE_BACKEND=kubernetes`. The real Kubernetes API ownership test uses
+`TEST_KUBERNETES_NAMESPACE=roamvm-system go test -race ./internal/state`: 32
+concurrent acquisitions admit exactly one owner, and an ownership change during
+upload prevents the old owner from committing its checkpoint.
+
+GPU/VFIO passthrough, reserved hugepages, block-mode PVCs, UEFI,
 production S3 latency/durability and physical-machine failure have **not** been
 qualified. CI runs unit/race/disk tests, schema regeneration and container build;
 it does not pretend ordinary hosted runners run these KVM integration tests.

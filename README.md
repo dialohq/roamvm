@@ -161,7 +161,9 @@ create a new VM to change the base, or install packages into its current overlay
 - Services, DNS, port-forwarding and CNI policy operate on the Pod endpoint.
 - `config` accepts Kubernetes projected volume sources, converted to a read-only
   ISO labelled `ROAMVM_CONFIG`. Your guest mounts/consumes it. Changes appear next
-  boot. The runtime does not mutate the guest's root filesystem to inject settings.
+  boot. `configDisks` provides multiple separately labelled projected ISOs, for
+  guests that already consume bootstrap disks. The runtime does not mutate the
+  guest's root filesystem to inject settings.
 - Secondary PVCs use native Kubernetes attachment/mounting. Block PVCs are exposed
   as raw virtio disks; filesystem PVCs must contain `disk.img`. Their own storage
   topology/access-mode restrictions still apply. Only the root is portable via S3.

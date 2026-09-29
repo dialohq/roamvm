@@ -14,6 +14,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--image', required=True)
 p.add_argument('--lab-tool', required=True)
 p.add_argument('--output', default='test-results/kubernetes.json')
+p.add_argument('--check-network-policy', action='store_true', help='requires a CNI that enforces NetworkPolicy')
 a = p.parse_args()
 checks = []
 
@@ -53,7 +54,7 @@ def spec(name, **extra):
     return {'apiVersion': 'vm.roamvm.io/v1alpha1', 'kind': 'VirtualMachine', 'metadata': {'name': name},
             'spec': {'powerState': 'Running', 'image': a.image, 'cpus': 1, 'memory': '256Mi', 'readinessPort': 8080, **extra}}
 
-assert k('config', 'current-context').stdout.strip() == b'kind-roamvm'
+assert k('config', 'current-context').stdout.strip() in {b'kind-roamvm', b'kind-roamvm-cilium'}
 name = 'integration-' + str(int(time.time()))
 result = {'vm': name, 'image': a.image, 'checks': checks}
 try:
@@ -79,6 +80,11 @@ try:
     check('CRD rejects ambiguous configuration disk labels', k('apply', '--dry-run=server', '-f', '-', data=json.dumps(bad).encode(), check=False).returncode != 0)
     apply({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': name}, 'data': {'setting': 'first'}})
     apply({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': name}, 'stringData': {'credential': 'local-fixture-only'}})
+    network_client = name + '-client'
+    apply({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': network_client, 'labels': {'roamvm.test/client': name}}, 'spec': {
+        'containers': [{'name': 'curl', 'image': 'curlimages/curl:8.17.0', 'command': ['sh', '-c', 'exec sleep 1800']}],
+        'automountServiceAccountToken': False}})
+    k('wait', 'pod/' + network_client, '--for=condition=Ready', '--timeout=90s')
     apply({'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim', 'metadata': {'name': name}, 'spec': {
         'accessModes': ['ReadWriteOnce'], 'resources': {'requests': {'storage': '256Mi'}}}})
     helper = name + '-prepare'
@@ -99,10 +105,10 @@ try:
     uid = obj['metadata']['uid']
     k('wait', 'rvm/' + name, '--for=condition=Ready', '--timeout=30s')
     def http(path, body=None):
-        args = ['-n', 'roamvm-system', 'exec']
+        args = ['exec']
         if body is not None:
             args.append('-i')
-        args += ['deployment/controller', '--', 'curl', '-fsS', '--max-time', '10']
+        args += [network_client, '--', 'curl', '-fsS', '--max-time', '10', '--retry', '10', '--retry-connrefused', '--retry-delay', '1']
         if body is not None:
             args += ['--data-binary', '@-']
         return k(*args, f'http://{name}.default.svc.cluster.local:8080{path}', data=body).stdout
@@ -110,6 +116,29 @@ try:
     check('labelled configuration disks stay distinct and read-only', json.loads(http('/config-disks')) == {'agent': 'local-fixture-only', 'tool': 'first'})
     check('secondary PVC disk is mounted in guest', http('/secondary') == b'prepared-by-kubernetes')
     check('guest writes secondary PVC', http('/secondary', b'guest-pvc-write') == b'guest-pvc-write')
+    if a.check_network_policy:
+        policy = {'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy', 'metadata': {'name': name}, 'spec': {
+            'podSelector': {'matchLabels': {'vm.roamvm.io/name': name}}, 'policyTypes': ['Ingress'], 'ingress': []}}
+        apply(policy)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            denied = k('exec', network_client, '--', 'curl', '-fsS', '--max-time', '2',
+                       f'http://{name}.default.svc.cluster.local:8080/ready', check=False).returncode != 0
+            if denied:
+                break
+            time.sleep(.5)
+        check('CNI NetworkPolicy blocks guest ingress', denied)
+        policy['spec']['ingress'] = [{'from': [{'podSelector': {'matchLabels': {'roamvm.test/client': name}}}]}]
+        apply(policy)
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                check('CNI NetworkPolicy allows the selected client', http('/ready') == b'ready\n')
+                break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.5)
     patch = {'spec': {'image': a.image.split('@')[0] + '@sha256:' + '0' * 64}}
     check('CRD rejects changing base under a checkpoint', k('patch', 'rvm', name, '--type=merge', '-p', json.dumps(patch), check=False).returncode != 0)
     with tempfile.TemporaryFile() as log:
@@ -152,6 +181,9 @@ try:
     check('VM deletion waits for durable checkpoint', head['state'] == 'Stopped' and head['checkpoint']['generation'] == 2 and not head.get('owner'))
     check('deleting VM preserves independently owned PVC', k('get', 'pvc', name, check=False).returncode == 0)
     k('delete', 'pvc,configmap,secret,service', name, '--wait=true', '--timeout=30s')
+    k('delete', 'pod', network_client, '--grace-period=1', '--wait=true', '--timeout=30s')
+    if a.check_network_policy:
+        k('delete', 'networkpolicy', name)
     result['success'] = True
 finally:
     Path(a.output).parent.mkdir(parents=True, exist_ok=True)
