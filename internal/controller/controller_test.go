@@ -118,6 +118,75 @@ func TestRejectMemoryUnderAccounting(t *testing.T) {
 	}
 }
 
+func TestMemoryReservationAndOptionalLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, request, limit string
+		hugepages, invalid   bool
+	}{
+		{name: "default"},
+		{name: "larger reservation", request: "2Gi"},
+		{name: "explicit limit", limit: "3Gi"},
+		{name: "explicit request and limit", request: "2Gi", limit: "3Gi"},
+		{name: "limit below overhead allowance", limit: "1Gi", invalid: true},
+		{name: "limit below custom reservation", request: "3Gi", limit: "2Gi", invalid: true},
+		{name: "hugepages", hugepages: true},
+		{name: "hugepages with host limit", hugepages: true, limit: "1Gi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, vm := setup(t)
+			if tc.hugepages {
+				vm.Spec.Hugepages = "2Mi"
+			}
+			if tc.request != "" {
+				vm.Spec.Resources.Requests[core.ResourceMemory] = resource.MustParse(tc.request)
+			}
+			if tc.limit != "" {
+				vm.Spec.Resources.Limits = core.ResourceList{core.ResourceMemory: resource.MustParse(tc.limit)}
+			}
+			err := r.createPod(context.Background(), vm)
+			if tc.invalid {
+				if err == nil {
+					t.Fatal("invalid memory budget accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pod core.Pod
+			if err := r.Get(context.Background(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod); err != nil {
+				t.Fatal(err)
+			}
+			resources := pod.Spec.Containers[0].Resources
+			request := "1568Mi"
+			if tc.hugepages {
+				request = "512Mi"
+				pages := resources.Limits["hugepages-2Mi"]
+				if pages.Cmp(resource.MustParse("1Gi")) != 0 {
+					t.Fatal("hugepage limit lost")
+				}
+			}
+			if tc.request != "" {
+				request = tc.request
+			}
+			if resources.Requests.Memory().Cmp(resource.MustParse(request)) != 0 {
+				t.Fatal("memory reservation changed")
+			}
+			limit, present := resources.Limits[core.ResourceMemory]
+			if present != (tc.limit != "") || (present && limit.Cmp(resource.MustParse(tc.limit)) != 0) {
+				t.Fatal("memory limit must be explicitly requested")
+			}
+			var boot api.VirtualMachineSpec
+			if err := json.Unmarshal([]byte(pod.Annotations[SpecAnnotation]), &boot); err != nil {
+				t.Fatal(err)
+			}
+			if boot.Memory != "1Gi" {
+				t.Fatal("host memory budget changed guest RAM")
+			}
+		})
+	}
+}
+
 func TestCPUReservationDoesNotSetGuestSizeOrImplicitQuota(t *testing.T) {
 	for _, limit := range []string{"", "4", "500m"} {
 		t.Run("limit="+limit, func(t *testing.T) {

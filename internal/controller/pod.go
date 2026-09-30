@@ -71,13 +71,15 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			return fmt.Errorf("request VFIO device resource %s in resources.limits", key)
 		}
 	}
-	for _, list := range []core.ResourceList{resources.Requests, resources.Limits} {
-		list["vm.roamvm.io/kvm"] = resource.MustParse("1")
-		if q, ok := list[core.ResourceMemory]; !ok {
-			list[core.ResourceMemory] = required
-		} else if q.Cmp(required) < 0 {
-			return fmt.Errorf("memory requests and limits must cover guest RAM plus hypervisor overhead")
-		}
+	resources.Requests["vm.roamvm.io/kvm"] = resource.MustParse("1")
+	resources.Limits["vm.roamvm.io/kvm"] = resource.MustParse("1")
+	if q, ok := resources.Requests[core.ResourceMemory]; !ok {
+		resources.Requests[core.ResourceMemory] = required
+	} else if q.Cmp(required) < 0 {
+		return fmt.Errorf("memory request must cover guest RAM plus hypervisor overhead")
+	}
+	if q, ok := resources.Limits[core.ResourceMemory]; ok && q.Cmp(resources.Requests[core.ResourceMemory]) < 0 {
+		return fmt.Errorf("memory limit must cover the memory request")
 	}
 	if _, ok := resources.Requests[core.ResourceCPU]; !ok {
 		resources.Requests[core.ResourceCPU] = *resource.NewQuantity(int64(vm.Spec.CPUs), resource.DecimalSI)

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestLocalCrashRecovery(t *testing.T) {
@@ -19,6 +20,9 @@ func TestLocalCrashRecovery(t *testing.T) {
 			l.networkClient()
 			l.storage()
 			v := l.spec("crash")
+			if failure == "oom" {
+				v.Spec.Resources.Limits = core.ResourceList{core.ResourceMemory: resource.MustParse("2Gi")}
+			}
 			l.create(v)
 			l.service(v, core.ServiceTypeClusterIP)
 			v = l.ready(v.Name)
@@ -28,10 +32,17 @@ func TestLocalCrashRecovery(t *testing.T) {
 				t.Fatal("test requires no previous checkpoint")
 			}
 			pod := l.pod(v.Status.PodName)
+			memoryMax, err := l.exec(pod.Name, "runner", nil, "/bin/sh", "-c", "cat /sys/fs/cgroup/memory.max")
+			must(t, err)
+			expectedMax := "max"
+			if failure == "oom" {
+				expectedMax = "2147483648"
+			}
+			equal(t, "runner memory limit", strings.TrimSpace(string(memoryMax)), expectedMax)
 			command := `for p in /proc/[0-9]*; do read -r name < "$p/comm" || continue; case "$name" in cloud-hypervis*) kill -KILL "${p##*/}"; exit 0;; esac; done; exit 1`
 
 			if failure == "oom" {
-				command = `awk 'BEGIN { s="xxxxxxxxxxxxxxxx"; for(i=0;i<30;i++) s=s s; print length(s) }'`
+				command = `awk 'BEGIN { s="xxxxxxxxxxxxxxxx"; for(i=0;i<16;i++) s=s s; for(i=0;i<4096;i++) a[i]=s i }'`
 			}
 			if failure == "runner" {
 				l.killContainer(pod, "runner")

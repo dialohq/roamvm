@@ -40,6 +40,24 @@ exec or modification in a VM namespace is privileged access to runtime credentia
 VM-only users should receive VM-resource permissions, not those Pod permissions.
 There is no hardened multi-tenant isolation claim.
 
+## Memory accounting
+
+`spec.memory` controls the guest's RAM. The runner requests that RAM plus
+`512 MiB + guest RAM / 32` for host overhead. This allowance is a conservative
+scheduling estimate, not a calibrated maximum. Hugepage-backed guests reserve
+their guest RAM through native hugepage resources and 512 MiB of ordinary RAM.
+
+The runner has no memory limit by default, so host overhead can exceed its
+reservation without hitting a per-container memory ceiling. Guest RAM remains
+bounded by the hypervisor configuration. An explicit `spec.resources.limits.memory`
+is preserved and must cover the memory request. Admission policies can still
+inject limits; inspect the admitted Pod when verifying this behavior.
+
+Node memory pressure can still evict or kill a VM. Reserve capacity for node
+services and monitor aggregate memory usage; removing the runner's limit does
+not guarantee unlimited physical memory. The checkpoint runtime is a separate
+container and retains its own 128 MiB request and 512 MiB limit.
+
 ## Durable state
 
 The head is authoritative; VM status is a projection. The head identifies the
