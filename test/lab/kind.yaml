@@ -1,0 +1,14 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+    labels: {vm.roamvm.io/enabled: "true"}
+  - role: worker
+    labels: {vm.roamvm.io/enabled: "true"}
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    allowedUnsafeSysctls:
+      - net.ipv4.ip_forward
+      - net.ipv4.conf.all.route_localnet

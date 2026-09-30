@@ -1,78 +1,91 @@
 # Local validation
 
-The test lab is a dedicated `kind-roamvm` cluster: one control plane and two worker
-containers on one physical Linux machine. Kind's privileged nodes expose real
-`/dev/kvm`; the device plugin runs as a node systemd service. VM Pods use native
-read-only image volumes and generic ephemeral PVCs from kind's local-path storage
-class. Production uses the existing OpenEBS thin CSI storage class. The registry
-and MinIO are separate containers, with host ports bound only to loopback.
+The lab uses Docker Compose for the registry and S3 fixture, kind for a three-node
+Kubernetes cluster, Kustomize for installation, Nix for the guest image, and Go's
+standard test and benchmark runners. It requires a Linux x86-64 host with real
+`/dev/kvm`; VM execution is never mocked.
 
-## Repeat the tests
+VM Pods use read-only image volumes and generic ephemeral PVCs from kind's
+local-path storage class. Production uses OpenEBS thin CSI storage. The device
+plugin runs as a systemd service inside each kind worker, matching its node-level
+installation in production. The small install script only connects those pieces;
+it does not implement a provisioner or test runner.
 
-Prerequisites: Docker, kind 0.31.0, kubectl, Go 1.26.7, Python 3, make, qemu-img,
-mke2fs, modprobe, cpio, gzip, xz/zstd, and a working KVM device. Supply a Linux
-x86-64 MinIO binary supporting conditional multipart completion; the tested lab
-used 2025-10-15T17-29-55Z. This is a test dependency, not the prescribed production
-object store. Registry and object-store credentials generated here are local
-fixtures only.
+## Run the lab
+
+Install Nix with flakes enabled and a working Docker daemon, then:
 
 ```sh
-python3 test/lab/up.py --minio-binary /path/to/minio
-# Existing lab: append --reuse. Nothing is deleted automatically.
-source .lab/env
-export PATH="$PWD/bin:$PATH"
+nix develop
+make lab-up
+make lab-guest
+source test/lab/env
 make test
+make integration
 ```
 
-Go uses gofumpt and Python uses Ruff 0.15.14. Run `make fmt` before committing;
-`make fmt-check` checks formatting and Python imports without changing files.
-Format Nix with `alejandra nix/`. CI checks formatting, tests and generated schemas.
+`lab-up` creates **kind-roamvm-test** and refuses to replace an existing cluster.
+To update an existing lab, use `make image lab-install`. Compose health checks and
+its bucket initialization service handle dependency ordering. `make lab-guest`
+builds a fixed kernel/module/BusyBox fixture and publishes its OCI digest; no
+manual kernel paths or host mounts are required.
 
-`up.py` builds the actual multi-stage Dockerfile, loads it into kind, creates the
-bucket/credentials, installs the generated CRD, controller and node device-plugin service, and checks
-their rollouts. `--skip-build` uses an already built `roamvm:dev` image.
+Registry and S3 ports bind to loopback (`15001` and `19001`). Their Compose named
+volumes survive `make lab-down`; `docker compose -f test/lab/compose.yaml down -v`
+explicitly discards them. Credentials in `test/lab` are public test fixtures.
+The pinned MinIO package is an unmaintained **test-only compatibility fixture**
+with known vulnerabilities; the Nix allowance is confined to the development
+flake. Do not expose it or deploy it as your object store. Production Garage and
+Kubernetes metadata remain supported independently of this fixture.
 
-Build the small, deliberately unauthenticated **test-only** VM fixture using a
-matching Linux kernel and module tree, a static BusyBox, and Linux's
-`scripts/extract-vmlinux` script:
+The default suite includes lifecycle/failure, Kubernetes integration, and CPU
+oversubscription tests. `test/lab/env` selects an idle worker for the CPU test.
+Optional cases are explicit:
 
 ```sh
-python3 test/guest/build.py --out .lab/guest \
-  --kernel /path/to/bzImage --modules /path/to/module-root \
-  --kernel-version YOUR_KERNEL_VERSION \
-  --busybox /path/to/static/busybox \
-  --extract-vmlinux /path/to/linux/scripts/extract-vmlinux
-roamvm image-push --plain-http --tag "$LAB_REGISTRY/test-guest:local" \
-  --tar .lab/guest/guest.tar > .lab/guest-ref
+# Kills a kind worker container, proves fencing, and restores it afterward.
+ROAMVM_TEST_NODE_FAILURE=1 make integration
 
-go test -race ./internal/state -run TestS3 -count=1
-python3 test/e2e.py --image "$(cat .lab/guest-ref)" \
-  --lab-tool bin/lab-tool --node-failure
-python3 test/kubernetes.py --image "$(cat .lab/guest-ref)" \
-  --lab-tool bin/lab-tool
-# Use an idle worker; this temporarily restricts its CPUs and kubelet reservation.
-python3 test/oversubscription.py --image "$(cat .lab/guest-ref)" \
-  --node roamvm-worker2
-# After creating an SSH-enabled VM from your own image, initially Stopped:
-python3 test/existing-vm.py --vm YOUR_VM_NAME
-# Controlled create/restore benchmark, timed through an actual guest response:
-python3 test/startup.py --image "$(cat .lab/guest-ref)" \
-  --node roamvm-worker --runs 5 --output test-results/startup.json
-# SSH-enabled images: add --port 22 --cpus 4 --memory 4Gi.
-# --cold-cache evicts only this image on the idle test node before each start.
+# On the separate kind-roamvm-cilium lab with an enforcing CNI:
+ROAMVM_TEST_NETWORK_POLICY=1 go test -tags=integration -run TestKubernetes -v ./test/integration
+
+# An existing stopped SSH-enabled VM; the test leaves it stopped.
+ROAMVM_TEST_EXISTING_VM=my-vm go test -tags=integration -run TestExistingVM -v ./test/integration
+
+# Standard machine-readable test output, usable by Go test reporters.
+go test -json -tags=integration -count=1 -timeout=30m ./test/integration > test-results.json
+
+# Actual guest response, including scheduling and storage provisioning.
+make benchmark
+ROAMVM_TEST_COLD_CACHE=1 make benchmark
+# For your own SSH image, also set ROAMVM_TEST_IMAGE, ROAMVM_TEST_PORT=22,
+# ROAMVM_TEST_CPUS=4 and ROAMVM_TEST_MEMORY=4Gi.
 ```
 
-The integration scripts refuse unrelated Kubernetes contexts. The Kubernetes
-suite also accepts `kind-roamvm-cilium` for CNI policy testing.
-`--node-failure` kills one **kind worker container**, verifies fenced recovery,
-and restarts it. The scripts create uniquely named fixtures and leave stopped VM
-records/checkpoints for inspection. The configuration/PVC suite deletes its
-successful fixtures. Failed fixtures remain for debugging. JSON results are in
-`test-results/` and intentionally ignored by Git.
+Tests refuse unrelated contexts. Node failure and CPU tests also reject workers
+with other VMs. CPU limits/kubelet configuration and fault injections are restored
+with `t.Cleanup`; successful fixtures are removed, and failed fixtures are retained
+for debugging. Stop or delete failed VM fixtures before repeating CPU tests.
+Checkpoints remain in the test bucket after VM deletion, as in the runtime's
+normal retention model. Tests run sequentially; do not run multiple suites against
+the same lab concurrently.
 
-To remove the lab explicitly, first stop any VM whose state you care about, then
-`kind delete cluster --name roamvm` and `docker rm -f roamvm-registry roamvm-s3`.
-Keep `.lab/s3` until its checkpoints are no longer needed.
+S3 state tests remain native Go tests:
+
+```sh
+go test -race -count=1 ./internal/state -run TestS3
+TEST_KUBERNETES_NAMESPACE=roamvm-system go test -race -count=1 ./internal/state
+```
+
+For a Garage lab, provide its fixture credentials and set
+`STATE_BACKEND=kubernetes STATE_NAMESPACE=roamvm-system`, matching the runtime's
+object-store Secret. Go tests use the Kubernetes and S3 clients directly instead
+of shelling out to a separate state-inspection program.
+
+`make fmt` / `make fmt-check` use gofumpt. Format Nix with
+`alejandra flake.nix nix test/guest/default.nix`. CI runs unit/race/disk tests,
+compiles the real-VM suites without executing them, checks generated schemas, and
+builds the container. KVM tests require the local lab.
 
 ## Coverage
 
@@ -110,7 +123,7 @@ Keep `.lab/s3` until its checkpoints are no longer needed.
 The Kubernetes suite also passed on Cilium **1.20.1** with kube-proxy replacement
 and `socketLB.hostNamespaceOnly=true`: Service/DNS reachability, port forwarding,
 deny/allow NetworkPolicy enforcement, projected configuration disks, secondary
-PVCs and durable deletion. Run it with `--check-network-policy` on a Cilium kind
+PVCs and durable deletion. Run it with `ROAMVM_TEST_NETWORK_POLICY=1` on a Cilium kind
 cluster named `roamvm-cilium`; disable kind's default CNI and kube-proxy before
 installing the Cilium chart. The default kind CNI does not enforce NetworkPolicy.
 
@@ -152,10 +165,10 @@ The following numbers are historical: they describe `fd742d3`, before switching
 from hostPath to PVCs. They are not the startup claim for the PVC implementation.
 
 Measure from the Kubernetes create/start request to an HTTP response or SSH
-banner through a NodePort Service. `test/startup.py` records scheduling, runner,
-and VM readiness observations separately, saves startup logs, and durably stops
+banner through a NodePort Service. `BenchmarkStartup` records scheduling, runner,
+and VM readiness observations separately, reports startup logs, and durably stops
 between boots. No VM pool, paused guests, or reserved guest RAM is used. A cached
-base is still a cold VM boot; `--cold-cache` includes pulling the base again.
+base is still a cold VM boot; `ROAMVM_TEST_COLD_CACHE=1` includes pulling the base again.
 
 The controlled September 2026 comparison uses baseline `4221e6b` and the optimized
 Nix-built runtime on the same worker. The Nix guest has four vCPUs and 4 GiB RAM;

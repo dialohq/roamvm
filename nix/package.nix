@@ -19,7 +19,7 @@ in
       root = ../.;
       fileset = pkgs.lib.fileset.unions [../go.mod ../go.sum ../api ../cmd ../internal];
     };
-    vendorHash = "sha256-RgcIlgEK4qtQ7YJhaOS1w6xwffXcfnCBMNgqwveejPw=";
+    vendorHash = "sha256-awYbt/g5JGU/k4YAP5dGxaBYh0p9mqVXEs+sX1DJVCk=";
     subPackages = ["cmd/roamvm"];
     nativeBuildInputs = [pkgs.makeWrapper];
     nativeCheckInputs = [pkgs.qemu-utils];
