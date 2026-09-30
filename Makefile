@@ -15,7 +15,7 @@ build:
 test:
 	go vet ./...
 	go test -race ./...
-	go test -tags=integration ./test/integration -run '^$$'
+	go test -tags=integration ./internal/runner ./test/integration -run '^$$'
 
 generate:
 	go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1 object paths=./api/... crd output:crd:artifacts:config=config/crd

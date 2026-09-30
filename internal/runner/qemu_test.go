@@ -21,7 +21,7 @@ import (
 func TestQEMUBlockGraphAndResources(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "vmlinux"), []byte("kernel"), 0o600))
-	p := &daemon.Prepared{Dir: dir, Base: images.Base{Dir: dir, Manifest: images.Manifest{Format: "qcow2", Cmdline: "root=/dev/vda"}}, Spec: api.VirtualMachineSpec{CPUs: 8, Memory: "2Gi", Hugepages: "2Mi", Hostname: "devbox", Disks: []api.SecondaryDisk{{Name: "shared", VolumeMode: "Filesystem", ReadOnly: true}}, Devices: []api.Device{{PCIAddress: "0000:01:00.0"}}}}
+	p := &daemon.Prepared{Dir: dir, Base: images.Base{Dir: dir, Manifest: images.Manifest{Format: "qcow2", Cmdline: "root=/dev/vda"}}, Spec: api.VirtualMachineSpec{CPUs: 8, Memory: "2Gi", Hugepages: "2Mi", Hostname: "devbox", Disks: []api.SecondaryDisk{{Name: "shared", VolumeMode: "Filesystem", ReadOnly: true}, {Name: "data", VolumeMode: "Filesystem"}}, Devices: []api.Device{{PCIAddress: "0000:01:00.0"}}}}
 	args, err := qemuArgs(t.Context(), p, filepath.Join(dir, "qmp"))
 	require.NoError(t, err)
 	text := strings.Join(args, " ")
@@ -38,10 +38,15 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 			nodes = append(nodes, node)
 		}
 	}
-	if len(nodes) != 2 {
+	if len(nodes) != 3 {
 		t.Fatalf("got %d block nodes", len(nodes))
 	}
+	for _, i := range []int{0, 2} {
+		require.Equal(t, map[string]any{"direct": true, "no-flush": false}, nodes[i]["file"].(map[string]any)["cache"])
+	}
+	require.NotContains(t, nodes[1]["file"], "cache")
 	base := nodes[0]["backing"].(map[string]any)
+	require.NotContains(t, base["file"], "cache")
 	if base["read-only"] != true || base["backing"] != nil || nodes[0]["node-name"] != "root" {
 		t.Fatalf("unsafe backing graph: %v", nodes)
 	}

@@ -33,12 +33,18 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 		pages := resource.MustParse(p.Spec.Hugepages)
 		args = append(args, "-object", "memory-backend-memfd,id=ram,size="+strconv.FormatInt(memory.Value(), 10)+",hugetlb=on,hugetlbsize="+strconv.FormatInt(pages.Value(), 10)+",prealloc=on,share=on", "-machine", "memory-backend=ram")
 	}
-	file := func(path string) map[string]any { return map[string]any{"driver": "file", "filename": path} }
-	base := map[string]any{"driver": p.Base.Manifest.Format, "file": file(p.Base.Disk()), "read-only": true}
+	file := func(path string, writable bool) map[string]any {
+		node := map[string]any{"driver": "file", "filename": path}
+		if writable {
+			node["cache"] = map[string]any{"direct": true, "no-flush": false}
+		}
+		return node
+	}
+	base := map[string]any{"driver": p.Base.Manifest.Format, "file": file(p.Base.Disk(), false), "read-only": true}
 	if p.Base.Manifest.Format == "qcow2" {
 		base["backing"] = nil
 	}
-	root := map[string]any{"driver": "qcow2", "node-name": "root", "file": file(filepath.Join(p.Dir, "overlay.qcow2")), "backing": base}
+	root := map[string]any{"driver": "qcow2", "node-name": "root", "file": file(filepath.Join(p.Dir, "overlay.qcow2"), true), "backing": base}
 	addDisk := func(node map[string]any, name string) error {
 		encoded, err := json.Marshal(node)
 		if err != nil {
@@ -55,7 +61,7 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 		return nil, err
 	}
 	addRaw := func(path, name string, readonly bool) error {
-		return addDisk(map[string]any{"driver": "raw", "node-name": name, "file": file(path), "read-only": readonly}, name)
+		return addDisk(map[string]any{"driver": "raw", "node-name": name, "file": file(path, !readonly), "read-only": readonly}, name)
 	}
 	if _, err = os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); err == nil && p.Spec.BootMode != "Disk" {
 		cmdline := p.Base.Manifest.Cmdline
