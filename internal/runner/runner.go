@@ -91,7 +91,7 @@ func Run() error {
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(time.Second):
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 	if err != nil {

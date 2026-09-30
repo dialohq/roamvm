@@ -15,7 +15,6 @@ p.add_argument('--output', default='test-results/e2e.json')
 p.add_argument('--cycles', type=int, default=3)
 p.add_argument('--lab-tool', required=True)
 p.add_argument('--cli', default='roamvm')
-p.add_argument('--disk-root', default='.lab-disks')
 p.add_argument('--node-failure', action='store_true', help='kill and restart one kind worker container')
 p.add_argument('--object-store-container', default='roamvm-s3')
 a = p.parse_args()
@@ -120,26 +119,42 @@ try:
     old_node = obj['status']['nodeName']
     pod = json.loads(k('get', 'pod', obj['status']['podName'], '-o', 'json'))
     check('ordinary scheduler selected node', pod['spec'].get('schedulerName', 'default-scheduler') == 'default-scheduler')
-    check('root has no PVC', not any('persistentVolumeClaim' in v for v in pod['spec']['volumes']))
+    check('VM Pod has no hostPath volumes', not any('hostPath' in v for v in pod['spec']['volumes']))
+    check('root uses an ephemeral PVC', any(v['name'] == 'working' and 'ephemeral' in v for v in pod['spec']['volumes']))
+    claim = pod['metadata']['name'] + '-working'
+    pvc = json.loads(k('get', 'pvc', claim, '-o', 'json'))
+    check('working PVC belongs to this Pod incarnation', pvc['metadata']['ownerReferences'][0]['uid'] == pod['metadata']['uid'])
     check('overcommitted CPU request preserved', pod['spec']['containers'][0]['resources']['requests']['cpu'] == '250m')
     check('guest DNS reaches Kubernetes service', len(json.loads(http('/dns?name=kubernetes.default.svc.cluster.local'))) > 0)
     payload = b'project files and installed packages\n' + os.urandom(1024 * 1024)
     check('guest write via Service', http('/data', payload) == payload)
     first = stop()
     check('overlay is much smaller than base virtual size', first['checkpoint']['size'] < 8 << 20)
-    for worker in ['worker', 'worker2']:
-        check(f'{worker} working overlay removed after commit', not (Path(a.disk_root) / worker / 'running' / uid / 'overlay.qcow2').exists())
+    k('wait', 'pod/' + pod['metadata']['name'], '--for=delete', '--timeout=30s')
+    k('wait', 'pvc/' + claim, '--for=delete', '--timeout=30s')
+    check('working PVC removed after durable stop', True)
     k('cordon', old_node)
     moved = start()
     check('restart scheduled on another node', moved['status']['nodeName'] != old_node)
     check('all bytes survived cross-node restore', http('/data') == payload)
     k('uncordon', old_node)
 
-    # A dead daemon must not kill an already running guest; metadata permits its
-    # replacement to continue managing the same Pod/epoch without reacquisition.
-    k('-n', 'roamvm-system', 'rollout', 'restart', 'daemonset/daemon')
-    k('-n', 'roamvm-system', 'rollout', 'status', 'daemonset/daemon', '--timeout=50s')
-    check('node daemon restart preserves running VM', http('/data') == payload)
+    # Native sidecar restart must retain the running VMM and its acquired epoch.
+    runtime_pod = moved['status']['podName']
+    before = json.loads(k('get', 'pod', runtime_pod, '-o', 'json'))['status']['initContainerStatuses'][0]['restartCount']
+    k('exec', runtime_pod, '-c', 'runtime', '--', '/bin/sh', '-c', 'kill -TERM 1')
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        statuses = json.loads(k('get', 'pod', runtime_pod, '-o', 'json'))['status'].get('initContainerStatuses', [])
+        if statuses and statuses[0]['restartCount'] > before and statuses[0]['state'].get('running'):
+            break
+        time.sleep(.2)
+    else:
+        raise AssertionError('runtime sidecar did not restart')
+    reachable()
+    check('runtime sidecar restart preserves running VM', http('/data') == payload)
+    containers = json.loads(k('get', 'pod', runtime_pod, '-o', 'json'))['status']['containerStatuses']
+    check('sidecar restart did not restart the VMM container', containers[0]['restartCount'] == 0)
 
     # Pause S3 during stop. A paused test server is a real network failure, not a
     # mocked successful PUT. The working copy and runner must remain available.

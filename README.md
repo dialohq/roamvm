@@ -1,8 +1,8 @@
 # RoamVM
 
 A Kubernetes VM runtime for development machines. The root disk follows compute:
-OCI stores the immutable base, S3 stores stopped-VM changes, and local filesystem
-storage is the working copy. There is no root PVC, CSI driver or replica set.
+OCI stores the immutable base, S3 stores stopped-VM changes, and a temporary PVC
+holds the working copy. No persistent root claim or storage replication is needed.
 
 This is an experimental implementation with real KVM integration tests, not a
 production-qualified replacement for KubeVirt. It is independent of Coder.
@@ -10,7 +10,7 @@ production-qualified replacement for KubeVirt. It is independent of Coder.
 ```text
 VirtualMachine → controller → runner Pod → kube-scheduler
                                   │
-                      node daemon prepares disks
+                      runtime sidecar prepares disks
                          OCI base + S3 checkpoint
                                   │
                        Cloud Hypervisor inside Pod
@@ -20,7 +20,8 @@ VirtualMachine → controller → runner Pod → kube-scheduler
 
 The hypervisor runs **inside the runner container's cgroup and network namespace**.
 The daemon prepares and commits storage; it does not put the VMM outside Kubernetes
-resource accounting. The root overlay never participates in scheduling.
+resource accounting. A fresh working PVC follows each new Pod's placement;
+the VM's previous node never constrains its next start.
 
 ## Start and stop
 
@@ -52,9 +53,26 @@ rvm` also waits for a checkpoint, retaining the S3 objects for recovery/retentio
 ## Install
 
 Requirements: Linux x86-64 KVM nodes, `/dev/kvm`, `/dev/net/tun`, Kubernetes 1.35+
-(the tested version), an IPv4 CNI with interface `eth0`, and ext4/XFS scratch space
-at `/var/lib/roamvm`. Mount your NVMe filesystem there. Only the DaemonSet and
-runner Pods use this host path. No host-installed hypervisor is required.
+with image-volume support (tested with containerd 2.2), an IPv4 CNI with interface
+`eth0`, and a local storage class using `WaitForFirstConsumer` and `Delete`.
+Set the controller's `WORKING_STORAGE_CLASS` and `WORKING_STORAGE_SIZE` (64Gi by
+default). Size it for the working overlay plus a compact checkpoint; the base is
+separate. Each runner Pod gets a fresh generic ephemeral PVC on its scheduled
+node. Pod deletion removes the claim after checkpoint commit. The PVC is working
+storage, not the VM's durable identity; a restart can use another node.
+
+The immutable base uses a read-only Kubernetes `image` volume. Kubelet/containerd
+handle pulling, authentication, caching and garbage collection. The runtime socket
+uses an `emptyDir` shared only inside the VM Pod. RoamVM defines no hostPath volumes.
+Install `roamvm device-plugin` as a node OS service (example:
+`config/roamvm-device-plugin.service`). It registers KVM/TUN with kubelet; the
+hypervisor and storage runtime remain in the Pod. Dialo's NixOS module manages
+this service declaratively. A host-installed hypervisor is not required.
+
+To upgrade the earlier hostPath prototype, first stop every VM and wait for its
+durable `Stopped` condition. Remove the old daemon DaemonSet before starting the
+node device-plugin service, provide runtime credentials in each VM namespace,
+then update the controller. Existing object-store checkpoints remain compatible.
 
 Allow these **namespaced** sysctls in kubelet configuration on VM nodes:
 
@@ -69,11 +87,11 @@ reach the guest through the Pod loopback address. Pods keep CNI's original IP,
 interface and routes. Guest virtio-net uses DHCP, TAP, and NAT inside the Pod. Its private transit
 subnet is `192.168.127.0/30`; do not use those addresses for external dependencies.
 The runtime grants NET_ADMIN/NET_RAW to the runner; it is not a privileged Pod.
-Namespaces admitting VMs must allow its capabilities, sysctls and hostPath mounts.
+Namespaces admitting VMs must allow these capabilities and sysctls.
 
 Build with Go 1.26.7 (`make build`) and publish `make image IMAGE=YOUR_REGISTRY/roamvm:VERSION`.
-In `config/install.yaml`, replace all three `roamvm:dev` container image references
-and the controller's `RUNNER_IMAGE` value with the same published digest.
+In `config/install.yaml`, replace the controller image
+and its `RUNNER_IMAGE` value with the same published digest.
 
 Create a dedicated S3 bucket. With the default `STATE_BACKEND=s3`, the store must implement strongly consistent reads,
 conditional `PutObject`, and conditional `CompleteMultipartUpload` with `If-Match`
@@ -92,16 +110,22 @@ metadata migration, not an environment-variable rollout.
 ```sh
 kubectl apply --server-side -f config/crd
 kubectl create namespace roamvm-system
-# Create roamvm-system/object-store through Vault or your usual secret manager.
+# Create default/roamvm-object-store through Vault or your usual secret manager.
 # Required: S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
 # Optional: S3_ENDPOINT (S3-compatible URL), AWS_REGION, AWS_SESSION_TOKEN.
 # With AWS workload identity, use the SDK credential chain instead of static keys.
 kubectl apply -f config/install.yaml
-kubectl label node NODE_NAME vm.roamvm.io/enabled=true
 ```
 
-The SDK uses normal HTTPS validation. `REGISTRY_PLAIN_HTTP=true` is for the local
-lab only. Runtime AWS permissions cover GetObject/PutObject under `vm/` and
+The example provisions the runtime ServiceAccount and namespace-scoped RoleBinding
+in `default`. For another VM namespace, create the same `roamvm-runtime` account
+and RoleBinding there, authorize it in the state RoleBinding in `roamvm-system`,
+and provide `roamvm-object-store`. Optional non-secret settings can live in that
+namespace's `roamvm-runtime` ConfigMap. The runtime sidecar alone receives the
+object-store environment and projected Kubernetes token.
+
+The SDK uses normal HTTPS validation. Configure registry authentication through
+VM `imagePullSecrets`; local plaintext registries use containerd's registry config. Runtime AWS permissions cover GetObject/PutObject under `vm/` and
 `runtime-probes/`, multipart upload/abort, and DeleteObject on `runtime-probes/`
 for probe cleanup. The runtime does not delete checkpoints. Keep this bucket
 private and enable your usual encryption/access controls; overlays contain the
@@ -110,9 +134,11 @@ keys are already immutable, and head replacement uses ETag compare-and-swap.
 
 The controller and daemon are trusted cluster components. VM creation is comparable
 to Pod creation: it can reference namespace-local Secrets and PVCs. Do not grant
-untrusted users direct access to daemon credentials, runner mutation, host paths,
-or the runtime S3 prefix. Per-incarnation runner tokens are bound to VM, Pod UID
-and assigned node; the guest receives no Kubernetes or S3 credentials by default.
+untrusted users Pod creation/exec/mutation or runtime Secret access in VM namespaces,
+or access to the runtime S3 prefix. Per-incarnation runner tokens are bound to VM, Pod UID
+and assigned node. Guest configuration rejects token and Pod-certificate projections
+and the reserved `roamvm-object-store` Secret. The runner container has neither
+the runtime API token nor its object-store environment.
 
 ## Package a NixOS or other Linux image
 
@@ -158,7 +184,8 @@ create a new VM to change the base, or install packages into its current overlay
   the sum of guest vCPUs/limits may exceed the node's CPUs. Requests still have
   to fit. KVM slots are shared access tokens, not dedicated physical CPUs.
   Memory reserves guest RAM plus 192 MiB VMM overhead and is not overcommitted.
-  Adjust upward if your workload/devices need more host memory.
+  The runtime sidecar additionally requests 100m CPU and 128 MiB RAM, with a
+  512 MiB memory limit. Adjust upward if your workload/devices need more host memory.
 - Affinity, node selectors, tolerations and topology spread pass to the runner Pod.
   Each incarnation captures its boot configuration when the Pod is created;
   later spec edits apply at the next start, keeping boot RAM/CPU and reservations
@@ -205,7 +232,7 @@ Kubernetes reservations.
 ## Current limits
 
 IPv4 and x86-64 only; no live migration, automatic crash recovery, memory snapshots,
-online disk resizing, image upgrades, periodic checkpoints, or automatic cache /
+online disk resizing, image upgrades, periodic checkpoints, or automatic checkpoint /
 checkpoint garbage collection. Old generations and bases accumulate until an
 operator applies retention. Never delete the current checkpoint or a base used by
 a running VM. Do not apply age-only S3 expiration to the entire overlay prefix.

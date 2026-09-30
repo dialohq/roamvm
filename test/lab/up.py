@@ -35,12 +35,7 @@ if 'roamvm' in clusters and not a.reuse:
 os.environ['KUBECONFIG'] = str(lab / 'kubeconfig')
 if 'roamvm' not in clusters:
     nodes = [{'role': 'control-plane'}]
-    for worker in ['worker', 'worker2']:
-        scratch = root / '.lab-disks' / worker
-        scratch.mkdir(parents=True, exist_ok=True)
-        nodes.append({'role': 'worker', 'extraMounts': [
-            {'hostPath': '/dev/kvm', 'containerPath': '/dev/kvm'},
-            {'hostPath': str(scratch), 'containerPath': '/var/lib/roamvm'}]})
+    nodes += [{'role': 'worker'}, {'role': 'worker'}]
     config = {'kind': 'Cluster', 'apiVersion': 'kind.x-k8s.io/v1alpha4', 'nodes': nodes,
         'kubeadmConfigPatches': ['kind: KubeletConfiguration\nallowedUnsafeSysctls:\n- net.ipv4.ip_forward\n- net.ipv4.conf.all.route_localnet\n']}
     (lab / 'kind.json').write_text(json.dumps(config))
@@ -89,12 +84,20 @@ run(['kind', 'load', 'docker-image', 'roamvm:dev', '--name', 'roamvm'])
 run(['kubectl', 'apply', '--server-side', '-f', 'config/crd'])
 namespace = {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'roamvm-system'}}
 run(['kubectl', 'apply', '-f', '-'], input=json.dumps(namespace).encode())
-secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'object-store', 'namespace': 'roamvm-system'},
+secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'roamvm-object-store', 'namespace': 'default'},
     'stringData': {'S3_ENDPOINT': s3, 'S3_BUCKET': 'roamvm', 'AWS_ACCESS_KEY_ID': 'roamvm-local',
-        'AWS_SECRET_ACCESS_KEY': 'roamvm-local-test-only', 'REGISTRY_PLAIN_HTTP': 'true'}}
+        'AWS_SECRET_ACCESS_KEY': 'roamvm-local-test-only'}}
 run(['kubectl', 'apply', '-f', '-'], input=json.dumps(secret).encode())
 run(['kubectl', 'apply', '-f', 'config/install.yaml'])
-run(['kubectl', '-n', 'roamvm-system', 'rollout', 'restart', 'deployment/controller', 'daemonset/daemon'])
-for resource in ['deployment/controller', 'daemonset/daemon']:
-    run(['kubectl', '-n', 'roamvm-system', 'rollout', 'status', resource, '--timeout=120s'])
+for node in ['roamvm-worker', 'roamvm-worker2']:
+    run(['docker', 'exec', node, 'test', '-c', '/dev/kvm'])
+    run(['docker', 'cp', root / 'bin/roamvm', node + ':/usr/local/bin/roamvm'])
+    run(['docker', 'cp', root / 'config/roamvm-device-plugin.service', node + ':/etc/systemd/system/roamvm-device-plugin.service'])
+    run(['docker', 'exec', node, 'systemctl', 'daemon-reload'])
+    run(['docker', 'exec', node, 'systemctl', 'enable', '--now', 'roamvm-device-plugin'])
+    run(['docker', 'exec', node, 'mkdir', '-p', '/etc/containerd/certs.d/' + registry])
+    hosts = f'server = "http://{registry}"\n[host."http://{registry}"]\n  capabilities = ["pull", "resolve"]\n'
+    run(['docker', 'exec', '-i', node, 'sh', '-c', 'cat > ' + shlex.quote('/etc/containerd/certs.d/' + registry + '/hosts.toml')], input=hosts.encode())
+run(['kubectl', '-n', 'roamvm-system', 'rollout', 'restart', 'deployment/controller'])
+run(['kubectl', '-n', 'roamvm-system', 'rollout', 'status', 'deployment/controller', '--timeout=120s'])
 print(f'Lab ready. source {lab}/env; export PATH={root}/bin:$PATH', flush=True)

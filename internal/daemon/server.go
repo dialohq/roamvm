@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,8 +20,6 @@ import (
 	"github.com/dialohq/roamvm/internal/fileio"
 	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/state"
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,18 +48,18 @@ type Response struct {
 	Error    string    `json:"error,omitempty"`
 }
 type Server struct {
-	Client     client.Client
-	Node, Root string
-	State      state.Manager
-	Cache      images.Cache
-	locks      sync.Map
+	Client             client.Client
+	Node, PodUID, Root string
+	State              state.Manager
+	BaseDir            string
+	locks              sync.Map
 }
 
 func (s *Server) Serve(ctx context.Context, socket string) error {
 	if err := os.MkdirAll(filepath.Dir(socket), 0755); err != nil {
 		return err
 	}
-	// DaemonSet has one instance per node. Restart replaces only its stale socket.
+	// A restarted sidecar replaces only its own stale socket.
 	_ = os.Remove(socket)
 	l, err := net.Listen("unix", socket)
 	if err != nil {
@@ -147,7 +144,7 @@ func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api
 	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: req.Pod}, &pod); err != nil {
 		return nil, nil, err
 	}
-	if string(pod.UID) != req.UID || pod.Spec.NodeName != s.Node {
+	if string(pod.UID) != req.UID || req.UID != s.PodUID || pod.Spec.NodeName != s.Node {
 		return nil, nil, errors.New("runner does not belong to this node")
 	}
 	owner := metav1.GetControllerOf(&pod)
@@ -218,11 +215,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	if err := s.annotate(ctx, pod, "Restoring", "", nil); err != nil {
 		return nil, err
 	}
-	keys, err := s.registryKeys(ctx, bootVM)
-	if err != nil {
-		return nil, err
-	}
-	base, err := s.Cache.Ensure(ctx, vm.Spec.Image, keys)
+	base, err := images.Open(ctx, s.BaseDir)
 	if err != nil {
 		return nil, err
 	}
@@ -335,41 +328,4 @@ func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message str
 		}
 		return s.Client.Update(ctx, &current)
 	})
-}
-
-type keychain map[string]authn.AuthConfig
-
-func (k keychain) Resolve(r authn.Resource) (authn.Authenticator, error) {
-	if c, ok := k[r.RegistryStr()]; ok {
-		return authn.FromConfig(c), nil
-	}
-	return authn.Anonymous, nil
-}
-func (s *Server) registryKeys(ctx context.Context, vm *api.VirtualMachine) (authn.Keychain, error) {
-	k := keychain{}
-	for _, ref := range vm.Spec.ImagePullSecrets {
-		var secret core.Secret
-		if err := s.Client.Get(ctx, types.NamespacedName{Namespace: vm.Namespace, Name: ref.Name}, &secret); err != nil {
-			return nil, err
-		}
-		var config struct {
-			Auths map[string]authn.AuthConfig `json:"auths"`
-		}
-		if err := json.Unmarshal(secret.Data[core.DockerConfigJsonKey], &config); err != nil {
-			return nil, fmt.Errorf("invalid image pull secret %s", ref.Name)
-		}
-		for host, auth := range config.Auths {
-			host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
-			host = strings.SplitN(host, "/", 2)[0]
-			if host == "docker.io" || host == "registry-1.docker.io" {
-				host = "index.docker.io"
-			}
-			reg, err := name.NewRegistry(host)
-			if err != nil {
-				return nil, err
-			}
-			k[reg.RegistryStr()] = auth
-		}
-	}
-	return k, nil
 }

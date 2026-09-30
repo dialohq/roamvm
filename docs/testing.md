@@ -1,11 +1,11 @@
 # Local validation
 
 The test lab is a dedicated `kind-roamvm` cluster: one control plane and two worker
-containers on one physical Linux machine. Workers receive real `/dev/kvm`; their
-runtime disks are bind-mounted directories on the host's ext4 filesystem. The
-benchmark host exposes Amazon EBS through NVMe; it is not local NVMe storage. They are separate scheduling targets, not separate physical servers.
-The registry and MinIO are separate containers on the kind Docker network, with
-host ports bound only to loopback.
+containers on one physical Linux machine. Kind's privileged nodes expose real
+`/dev/kvm`; the device plugin runs as a node systemd service. VM Pods use native
+read-only image volumes and generic ephemeral PVCs from kind's local-path storage
+class. Production uses the existing OpenEBS thin CSI storage class. The registry
+and MinIO are separate containers, with host ports bound only to loopback.
 
 ## Repeat the tests
 
@@ -25,8 +25,8 @@ make test
 ```
 
 `up.py` builds the actual multi-stage Dockerfile, loads it into kind, creates the
-bucket/credentials, installs the generated CRD and controllers, and checks their
-rollouts. `--skip-build` uses an already built `roamvm:dev` image.
+bucket/credentials, installs the generated CRD, controller and node device-plugin service, and checks
+their rollouts. `--skip-build` uses an already built `roamvm:dev` image.
 
 Build the small, deliberately unauthenticated **test-only** VM fixture using a
 matching Linux kernel and module tree, a static BusyBox, and Linux's
@@ -68,7 +68,7 @@ successful fixtures. Failed fixtures remain for debugging. JSON results are in
 
 To remove the lab explicitly, first stop any VM whose state you care about, then
 `kind delete cluster --name roamvm` and `docker rm -f roamvm-registry roamvm-s3`.
-Keep `.lab/s3` and `.lab-disks` until their contents are no longer needed.
+Keep `.lab/s3` until its checkpoints are no longer needed.
 
 ## Coverage
 
@@ -77,12 +77,13 @@ Keep `.lab/s3` and `.lab-disks` until their contents are no longer needed.
   Pod-bound authentication and Kubernetes resource accounting.
 - Actual qemu-img tests: writable overlay compaction/rebase preserves both data
   and zero-overwrites, and leaves its base unchanged.
-- Registry tests: private authentication, eight concurrent pulls, atomic cache
-  publication, offline cache reuse, unsafe tar entries and QCOW2 host-file references.
+- Mounted-image validation: artifact symlinks, unexpected files, invalid boot
+  manifests, oversized/empty disks and QCOW2 backing references are rejected.
+  Kubelet/containerd owns registry authentication, unpacking and cache publication.
 - Real MinIO: conditional create/replace, stale ETag rejection, read-after-write,
   conditional multipart upload and overwrite rejection.
 - Real KVM: create, Service access, DNS, repeated shutdown/restore, cross-node
-  scheduling and byte-exact payload persistence, daemon restart, S3 outage during
+  scheduling and byte-exact payload persistence, runtime sidecar restart, S3 outage during
   stop, hypervisor kill, corrupt object refusal and explicit fenced recovery.
 - Worker-container failure: last checkpoint retained, ownership never expires,
   explicit recovery runs elsewhere and discards uncommitted changes as specified.
@@ -117,6 +118,30 @@ qualified. CI runs unit/race/disk tests, schema regeneration and container build
 it does not pretend ordinary hosted runners run these KVM integration tests.
 
 ## Startup measurements
+
+The PVC/image-volume implementation initially measured **7.139 s** median for
+three small-guest HTTP starts on kind's local-path provisioner (7.067–7.598 s).
+About four seconds precede Pod scheduling while that provisioner starts a helper
+Pod and creates/binds the PVC. Production OpenEBS provisioning latency has not
+been measured. Base caching uses containerd and does not require a new download
+on every restart. Storage provisioning and native sidecar startup add costs that
+must be included in end-to-end measurements.
+
+The Nix-built PVC runtime also restored an existing Coder/NixOS workspace from
+its pre-PVC checkpoint, preserving its saved project and SSH host key. Three
+subsequent stop/start cycles took **14.035 s** median from Coder start to reading
+the project over SSH (12.005–14.161 s), versus the earlier 9.243 s hostPath median.
+These PVC measurements use kind's local-path storage inside container nodes;
+they are not a controlled comparison of identical storage backends.
+
+The PVC run passed 44 lifecycle/failure checks, 17 Cilium integration checks and
+20 CPU oversubscription checks, plus race-enabled unit tests and the real
+Kubernetes/MinIO state tests. The working claim is checked for Pod ownership and
+garbage collection after durable stop. Cached base distribution is delegated to
+kubelet; the runtime's custom registry-pull and cache-lock implementation is gone.
+
+The following numbers are historical: they describe `fd742d3`, before switching
+from hostPath to PVCs. They are not the startup claim for the PVC implementation.
 
 Measure from the Kubernetes create/start request to an HTTP response or SSH
 banner through a NodePort Service. `test/startup.py` records scheduling, runner,

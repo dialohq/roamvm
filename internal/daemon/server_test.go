@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/controller"
-	"github.com/google/go-containerregistry/pkg/name"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,7 +22,7 @@ func TestRunnerAuthenticationIsBoundToPodNodeAndVM(t *testing.T) {
 	secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: "auth", Namespace: "a"}, Data: map[string][]byte{"token": []byte("private-token")}}
 	controllerutil.SetControllerReference(vm, pod, scheme)
 	controllerutil.SetControllerReference(vm, secret, scheme)
-	server := &Server{Node: "node-a", Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm, pod, secret).Build()}
+	server := &Server{Node: "node-a", PodUID: "pod-uid", Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm, pod, secret).Build()}
 	valid := Request{Namespace: "a", Pod: "runner", UID: "pod-uid", Token: "private-token"}
 	if _, _, e := server.authenticate(context.Background(), valid); e != nil {
 		t.Fatal(e)
@@ -37,6 +36,11 @@ func TestRunnerAuthenticationIsBoundToPodNodeAndVM(t *testing.T) {
 			t.Fatal("forged runner accepted")
 		}
 	}
+	server.PodUID = "other-pod"
+	if _, _, e := server.authenticate(context.Background(), valid); e == nil {
+		t.Fatal("runtime accepted another Pod's identity")
+	}
+	server.PodUID = "pod-uid"
 	server.Node = "node-b"
 	if _, _, e := server.authenticate(context.Background(), valid); e == nil {
 		t.Fatal("runner from another node accepted")
@@ -64,28 +68,5 @@ func TestQueuedIncarnationDoesNotAdoptUnaccountedSpecChanges(t *testing.T) {
 	vm.Spec.Image = "different"
 	if _, e = incarnation(vm, pod); e == nil {
 		t.Fatal("base changed")
-	}
-}
-
-func TestDockerConfigRegistryAliases(t *testing.T) {
-	for _, host := range []string{"https://index.docker.io/v1/", "docker.io", "registry-1.docker.io", "index.docker.io"} {
-		scheme := runtime.NewScheme()
-		core.AddToScheme(scheme)
-		secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: "registry", Namespace: "dev"}, Data: map[string][]byte{core.DockerConfigJsonKey: []byte(`{"auths":{"` + host + `":{"auth":"dXNlcjpwYXNz"}}}`)}}
-		server := &Server{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()}
-		vm := &api.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Namespace: "dev"}, Spec: api.VirtualMachineSpec{ImagePullSecrets: []core.LocalObjectReference{{Name: "registry"}}}}
-		keys, e := server.registryKeys(context.Background(), vm)
-		if e != nil {
-			t.Fatal(e)
-		}
-		ref, _ := name.NewTag("library/alpine:3.23")
-		auth, e := keys.Resolve(ref.Context().Registry)
-		if e != nil {
-			t.Fatal(e)
-		}
-		config, e := auth.Authorization()
-		if e != nil || config.Username != "user" || config.Password != "pass" {
-			t.Fatalf("%s: %#v %v", host, config, e)
-		}
 	}
 }

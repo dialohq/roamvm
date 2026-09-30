@@ -4,9 +4,9 @@
 
 We inspected [Virtink](https://github.com/smartxworks/virtink) at commit
 `a0cbe18c496b8634163916c28d94e038df489690`. Its controller → Pod → node daemon
-architecture fits. Its existing disk/lifecycle APIs would still need substantial
-changes for a stopped-state object store, so RoamVM is a fresh implementation of
-that architecture, without copied Virtink code or a compatibility layer.
+architecture was the starting point. RoamVM uses a runtime sidecar with each VM
+Pod so it can use PVCs and image volumes without hostPath mounts. No Virtink code
+or compatibility layer is included.
 
 Cloud Hypervisor [v53.0](https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v53.0)
 has native QCOW2 backing-file support. This avoids a separate NBD/ublk storage daemon.
@@ -18,18 +18,26 @@ its [QCOW2 hardening guidance](https://github.com/cloud-hypervisor/cloud-hypervi
 
 - Controller: creates one named runner incarnation, mirrors status, requests stop,
   and removes resources after durable completion. It has no S3 credentials.
-- Node daemon: resolves OCI credentials in the VM namespace, caches bases,
-  authorizes the runner by token/Pod UID/node/VM ownership, and manages checkpoints.
-- Runner: holds a local file lock, sets up TAP/NAT/DHCP, runs the hypervisor inside
-  its Pod, sends heartbeats and reports guest readiness. It cannot access the S3
-  credentials or other VMs' writable disks through its normal mounts.
-- Device plugin: allocates shared KVM/TUN access using native extended resources.
-  KVM slots only advertise healthy while the local daemon socket is reachable.
+- Runtime sidecar: authorizes its own runner by token/Pod UID/node/VM ownership,
+  validates the mounted base disk, restores state and commits checkpoints.
+- Runner: holds a local file lock, sets up TAP/NAT/DHCP, runs the hypervisor,
+  sends heartbeats and reports guest readiness. It cannot access the sidecar's
+  Kubernetes token or S3 environment through its mounts.
+- Device plugin: a node OS service allocates shared KVM/TUN access using native
+  extended resources. It requires no Kubernetes hostPath volume.
 
-The daemon and Kubernetes administrators are trusted. A runner receives read-only
-access to the node's base cache, so use a dedicated trusted cluster/node pool when
-base-image confidentiality matters. There is no hardened multi-tenant isolation
-claim. The VM API does not expose host command execution or arbitrary host paths.
+Kubelet owns OCI pulling, registry credentials, caching and read-only image-volume
+mounts. Each incarnation receives a generic ephemeral PVC on the node selected
+by the scheduler. WaitForFirstConsumer preserves normal placement; the old claim
+is not reused on restart. The runtime is a native sidecar, so Kubernetes stops it
+after the runner exits, including after a checkpoint upload finishes. Its restart
+retains the same Pod/PVC and ownership epoch.
+
+The runtime and Kubernetes administrators are trusted. VM configuration cannot
+project the reserved runtime Secret, service account tokens or Pod certificates. Pod creation,
+exec or modification in a VM namespace is privileged access to runtime credentials;
+VM-only users should receive VM-resource permissions, not those Pod permissions.
+There is no hardened multi-tenant isolation claim.
 
 ## Durable state
 
@@ -66,22 +74,24 @@ Compare-and-swap fences publication, not execution. Recovery still requires
 proof that the previous VMM has terminated or its node has been fenced.
 
 Restore checks size, hash and object version, rewrites the backing reference to
-the locally cached pinned base, validates QCOW2 metadata, and then starts the VMM.
+the read-only image-volume base, validates QCOW2 metadata, and then starts the VMM.
 Incoming embedded backing paths are never trusted. New checkpoints contain the
 full current delta against the base; they do not depend on previous generations.
 
-Local layout:
+Pod-local layout:
 
 ```text
-/var/lib/roamvm/
-  images/<digest>/          disposable, shared immutable base cache
-  running/<VM UID>/         overlay, compact checkpoint, VMM socket and lock
-  sessions/<Pod UID>.json   daemon-only reconciliation metadata
+/base/disk/                         read-only OCI image volume, cached by containerd
+/var/lib/roamvm/                    fresh generic ephemeral PVC
+  running/<VM UID>/                overlay, compact checkpoint, VMM socket and lock
+  sessions/<Pod UID>.json           runtime reconciliation metadata
+/run/roamvm/                       shared emptyDir for the runtime API socket
 ```
 
-The local disk is not a PV. Successful commit removes its writable disk files.
-Failed uploads retain the working disk and runner. Interruption before commit
-must not erase local files; the node may still hold the only newest copy.
+Successful commit removes writable files; Pod deletion then garbage-collects the
+PVC. Failed uploads retain both the Pod and PVC. The PVC's node affinity applies
+only to that incarnation; future starts create a new Pod and claim. No persistent
+root claim, custom CSI driver, or manual local-disk inventory is involved.
 
 ## Failures and recovery
 
@@ -90,7 +100,7 @@ must not erase local files; the node may still hold the only newest copy.
 | Missing OCI base | Pull on the chosen node; no scheduling dependency |
 | Duplicate start | One runner name plus conditional head ownership; second owner rejected |
 | S3 unavailable during stop | Guest exits, Pod stays Checkpointing, local state retained, upload retried |
-| Daemon restarts | Same runner/epoch resumes using saved metadata |
+| Runtime sidecar restarts | Same runner/epoch resumes using saved metadata |
 | Control contact lost for 30 seconds | Runner requests guest shutdown; ownership stays held |
 | Guest ignores ACPI timeout | VMM killed, no new checkpoint, RecoveryRequired |
 | Hypervisor crashes / OOM / node disappears | No automatic takeover; last committed generation remains valid |

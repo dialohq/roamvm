@@ -30,11 +30,8 @@ func (p *Plugin) ListAndWatch(_ *dp.Empty, stream dp.DevicePlugin_ListAndWatchSe
 		if _, err := os.Stat("/dev/kvm"); err != nil {
 			health = dp.Unhealthy
 		}
-		conn, err := net.DialTimeout("unix", "/run/roamvm/runtime.sock", 500*time.Millisecond)
-		if err != nil {
+		if _, err := os.Stat("/dev/net/tun"); err != nil {
 			health = dp.Unhealthy
-		} else {
-			conn.Close()
 		}
 		devices := make([]*dp.Device, p.Slots)
 		for i := range devices {

@@ -14,7 +14,6 @@ import (
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/daemon"
 	"github.com/dialohq/roamvm/internal/device"
-	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/runner"
 	"github.com/dialohq/roamvm/internal/state"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -70,7 +69,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		r := &controller.Reconciler{Client: m.GetClient(), Scheme: m.GetScheme(), Image: env("RUNNER_IMAGE", "roamvm:dev"), Root: env("RUNTIME_ROOT", "/var/lib/roamvm")}
+		r := &controller.Reconciler{Client: m.GetClient(), Scheme: m.GetScheme(), Image: env("RUNNER_IMAGE", "roamvm:dev"), StorageClass: os.Getenv("WORKING_STORAGE_CLASS"), StorageSize: env("WORKING_STORAGE_SIZE", "64Gi")}
 		if err = r.Setup(m); err != nil {
 			return err
 		}
@@ -91,9 +90,9 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		server := &daemon.Server{Client: c, Node: os.Getenv("NODE_NAME"), Root: root, State: state.Manager{Store: backend}, Cache: images.Cache{Root: root + "/images", PlainHTTP: os.Getenv("REGISTRY_PLAIN_HTTP") == "true"}}
-		if server.Node == "" || store.Bucket == "" {
-			return errors.New("NODE_NAME and S3_BUCKET are required")
+		server := &daemon.Server{Client: c, Node: os.Getenv("NODE_NAME"), PodUID: os.Getenv("POD_UID"), Root: root, State: state.Manager{Store: backend}, BaseDir: "/base/disk"}
+		if server.Node == "" || server.PodUID == "" || store.Bucket == "" {
+			return errors.New("NODE_NAME, POD_UID and S3_BUCKET are required")
 		}
 		if kubernetes, ok := backend.(*state.Kubernetes); ok {
 			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)

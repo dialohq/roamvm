@@ -34,9 +34,10 @@ const SpecAnnotation = "vm.roamvm.io/boot-spec"
 
 type Reconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Image  string
-	Root   string
+	Scheme       *runtime.Scheme
+	Image        string
+	StorageClass string
+	StorageSize  string
 }
 
 func (r *Reconciler) Setup(m ctrl.Manager) error {
@@ -206,6 +207,20 @@ func (r *Reconciler) status(ctx context.Context, vm *api.VirtualMachine, phase, 
 }
 
 func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) error {
+	projections := []*core.ProjectedVolumeSource{vm.Spec.Config}
+	for i := range vm.Spec.ConfigDisks {
+		projections = append(projections, &vm.Spec.ConfigDisks[i].Projection)
+	}
+	for _, projection := range projections {
+		if projection == nil {
+			continue
+		}
+		for _, source := range projection.Sources {
+			if source.ServiceAccountToken != nil || source.PodCertificate != nil || (source.Secret != nil && source.Secret.Name == "roamvm-object-store") {
+				return fmt.Errorf("VM configuration cannot project runtime credentials")
+			}
+		}
+	}
 	memory, err := resource.ParseQuantity(vm.Spec.Memory)
 	if err != nil || memory.Sign() <= 0 {
 		return fmt.Errorf("invalid guest memory %q", vm.Spec.Memory)
@@ -279,13 +294,22 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	maps.Copy(pod.Labels, vm.Labels)
 	pod.Labels[Label] = string(vm.UID)
 	pod.Labels["vm.roamvm.io/name"] = vm.Name
-	dirType := core.HostPathDirectoryOrCreate
-	root := r.Root
-	if root == "" {
-		root = "/var/lib/roamvm"
+	pod.Annotations["kubectl.kubernetes.io/default-container"] = "runner"
+	root := "/var/lib/roamvm"
+	size := r.StorageSize
+	if size == "" {
+		size = "64Gi"
+	}
+	storage, err := resource.ParseQuantity(size)
+	if err != nil || storage.Sign() <= 0 {
+		return fmt.Errorf("invalid working storage size %q", size)
+	}
+	var storageClass *string
+	if r.StorageClass != "" {
+		storageClass = &r.StorageClass
 	}
 	pod.Spec = core.PodSpec{
-		RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: ptr.To(false), TerminationGracePeriodSeconds: ptr.To(int64(3600)),
+		ServiceAccountName: "roamvm-runtime", RestartPolicy: core.RestartPolicyNever, AutomountServiceAccountToken: ptr.To(false), TerminationGracePeriodSeconds: ptr.To(int64(3600)),
 		ImagePullSecrets: vm.Spec.ImagePullSecrets,
 		NodeSelector:     vm.Spec.NodeSelector, Affinity: vm.Spec.Affinity, Tolerations: vm.Spec.Tolerations, TopologySpreadConstraints: vm.Spec.TopologySpreadConstraints,
 		SecurityContext: &core.PodSecurityContext{Sysctls: []core.Sysctl{{Name: "net.ipv4.ip_forward", Value: "1"}, {Name: "net.ipv4.conf.all.route_localnet", Value: "1"}}},
@@ -301,13 +325,34 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		runner.VolumeMounts = append(runner.VolumeMounts, core.VolumeMount{Name: name, MountPath: path, ReadOnly: readOnly})
 	}
 	mount("tmp", "/tmp", core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{}}, false)
-	for _, disk := range []core.VolumeMount{
-		{Name: "socket", MountPath: "/run/roamvm", ReadOnly: true},
-		{Name: "images", MountPath: root + "/images", ReadOnly: true},
-		{Name: "working", MountPath: root + "/running/" + string(vm.UID)},
-	} {
-		mount(disk.Name, disk.MountPath, core.VolumeSource{HostPath: &core.HostPathVolumeSource{Path: disk.MountPath, Type: &dirType}}, disk.ReadOnly)
-	}
+	mount("socket", "/run/roamvm", core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{}}, false)
+	mount("base", "/base", core.VolumeSource{Image: &core.ImageVolumeSource{Reference: vm.Spec.Image, PullPolicy: core.PullIfNotPresent}}, true)
+	mount("working", root, core.VolumeSource{Ephemeral: &core.EphemeralVolumeSource{VolumeClaimTemplate: &core.PersistentVolumeClaimTemplate{Spec: core.PersistentVolumeClaimSpec{
+		StorageClassName: storageClass, AccessModes: []core.PersistentVolumeAccessMode{core.ReadWriteOnce},
+		Resources: core.VolumeResourceRequirements{Requests: core.ResourceList{core.ResourceStorage: storage}},
+	}}}}, false)
+	pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "kube-api", VolumeSource: core.VolumeSource{Projected: &core.ProjectedVolumeSource{Sources: []core.VolumeProjection{
+		{ServiceAccountToken: &core.ServiceAccountTokenProjection{Path: "token", ExpirationSeconds: ptr.To(int64(3600))}},
+		{ConfigMap: &core.ConfigMapProjection{LocalObjectReference: core.LocalObjectReference{Name: "kube-root-ca.crt"}, Items: []core.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}}}},
+		{DownwardAPI: &core.DownwardAPIProjection{Items: []core.DownwardAPIVolumeFile{{Path: "namespace", FieldRef: &core.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"}}}}},
+	}}}})
+	pod.Spec.InitContainers = []core.Container{{
+		Name: "runtime", Image: r.Image, ImagePullPolicy: core.PullIfNotPresent, Args: []string{"daemon"}, RestartPolicy: ptr.To(core.ContainerRestartPolicyAlways),
+		Env: []core.EnvVar{
+			{Name: "NODE_NAME", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "spec.nodeName"}}},
+			{Name: "POD_UID", ValueFrom: &core.EnvVarSource{FieldRef: &core.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+			{Name: "GOMEMLIMIT", Value: "256MiB"},
+		},
+		EnvFrom:         []core.EnvFromSource{{ConfigMapRef: &core.ConfigMapEnvSource{LocalObjectReference: core.LocalObjectReference{Name: "roamvm-runtime"}, Optional: ptr.To(true)}}, {SecretRef: &core.SecretEnvSource{LocalObjectReference: core.LocalObjectReference{Name: "roamvm-object-store"}}}},
+		Resources:       core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi")}, Limits: core.ResourceList{core.ResourceMemory: resource.MustParse("512Mi")}},
+		SecurityContext: &core.SecurityContext{RunAsUser: ptr.To(int64(0)), AllowPrivilegeEscalation: ptr.To(false), Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}, SeccompProfile: &core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}},
+		VolumeMounts: []core.VolumeMount{
+			{Name: "socket", MountPath: "/run/roamvm"},
+			{Name: "base", MountPath: "/base", ReadOnly: true},
+			{Name: "working", MountPath: root},
+			{Name: "kube-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
+		},
+	}}
 	mount("auth", "/run/roamvm-auth", core.VolumeSource{Secret: &core.SecretVolumeSource{SecretName: name, DefaultMode: ptr.To(int32(0400))}}, true)
 	if vm.Spec.Hugepages != "" || len(vm.Spec.Devices) > 0 {
 		runner.SecurityContext.Capabilities.Add = append(runner.SecurityContext.Capabilities.Add, "IPC_LOCK")

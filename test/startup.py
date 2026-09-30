@@ -75,7 +75,7 @@ try:
             assert not any(v.get('status', {}).get('nodeName') == a.node and v['spec']['image'] == a.image for v in vms), 'base still in use'
             digest = a.image.split('@sha256:')[1]
             assert len(digest) == 64 and all(c in '0123456789abcdef' for c in digest)
-            sp.run(['docker', 'exec', a.node, 'rm', '-rf', '/var/lib/roamvm/images/' + digest], check=True)
+            sp.run(['docker', 'exec', a.node, 'crictl', 'rmi', a.image], check=True, stdout=sp.DEVNULL)
         start = time.monotonic()
         if cycle == 0:
             api(base, 'POST', {'apiVersion': 'vm.roamvm.io/v1alpha1', 'kind': 'VirtualMachine', 'metadata': {'name': name}, 'spec': {
@@ -112,6 +112,7 @@ try:
         api(base + '/' + name, 'PATCH', {'spec': {'powerState': 'Stopped'}})
         wait_for(lambda: api(base + '/' + name).get('status', {}).get('phase') == 'Stopped')
         wait_for(lambda: not api(core + '/pods?labelSelector=vm.roamvm.io/name%3D' + name)['items'])
+        wait_for(lambda: not any(p['metadata']['name'] == status['podName'] + '-working' for p in api(core + '/persistentvolumeclaims')['items']))
     results['medianSeconds'] = statistics.median(r['guestResponse'] for r in results['runs'])
     results['success'] = True
     print('Median:', results['medianSeconds'], flush=True)

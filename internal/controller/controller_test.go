@@ -47,10 +47,39 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 	if pod.Spec.Containers[0].Resources.Requests.Memory().Value() != (1216 << 20) {
 		t.Fatal("guest memory overhead not accounted")
 	}
+	var working, base bool
 	for _, v := range pod.Spec.Volumes {
-		if v.PersistentVolumeClaim != nil {
-			t.Fatal("root created a PVC")
+		if v.HostPath != nil {
+			t.Fatal("hostPath mounted into VM Pod")
 		}
+		if v.PersistentVolumeClaim != nil {
+			t.Fatal("root reused a persistent claim across incarnations")
+		}
+		if v.Name == "working" {
+			working = v.Ephemeral != nil && v.Ephemeral.VolumeClaimTemplate.Spec.Resources.Requests.Storage().Cmp(resource.MustParse("64Gi")) == 0
+		}
+		if v.Name == "base" {
+			base = v.Image != nil && v.Image.Reference == vm.Spec.Image && v.Image.PullPolicy == core.PullIfNotPresent
+		}
+	}
+	if !working || !base {
+		t.Fatal("missing ephemeral PVC or immutable image volume")
+	}
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].RestartPolicy == nil || *pod.Spec.InitContainers[0].RestartPolicy != core.ContainerRestartPolicyAlways {
+		t.Fatal("runtime must follow native sidecar shutdown ordering")
+	}
+	config := pod.Spec.InitContainers[0].EnvFrom
+	if len(config) != 2 || config[0].ConfigMapRef == nil || config[0].ConfigMapRef.Name != "roamvm-runtime" || config[1].SecretRef.Name != "roamvm-object-store" {
+		t.Fatal("runtime namespace settings/credentials missing")
+	}
+	runner := pod.Spec.Containers[0]
+	for _, mount := range runner.VolumeMounts {
+		if mount.Name == "kube-api" {
+			t.Fatal("runner can access runtime Kubernetes credentials")
+		}
+	}
+	if len(runner.EnvFrom) != 0 {
+		t.Fatal("runner receives object-store credentials")
 	}
 	if *pod.Spec.AutomountServiceAccountToken {
 		t.Fatal("runner has Kubernetes credentials")
@@ -188,5 +217,30 @@ func TestMissingRunnerNeverReportsDurableStop(t *testing.T) {
 	r.Get(ctx, req.NamespacedName, &current)
 	if current.Status.Phase != "RecoveryRequired" {
 		t.Fatal(current.Status.Phase)
+	}
+}
+
+func TestGuestCannotProjectRuntimeCredentials(t *testing.T) {
+	for _, source := range []core.VolumeProjection{
+		{Secret: &core.SecretProjection{LocalObjectReference: core.LocalObjectReference{Name: "roamvm-object-store"}}},
+		{ServiceAccountToken: &core.ServiceAccountTokenProjection{Path: "token"}},
+		{PodCertificate: &core.PodCertificateProjection{}},
+	} {
+		for _, labelled := range []bool{false, true} {
+			r, vm := setup(t)
+			projection := core.ProjectedVolumeSource{Sources: []core.VolumeProjection{source}}
+			if labelled {
+				vm.Spec.ConfigDisks = []api.ConfigDisk{{Name: "guest", Label: "guest", Projection: projection}}
+			} else {
+				vm.Spec.Config = &projection
+			}
+			if err := r.createPod(context.Background(), vm); err == nil {
+				t.Fatal("guest received runtime credentials")
+			}
+			var pods core.PodList
+			if err := r.List(context.Background(), &pods); err != nil || len(pods.Items) != 0 {
+				t.Fatal("credential-bearing Pod was created", err)
+			}
+		}
 	}
 }
