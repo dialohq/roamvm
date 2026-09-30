@@ -48,7 +48,12 @@ files and machine credentials. RAM and running processes are not retained.
 For a planned move, stop and wait for `Stopped`, change placement constraints or
 cordon the old node, and start again. The default scheduler selects the destination.
 Use Services for stable identity; the Pod IP can change. A normal `kubectl delete
-rvm` also waits for a checkpoint, retaining the S3 objects for recovery/retention.
+rvm` also waits for a checkpoint, retaining the latest stopped state for recovery.
+
+Each successful stop replaces the previous checkpoint. The runtime uploads and
+verifies a temporary replacement, commits it as current, then deletes superseded
+checkpoints before reporting `Stopped`. There is no stop-history or rollback
+catalogue. Old and new objects coexist only while replacement/cleanup is pending.
 
 ## Install
 
@@ -126,11 +131,15 @@ object-store environment and projected Kubernetes token.
 
 The SDK uses normal HTTPS validation. Configure registry authentication through
 VM `imagePullSecrets`; local plaintext registries use containerd's registry config. Runtime AWS permissions cover GetObject/PutObject under `vm/` and
-`runtime-probes/`, multipart upload/abort, and DeleteObject on `runtime-probes/`
-for probe cleanup. The runtime does not delete checkpoints. Keep this bucket
+`runtime-probes/`, multipart upload/abort, ListBucket scoped to `vm/*/overlay/`,
+and DeleteObject on overlay objects and `runtime-probes/`. Versioned buckets also
+require DeleteObjectVersion: superseded checkpoint versions are physically removed,
+not hidden behind delete markers. Keep this bucket
 private and enable your usual encryption/access controls; overlays contain the
 VM's private files. S3 bucket versioning is supported but not required: checkpoint
-keys are already immutable, and head replacement uses ETag compare-and-swap.
+keys are unique during replacement, and head replacement uses ETag compare-and-swap.
+Bucket policies must permit cleanup; otherwise the Pod stays `Checkpointing`
+and retries. The next successful stop also removes history from older releases.
 
 The controller and daemon are trusted cluster components. VM creation is comparable
 to Pod creation: it can reference namespace-local Secrets and PVCs. Do not grant
@@ -232,9 +241,9 @@ Kubernetes reservations.
 ## Current limits
 
 IPv4 and x86-64 only; no live migration, automatic crash recovery, memory snapshots,
-online disk resizing, image upgrades, periodic checkpoints, or automatic checkpoint /
-checkpoint garbage collection. Old generations and bases accumulate until an
-operator applies retention. Never delete the current checkpoint or a base used by
+online disk resizing, image upgrades, or periodic checkpoints. The latest checkpoint
+outlives VM deletion; deleting that final recovery copy is an operator decision.
+Never delete the current checkpoint or a base used by
 a running VM. Do not apply age-only S3 expiration to the entire overlay prefix.
 
 Stopping costs guest shutdown plus compaction, upload and verification of the

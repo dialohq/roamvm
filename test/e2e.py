@@ -88,6 +88,7 @@ def stop():
     h = head()
     check('Stopped is durably committed', h['state'] == 'Stopped' and not h.get('owner'))
     check('Kubernetes checkpoint agrees with S3', result['status']['checkpoint'] == h['checkpoint'])
+    check('only the latest stop is retained', json.loads(run([a.lab_tool, 'checkpoints', uid])) == [h['checkpoint']['key']])
     results['timings'].append({'operation': 'stop', 'seconds': round(elapsed, 3), 'checkpointBytes': h['checkpoint']['size']})
     return h
 

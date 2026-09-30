@@ -72,8 +72,9 @@ Keep `.lab/s3` until its checkpoints are no longer needed.
 
 ## Coverage
 
-- Race-enabled Go tests: competing ownership acquisitions, immutable generations,
-  failed/corrupt uploads, lost commit response, corrupt restore, old-epoch fencing,
+- Race-enabled Go tests: competing ownership acquisitions, checkpoint replacement,
+  failed/corrupt uploads, lost commit response, cleanup failures and delayed cleanup
+  racing with a newer stop, corrupt restore, old-epoch fencing,
   Pod-bound authentication and Kubernetes resource accounting.
 - Actual qemu-img tests: writable overlay compaction/rebase preserves both data
   and zero-overwrites, and leaves its base unchanged.
@@ -81,10 +82,13 @@ Keep `.lab/s3` until its checkpoints are no longer needed.
   manifests, oversized/empty disks and QCOW2 backing references are rejected.
   Kubelet/containerd owns registry authentication, unpacking and cache publication.
 - Real MinIO: conditional create/replace, stale ETag rejection, read-after-write,
-  conditional multipart upload and overwrite rejection.
+  conditional multipart upload and overwrite rejection. Checkpoint replacement
+  also checks physical deletion in a temporary versioned bucket; its test requires
+  bucket creation/versioning permissions. Garage replacement uses Kubernetes metadata.
 - Real KVM: create, Service access, DNS, repeated shutdown/restore, cross-node
   scheduling and byte-exact payload persistence, runtime sidecar restart, S3 outage during
   stop, hypervisor kill, corrupt object refusal and explicit fenced recovery.
+  Every successful stop asserts that exactly the current checkpoint remains in S3.
 - Worker-container failure: last checkpoint retained, ownership never expires,
   explicit recovery runs elsewhere and discards uncommitted changes as specified.
 - Kubernetes integration: queued cancellation, immutable-base CRD validation,

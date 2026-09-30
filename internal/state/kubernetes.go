@@ -21,6 +21,17 @@ type Kubernetes struct {
 	Objects   Store
 }
 
+func (s *Kubernetes) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.Objects.List(ctx, prefix)
+}
+
+func (s *Kubernetes) Delete(ctx context.Context, key string) error {
+	if _, head := headName(key); head {
+		return errors.New("cannot delete durable ownership state")
+	}
+	return s.Objects.Delete(ctx, key)
+}
+
 func headName(key string) (string, bool) {
 	parts := strings.Split(key, "/")
 	if len(parts) != 3 || parts[0] != "vm" || parts[1] == "" || parts[2] != "head.json" {

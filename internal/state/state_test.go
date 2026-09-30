@@ -3,8 +3,6 @@ package state
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +25,38 @@ type memoryStore struct {
 	failOverlay        bool
 	corruptOverlay     bool
 	loseCommitResponse bool
+	failDelete         bool
+	failList           bool
+	loseDeleteResponse bool
 }
 
 func newMemory() *memoryStore { return &memoryStore{objects: map[string]memoryObject{}} }
+func (s *memoryStore) List(ctx context.Context, prefix string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failList {
+		return nil, errors.New("injected list failure")
+	}
+	var keys []string
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+func (s *memoryStore) Delete(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failDelete {
+		return errors.New("injected delete failure")
+	}
+	delete(s.objects, key)
+	if s.loseDeleteResponse {
+		return errors.New("response lost after successful delete")
+	}
+	return nil
+}
 func (s *memoryStore) Get(ctx context.Context, key string) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,7 +244,7 @@ func TestRecoveryFencesOldEpoch(t *testing.T) {
 		t.Fatal(e)
 	}
 }
-func TestGenerationsImmutableAndSurviveFailure(t *testing.T) {
+func TestStopReplacesPreviousCheckpoint(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	first, e := m.Commit(ctx, s, file)
 	if e != nil {
@@ -238,14 +265,7 @@ func TestGenerationsImmutableAndSurviveFailure(t *testing.T) {
 	if final.Head.Checkpoint.Generation != 2 || final.Head.Checkpoint.Key == original.Key {
 		t.Fatal("generation overwritten")
 	}
-	object, e := m.Store.Get(ctx, original.Key)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer object.Body.Close()
-	h := sha256.New()
-	io.Copy(h, object.Body)
-	if hex.EncodeToString(h.Sum(nil)) != original.SHA256 {
-		t.Fatal("old generation changed")
+	if _, e = m.Store.Get(ctx, original.Key); !errors.Is(e, ErrNotFound) {
+		t.Fatal("previous stop retained", e)
 	}
 }

@@ -31,6 +31,8 @@ type Store interface {
 	Get(context.Context, string) (Object, error)
 	// match="" means create-only; otherwise compare the current ETag.
 	Put(context.Context, string, io.ReadSeeker, int64, string) (Object, error)
+	List(context.Context, string) ([]string, error)
+	Delete(context.Context, string) error
 }
 
 type Head struct {
@@ -211,8 +213,11 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 		// The CAS may have succeeded while the HTTP response was lost.
 		current, e := m.Read(ctx, h2.VMID)
 		if e == nil && current.Head.Epoch == h2.Epoch && current.Head.State == "Stopped" && current.Head.Checkpoint != nil && current.Head.Checkpoint.Key == key {
-			return current, nil
+			out, err = current, nil
 		}
+	}
+	if err == nil {
+		err = m.Prune(ctx, out)
 	}
 	return out, err
 }

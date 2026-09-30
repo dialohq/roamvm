@@ -50,6 +50,12 @@ func main() {
 		if e == nil {
 			e = json.NewEncoder(os.Stdout).Encode(head.Head)
 		}
+	case "checkpoints":
+		keys, err := s.List(ctx, "vm/"+os.Args[2]+"/overlay/")
+		e = err
+		if e == nil {
+			e = json.NewEncoder(os.Stdout).Encode(keys)
+		}
 	case "corrupt", "restore":
 		head, err := (state.Manager{Store: metadata}).Read(ctx, os.Args[2])
 		if err != nil {

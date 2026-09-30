@@ -274,6 +274,9 @@ func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachi
 		return err
 	}
 	if current.Head.State == "Stopped" && current.Head.Epoch == p.Session.Head.Epoch && current.Head.Checkpoint != nil {
+		if err = s.State.Prune(ctx, current); err != nil {
+			return err
+		}
 		return s.complete(ctx, pod, p, current)
 	}
 	if err = s.State.Check(ctx, p.Session); err != nil {

@@ -58,18 +58,33 @@ existing deployment without an offline metadata migration with all VMs stopped.
 
 Checkpoints are immutable objects named by generation, epoch and SHA-256. The
 runtime uploads the compact QCOW2 overlay, reads it back and verifies its full
-hash and size, then conditionally replaces the head. Only that last write commits
-Stopped. A lost response is reconciled by reading the head. In S3 mode these
+hash and size, then conditionally replaces the head. That write commits the new
+durable state. Cleanup removes previous checkpoints before the runner reports
+Stopped and discards its working PVC. A lost response is reconciled by reading
+the head. In S3 mode these
 operations rely on the backend's
 [conditional write semantics](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
 In Kubernetes mode, S3 conditional headers are only an additional safeguard:
 epoch and content hash distinguish checkpoint keys, and retrying a key writes
 the same bytes. Only the Kubernetes head determines which object is committed.
 
+Only the latest stopped checkpoint is retained. Unique keys are temporary commit
+identities, not a snapshot history. After publication, cleanup lists this VM's
+overlay prefix and deletes superseded objects at or below the committed checkpoint's
+epoch. It preserves the committed key and every newer epoch, so delayed cleanup
+cannot remove a subsequent owner's upload or checkpoint. No rollback operation
+can republish an older key. Unknown key formats are left alone.
+
+Cleanup errors keep the Pod Checkpointing. A restarted runtime reads the committed
+head and retries cleanup without uploading again. The next successful stop also
+removes history left by older releases. On versioned S3, deletion specifies the
+obsolete object's version ID to remove its bytes instead of adding a delete marker.
+
 Ownership can change while an upload is in flight. The check before upload is
 not sufficient: the final head update must compare the exact revision acquired
 by that runner, without retrying against a newly read revision. A stale upload
-can leave an unreferenced object, but cannot change the current checkpoint.
+can leave an unreferenced object, but cannot change the current checkpoint. Such
+objects are removed by a later successful stop once their epoch is obsolete.
 Compare-and-swap fences publication, not execution. Recovery still requires
 proof that the previous VMM has terminated or its node has been fenced.
 
@@ -100,6 +115,7 @@ root claim, custom CSI driver, or manual local-disk inventory is involved.
 | Missing OCI base | Pull on the chosen node; no scheduling dependency |
 | Duplicate start | One runner name plus conditional head ownership; second owner rejected |
 | S3 unavailable during stop | Guest exits, Pod stays Checkpointing, local state retained, upload retried |
+| Old-checkpoint deletion fails | New checkpoint is durable; Pod stays Checkpointing and retries cleanup |
 | Runtime sidecar restarts | Same runner/epoch resumes using saved metadata |
 | Control contact lost for 30 seconds | Runner requests guest shutdown; ownership stays held |
 | Guest ignores ACPI timeout | VMM killed, no new checkpoint, RecoveryRequired |
@@ -107,7 +123,7 @@ root claim, custom CSI driver, or manual local-disk inventory is involved.
 | Corrupt downloaded checkpoint | Hash failure before VMM launch |
 | Stale owner uploads after recovery | Head CAS fails; it cannot publish a new current generation |
 | Unscheduled Pod cancelled | Resource-version checked deletion, no ownership acquired |
-| Graceful VM deletion | Finalizer waits for checkpoint; object retention is separate |
+| Graceful VM deletion | Finalizer waits for replacement and cleanup; latest recovery checkpoint retained |
 
 Deleting a Pod starts its Kubernetes termination grace period (one hour in the
 initial configuration). Finalizers do **not** prevent kubelet killing containers
