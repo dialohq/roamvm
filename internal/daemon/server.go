@@ -54,6 +54,7 @@ type Response struct {
 }
 type Server struct {
 	Client             client.Client
+	Namespace, PodName string
 	Node, PodUID, Root string
 	State              state.Manager
 	BaseDir            string
@@ -76,6 +77,20 @@ func (s *Server) Serve(ctx context.Context, socket string) error {
 	mux := http.NewServeMux()
 	for _, action := range []string{"prepare", "heartbeat", "status", "finish"} {
 		mux.HandleFunc("POST /"+action, s.handler(action))
+	}
+	parent := ctx
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	if s.PodName != "" {
+		go s.watchRunner(ctx, cancel)
+	} else {
+		go func() {
+			select {
+			case <-parent.Done():
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -316,7 +331,11 @@ func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachi
 }
 
 func (s *Server) complete(ctx context.Context, pod *core.Pod, p Prepared, committed state.Session) error {
-	if err := s.annotate(ctx, pod, "Stopped", "", committed.Head.Checkpoint); err != nil {
+	message := ""
+	if reason := pod.Annotations[controller.ExitAnnotation]; reason != "" {
+		message = reason + "; crash-consistent working disk checkpointed"
+	}
+	if err := s.annotate(ctx, pod, "Stopped", message, committed.Head.Checkpoint); err != nil {
 		return err
 	}
 	// Cleanup follows both the durable commit and its Kubernetes projection.

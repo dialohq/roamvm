@@ -29,6 +29,8 @@ const (
 	SecretAnnotation     = "vm.roamvm.io/auth-secret"
 	DiskSizeAnnotation   = "vm.roamvm.io/root-disk-size"
 	ResizeAnnotation     = "vm.roamvm.io/resize-error"
+	GenerationAnnotation = "vm.roamvm.io/boot-generation"
+	ExitAnnotation       = "vm.roamvm.io/runner-exit"
 	SpecAnnotation       = "vm.roamvm.io/boot-spec"
 )
 
@@ -86,7 +88,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 					client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}),
 				)
 			}
-			return r.status(ctx, &vm, "Stopped", "", nil)
+			return r.status(ctx, &vm, "Stopped", vm.Status.Message, nil)
 		}
 		if vm.Status.Phase != "" && vm.Status.Phase != "Stopped" && vm.Status.Phase != "Pending" {
 			return r.status(
@@ -145,9 +147,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if err := json.Unmarshal([]byte(pod.Annotations[CheckpointAnnotation]), &cp); err != nil {
 			return ctrl.Result{}, err
 		}
+		if vm.Spec.PowerState != "Stopped" && (pod.Annotations[GenerationAnnotation] == "" || pod.Annotations[GenerationAnnotation] == strconv.FormatInt(vm.Generation, 10)) {
+			before := vm.DeepCopy()
+			vm.Spec.PowerState = "Stopped"
+			return ctrl.Result{}, r.Patch(ctx, &vm, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+		}
 		// Record the durable stop before removing its Pod. A controller crash between
 		// these writes can retry without inventing a lost-runtime recovery event.
-		if _, err := r.status(ctx, &vm, "Stopped", "", pod, &cp); err != nil {
+		if _, err := r.status(ctx, &vm, "Stopped", pod.Annotations[Message], pod, &cp); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.releasePod(ctx, pod)
