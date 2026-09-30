@@ -59,7 +59,7 @@ func kubeClient() (client.Client, error) {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: roamvm controller|daemon|runner|device-plugin|start|stop|image-push|state|recover")
+		return errors.New("usage: roamvm controller|daemon|checkpoint|runner|device-plugin|start|stop|image-push|state|recover")
 	}
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctx := ctrl.SetupSignalHandler()
@@ -96,7 +96,7 @@ func run() error {
 		_ = m.AddHealthzCheck("healthz", healthz.Ping)
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
-	case "daemon":
+	case "daemon", "checkpoint":
 		c, err := kubeClient()
 		if err != nil {
 			return err
@@ -132,6 +132,9 @@ func run() error {
 		}
 		if err != nil {
 			return fmt.Errorf("unsafe or unavailable object store: %w", err)
+		}
+		if os.Args[1] == "checkpoint" {
+			return server.CheckpointTerminatedRunner(ctx)
 		}
 		return server.Serve(ctx, "/run/roamvm/runtime.sock")
 	case "start", "stop":

@@ -44,6 +44,13 @@ kubectl wait rvm/devbox --for=condition=Stopped --timeout=600s
 ```
 
 `start`/`stop` patch `spec.powerState`; tools can use the Kubernetes API directly.
+A local runner or hypervisor crash is checkpointed after Kubernetes confirms the
+runner has terminated. The VM stops instead of rebooting in a loop; its next start
+restores the crash-consistent disk. A filesystem may replay its journal, and
+unflushed application data is not guaranteed. If the disk cannot be validated or
+uploaded, it stays retained with `RecoveryRequired`; there is no fallback to an
+older checkpoint. See [recovery](docs/recovery.md) for existing failed Pods.
+
 A stopped VM retains the entire changed root disk, including packages, project
 files and machine credentials. RAM and running processes are not retained.
 
@@ -67,6 +74,10 @@ default). Size it for the working overlay plus a compact checkpoint; the base is
 separate. Each runner Pod gets a fresh generic ephemeral PVC on its scheduled
 node. Pod deletion removes the claim after checkpoint commit. The PVC is working
 storage, not the VM's durable identity; a restart can use another node.
+
+The runtime uses per-container `OnFailure` restart policy (the
+`ContainerRestartRules` feature, enabled by default in Kubernetes 1.35+). It stays
+alive after the runner exits to checkpoint the disk.
 
 The immutable base uses a read-only Kubernetes `image` volume. Kubelet/containerd
 handle pulling, authentication, caching and garbage collection. The runtime socket
@@ -211,7 +222,8 @@ Cloud Hypervisor deployment.
   Requests default to the vCPU count. Set a lower request to oversubscribe CPUs;
   the sum of guest vCPUs/limits may exceed the node's CPUs. Requests still have
   to fit. KVM slots are shared access tokens, not dedicated physical CPUs.
-  Memory reserves guest RAM plus 192 MiB VMM overhead and is not overcommitted.
+  Memory reserves guest RAM plus 512 MiB and an additional 1/32 of ordinary guest
+  RAM for host overhead. Hugepage guests reserve the 512 MiB overhead separately.
   The runtime sidecar additionally requests 100m CPU and 128 MiB RAM, with a
   512 MiB memory limit. Adjust upward if your workload/devices need more host memory.
 - Affinity, node selectors, tolerations and topology spread pass to the runner Pod.
@@ -259,7 +271,7 @@ Kubernetes reservations.
 
 ## Current limits
 
-IPv4 and x86-64 only; no live migration, automatic crash recovery, memory snapshots,
+IPv4 and x86-64 only; no live migration, automatic lost-node takeover, memory snapshots,
 online disk resizing, image upgrades, or periodic checkpoints. The latest checkpoint
 outlives VM deletion; deleting that final recovery copy is an operator decision.
 Never delete the current checkpoint or a base used by

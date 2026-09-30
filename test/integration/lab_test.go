@@ -66,7 +66,7 @@ func newLab(t testing.TB) *lab {
 	raw, err := loader.Load()
 	must(t, err)
 	switch raw.CurrentContext {
-	case "kind-roamvm-test", "kind-roamvm", "kind-roamvm-cilium":
+	case "kind-roamvm-test", "kind-roamvm", "kind-roamvm-cilium", "kind-roamvm-crash-test":
 	default:
 		t.Fatalf("refusing context %q; use the disposable kind lab", raw.CurrentContext)
 	}
