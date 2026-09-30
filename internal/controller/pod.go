@@ -115,13 +115,9 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	pod.Labels["vm.roamvm.io/name"] = vm.Name
 	pod.Annotations["kubectl.kubernetes.io/default-container"] = "runner"
 	root := "/var/lib/roamvm"
-	size := r.StorageSize
-	if size == "" {
-		size = "64Gi"
-	}
-	storage, err := resource.ParseQuantity(size)
-	if err != nil || storage.Sign() <= 0 {
-		return fmt.Errorf("invalid working storage size %q", size)
+	storage, err := workingSize(r.StorageSize, vm.Spec.RootDiskSize)
+	if err != nil {
+		return err
 	}
 	var storageClass *string
 	if r.StorageClass != "" {

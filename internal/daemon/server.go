@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -28,12 +29,14 @@ import (
 )
 
 type Request struct {
-	Namespace string `json:"namespace"`
-	Pod       string `json:"pod"`
-	UID       string `json:"uid"`
-	Token     string `json:"token"`
-	Phase     string `json:"phase,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Namespace   string `json:"namespace"`
+	Pod         string `json:"pod"`
+	UID         string `json:"uid"`
+	Token       string `json:"token"`
+	Phase       string `json:"phase,omitempty"`
+	Message     string `json:"message,omitempty"`
+	DiskSize    int64  `json:"diskSize,omitempty"`
+	ResizeError string `json:"resizeError,omitempty"`
 }
 type Prepared struct {
 	Session state.Session
@@ -43,9 +46,11 @@ type Prepared struct {
 	PodUID  string
 }
 type Response struct {
-	Prepared *Prepared `json:"prepared,omitempty"`
-	Stop     bool      `json:"stop,omitempty"`
-	Error    string    `json:"error,omitempty"`
+	Prepared    *Prepared `json:"prepared,omitempty"`
+	DiskSize    int64     `json:"diskSize,omitempty"`
+	ResizeError string    `json:"resizeError,omitempty"`
+	Stop        bool      `json:"stop,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 type Server struct {
 	Client             client.Client
@@ -138,11 +143,16 @@ func (s *Server) handler(action string) http.HandlerFunc {
 					response.Stop = true
 				}
 			}
+			if err == nil && !response.Stop {
+				response.DiskSize, response.ResizeError = s.resizeTarget(r.Context(), pod, vm)
+			}
 		case "status":
 			if req.Phase != "Running" && req.Phase != "Stopping" && req.Phase != "Checkpointing" &&
 				req.Phase != "Error" {
 				err = errors.New("invalid runtime phase")
 			} else {
+				pod.Annotations[controller.DiskSizeAnnotation] = strconv.FormatInt(req.DiskSize, 10)
+				pod.Annotations[controller.ResizeAnnotation] = req.ResizeError
 				err = s.annotate(r.Context(), pod, req.Phase, req.Message, nil)
 			}
 		case "finish":
@@ -349,6 +359,11 @@ func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message str
 		}
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
+		}
+		for _, key := range []string{controller.DiskSizeAnnotation, controller.ResizeAnnotation} {
+			if value, ok := pod.Annotations[key]; ok {
+				current.Annotations[key] = value
+			}
 		}
 		current.Annotations[controller.Phase] = phase
 		current.Annotations[controller.Message] = message

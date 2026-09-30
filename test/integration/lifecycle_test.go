@@ -70,6 +70,10 @@ func TestLifecycle(t *testing.T) {
 		s := p.Status.ContainerStatuses
 		return len(s) > 1 && s[1].RestartCount > restarts && s[1].State.Running != nil, nil
 	})
+	l.wait("runtime socket serves after restart", func() (bool, error) {
+		_, err := l.exec(pod.Name, "runtime", nil, "curl", "--silent", "--max-time", "1", "--unix-socket", "/run/roamvm/runtime.sock", "http://runtime/", "-o", "/dev/null")
+		return err == nil, err
+	})
 	l.ready(v.Name)
 	equal(t, "sidecar restart preserves bytes", l.request(v.Name, "/data", nil), payload)
 	equal(t, "VMM did not restart", l.pod(pod.Name).Status.ContainerStatuses[0].RestartCount, int32(0))
@@ -162,11 +166,10 @@ func TestLifecycle(t *testing.T) {
 
 	v = l.vm(v.Name)
 	durable := l.head(v)
-	owner := string(l.pod(v.Status.PodName).UID)
 	_, err = l.exec(v.Status.PodName, "runner", nil, "/bin/sh", "-ec", `
  for process in /proc/[0-9]*; do
    read -r name < "$process/comm" || continue
-   case "$name" in cloud-hypervis*) kill -KILL "${process##*/}"; exit 0;; esac
+   case "$name" in qemu-system-*) kill -KILL "${process##*/}"; exit 0;; esac
  done
  exit 1`)
 	must(t, err)
@@ -205,7 +208,7 @@ func TestLifecycle(t *testing.T) {
 	if !strings.Contains(string(log), "integrity mismatch") || strings.Contains(string(log), "Linux version") {
 		t.Fatalf("corruption was not rejected before boot: %s", log)
 	}
-	owner = l.head(v).Owner
+	owner := l.head(v).Owner
 	overwrite(original)
 	damaged = false
 	l.recover(v, owner)

@@ -17,13 +17,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dialohq/roamvm/internal/daemon"
+	"github.com/dialohq/roamvm/internal/qmp"
 	"golang.org/x/sys/unix"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type Client struct {
@@ -64,12 +63,16 @@ func (c *Client) Call(ctx context.Context, action string) (daemon.Response, erro
 	return out, nil
 }
 
-func (c *Client) status(phase, message string) {
+func (c *Client) status(phase, message string) bool {
 	c.Request.Phase = phase
 	c.Request.Message = message
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = c.Call(ctx, "status")
+	_, err := c.Call(ctx, "status")
+	if err != nil {
+		log.Printf("report VM status: %v", err)
+	}
+	return err == nil
 }
 
 func Run() error {
@@ -136,76 +139,18 @@ func Run() error {
 	dnsExited := make(chan error, 1)
 	go func() { dnsExited <- dns.Wait() }()
 	defer dns.Process.Kill()
-	socket := filepath.Join(p.Dir, "ch.sock")
+	socket := filepath.Join(p.Dir, "qmp.sock")
 	_ = os.Remove(socket)
-	memory, err := resource.ParseQuantity(p.Spec.Memory)
-	if err != nil {
-		return err
-	}
-	memoryArg := "size=" + strconv.FormatInt(memory.Value(), 10)
-	if p.Spec.Hugepages != "" {
-		q, e := resource.ParseQuantity(p.Spec.Hugepages)
-		if e != nil {
-			return e
-		}
-		memoryArg += ",hugepages=on,hugepage_size=" + strconv.FormatInt(q.Value(), 10)
-	}
 	if len(p.Spec.Devices) > 0 {
 		if e := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: unix.RLIM_INFINITY, Max: unix.RLIM_INFINITY}); e != nil {
 			return e
 		}
 	}
-	args := []string{
-		"--api-socket",
-		socket,
-		"--cpus",
-		"boot=" + strconv.Itoa(int(p.Spec.CPUs)),
-		"--memory",
-		memoryArg,
-		"--disk",
-		"path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on,direct=off",
-		"--net",
-		"tap=vm-tap,mac=02:00:00:00:00:02",
-		"--console",
-		"off",
-		"--serial",
-		"tty",
+	args, err := qemuArgs(ctx, p, socket)
+	if err != nil {
+		return err
 	}
-	if _, e := os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); e == nil {
-		cmdline := p.Base.Manifest.Cmdline
-		if p.Spec.Hostname != "" {
-			cmdline += " systemd.hostname=" + p.Spec.Hostname
-		}
-		args = append(args, "--kernel", filepath.Join(p.Base.Dir, "vmlinux"), "--cmdline", cmdline)
-		if _, e = os.Stat(filepath.Join(p.Base.Dir, "initrd")); e == nil {
-			args = append(args, "--initramfs", filepath.Join(p.Base.Dir, "initrd"))
-		}
-	} else {
-		args = append(args, "--firmware", filepath.Join(p.Base.Dir, "firmware"))
-	}
-	for _, d := range p.Spec.Disks {
-		path := "/dev/disks/" + d.Name
-		if d.VolumeMode == "Filesystem" {
-			path = "/disks/" + d.Name + "/disk.img"
-		}
-		readonly := "off"
-		if d.ReadOnly {
-			readonly = "on"
-		}
-		args = append(args, "--disk", "path="+path+",image_type=raw,readonly="+readonly)
-	}
-	for _, device := range p.Spec.Devices {
-		args = append(args, "--device", "path=/sys/bus/pci/devices/"+device.PCIAddress)
-	}
-	for _, disk := range p.Spec.ProjectedDisks() {
-		path := "/tmp/" + disk.VolumeName() + ".iso"
-		if err = command(ctx, "genisoimage", "-quiet", "-follow-links", "-rock", "-joliet", "-V", disk.Label, "-o", path, disk.MountPath()); err != nil {
-			return err
-		}
-		args = append(args, "--disk", "path="+path+",image_type=raw,readonly=on")
-	}
-
-	hypervisor := exec.Command("cloud-hypervisor", args...)
+	hypervisor := exec.Command("qemu-system-x86_64", args...)
 	hypervisor.Stdout = os.Stdout
 	hypervisor.Stderr = os.Stderr
 	// A killed runner must not leave a VMM alive holding the writable disk.
@@ -227,8 +172,8 @@ func Run() error {
 		}
 	}
 	defer setReady(false)
-	ch := unixHTTP(socket)
-	ch.Timeout = 3 * time.Second
+	q := qmp.Client(socket)
+	cleanShutdown := false
 	lastContact := time.Now()
 	var lastHeartbeat time.Time
 	stopRequested := false
@@ -245,6 +190,9 @@ func Run() error {
 			dnsExited = nil
 		case err = <-exited:
 			setReady(false)
+			if err == nil && !cleanShutdown {
+				err = errors.New("hypervisor exited without guest shutdown")
+			}
 			if err != nil {
 				c.status("Error", "hypervisor failed; working disk retained: "+err.Error())
 				return err
@@ -260,6 +208,24 @@ func Run() error {
 					lastContact = time.Now()
 				}
 				stopRequested = h.Stop
+				if e == nil && !h.Stop && stopping.IsZero() {
+					resizeError := h.ResizeError
+					size := c.Request.DiskSize
+					if size == 0 || h.DiskSize > size {
+						var resizeErr error
+						size, resizeErr = q.Grow(context.Background(), h.DiskSize)
+						if resizeErr != nil {
+							resizeError = resizeErr.Error()
+						}
+					}
+					if c.Request.DiskSize != size || c.Request.ResizeError != resizeError {
+						previous := c.Request
+						c.Request.DiskSize, c.Request.ResizeError = size, resizeError
+						if runningReported && !c.status("Running", "") {
+							c.Request = previous
+						}
+					}
+				}
 			}
 			shouldStop := stopRequested || ctx.Err() != nil || time.Since(lastContact) > 30*time.Second
 			if shouldStop && stopping.IsZero() {
@@ -269,7 +235,7 @@ func Run() error {
 			}
 			if !stopping.IsZero() {
 				if !powerSent {
-					if e := chCall(ch, "PUT", "vm.power-button", nil); e == nil {
+					if e := q.Call(context.Background(), "system_powerdown", nil, nil); e == nil {
 						powerSent = true
 					}
 				}
@@ -286,8 +252,7 @@ func Run() error {
 					setReady(true)
 					if !runningReported {
 						log.Printf("startup stage=guest-ready elapsed=%s", time.Since(started))
-						c.status("Running", "")
-						runningReported = true
+						runningReported = c.status("Running", "")
 						tick.Reset(time.Second)
 					}
 				} else {
@@ -295,33 +260,14 @@ func Run() error {
 				}
 			}
 			var info struct {
-				State string `json:"state"`
+				Status string `json:"status"`
 			}
-			if e := chCall(ch, "GET", "vm.info", &info); e == nil && strings.EqualFold(info.State, "Shutdown") {
-				_ = chCall(ch, "PUT", "vmm.shutdown", nil)
+			if e := q.Call(context.Background(), "query-status", nil, &info); e == nil && info.Status == "shutdown" {
+				cleanShutdown = true
+				_ = q.Call(context.Background(), "quit", nil, nil)
 			}
 		}
 	}
-}
-
-func chCall(c *http.Client, method, action string, out any) error {
-	req, err := http.NewRequest(method, "http://vmm/api/v1/"+action, nil)
-	if err != nil {
-		return err
-	}
-	res, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("%s: %s", action, b)
-	}
-	if out != nil {
-		return json.NewDecoder(res.Body).Decode(out)
-	}
-	return nil
 }
 
 func finish(c *Client) error {

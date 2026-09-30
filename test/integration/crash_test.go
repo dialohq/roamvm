@@ -39,7 +39,7 @@ func TestLocalCrashRecovery(t *testing.T) {
 				expectedMax = "2147483648"
 			}
 			equal(t, "runner memory limit", strings.TrimSpace(string(memoryMax)), expectedMax)
-			command := `for p in /proc/[0-9]*; do read -r name < "$p/comm" || continue; case "$name" in cloud-hypervis*) kill -KILL "${p##*/}"; exit 0;; esac; done; exit 1`
+			command := `for p in /proc/[0-9]*; do read -r name < "$p/comm" || continue; case "$name" in qemu-system-*) kill -KILL "${p##*/}"; exit 0;; esac; done; exit 1`
 
 			if failure == "oom" {
 				command = `awk 'BEGIN { s="xxxxxxxxxxxxxxxx"; for(i=0;i<16;i++) s=s s; for(i=0;i<4096;i++) a[i]=s i }'`

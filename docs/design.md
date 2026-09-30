@@ -8,11 +8,9 @@ architecture was the starting point. RoamVM uses a runtime sidecar with each VM
 Pod so it can use PVCs and image volumes without hostPath mounts. No Virtink code
 or compatibility layer is included.
 
-Cloud Hypervisor [v53.0](https://github.com/cloud-hypervisor/cloud-hypervisor/releases/tag/v53.0)
-has native QCOW2 backing-file support. This avoids a separate NBD/ublk storage daemon.
-The pinned binary checksum is in the Dockerfile. Explicit `image_type` and
-`backing_files=on`, standalone-base validation and backing-path replacement follow
-its [QCOW2 hardening guidance](https://github.com/cloud-hypervisor/cloud-hypervisor/security/advisories/GHSA-jmr4-g2hv-mjj6).
+QEMU runs guests with KVM acceleration and a QCOW2 backing chain. The runner
+provides the validated base and working overlay explicitly through `-blockdev`;
+QMP controls shutdown and online root-disk growth.
 
 ## Components and trust
 
