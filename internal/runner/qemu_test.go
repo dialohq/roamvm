@@ -1,7 +1,12 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,5 +52,31 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 	}
 	if nodes[1]["read-only"] != true || nodes[1]["file"].(map[string]any)["filename"] != "/disks/shared/disk.img" {
 		t.Fatalf("secondary disk changed: %v", nodes[1])
+	}
+}
+
+func TestStatusAcknowledgement(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, `{"error":"temporary update conflict"}`)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+	// Keep the production request builder and substitute only its dial target.
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
+	}}
+	defer transport.CloseIdleConnections()
+	c := &Client{HTTP: &http.Client{Transport: transport}}
+	if c.status("Running", "") {
+		t.Fatal("failed status update was acknowledged")
+	}
+	if !c.status("Running", "") {
+		t.Fatal("retry was not acknowledged")
 	}
 }

@@ -63,12 +63,16 @@ func (c *Client) Call(ctx context.Context, action string) (daemon.Response, erro
 	return out, nil
 }
 
-func (c *Client) status(phase, message string) {
+func (c *Client) status(phase, message string) bool {
 	c.Request.Phase = phase
 	c.Request.Message = message
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = c.Call(ctx, "status")
+	_, err := c.Call(ctx, "status")
+	if err != nil {
+		log.Printf("report VM status: %v", err)
+	}
+	return err == nil
 }
 
 func Run() error {
@@ -206,14 +210,20 @@ func Run() error {
 				stopRequested = h.Stop
 				if e == nil && !h.Stop && stopping.IsZero() {
 					resizeError := h.ResizeError
-					size, resizeErr := q.Grow(context.Background(), h.DiskSize)
-					if resizeErr != nil {
-						resizeError = resizeErr.Error()
+					size := c.Request.DiskSize
+					if size == 0 || h.DiskSize > size {
+						var resizeErr error
+						size, resizeErr = q.Grow(context.Background(), h.DiskSize)
+						if resizeErr != nil {
+							resizeError = resizeErr.Error()
+						}
 					}
-					if runningReported && (c.Request.DiskSize != size || c.Request.ResizeError != resizeError) {
-						c.Request.DiskSize = size
-						c.Request.ResizeError = resizeError
-						c.status("Running", "")
+					if c.Request.DiskSize != size || c.Request.ResizeError != resizeError {
+						previous := c.Request
+						c.Request.DiskSize, c.Request.ResizeError = size, resizeError
+						if runningReported && !c.status("Running", "") {
+							c.Request = previous
+						}
 					}
 				}
 			}
@@ -242,8 +252,7 @@ func Run() error {
 					setReady(true)
 					if !runningReported {
 						log.Printf("startup stage=guest-ready elapsed=%s", time.Since(started))
-						c.status("Running", "")
-						runningReported = true
+						runningReported = c.status("Running", "")
 						tick.Reset(time.Second)
 					}
 				} else {
