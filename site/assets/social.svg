@@ -1,0 +1,89 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1200"
+  height="630"
+  viewBox="0 0 1200 630"
+>
+  <style>
+    @font-face {
+      font-family: Inter;
+      src: url("inter-latin.woff2");
+      font-weight: 400 900;
+    }
+    text {
+      font-family: Inter, Helvetica, Arial, sans-serif;
+      fill: black;
+    }
+    .label {
+      font-family: monospace;
+      font-size: 13px;
+      letter-spacing: 1px;
+    }
+  </style>
+  <path fill="white" d="M0 0H1200V630H0Z" />
+  <path d="M56 108H1144M56 548H1144" stroke="black" stroke-width="3" />
+  <path fill="black" d="M56 44H88V76H56Z" />
+  <path
+    d="M63 69L81 51M64 51H81V68"
+    fill="none"
+    stroke="white"
+    stroke-width="3"
+  />
+  <text x="102" y="72" font-size="30" font-weight="900" letter-spacing="-1.5">
+    ROAMVM
+  </text>
+  <text x="1144" y="67" text-anchor="end" class="label">
+    KUBERNETES-NATIVE VIRTUAL MACHINES
+  </text>
+  <text x="48" y="298" font-size="132" font-weight="900" letter-spacing="-9">
+    YOUR VM.
+  </text>
+  <text x="48" y="418" font-size="132" font-weight="900" letter-spacing="-9">
+    ANY NODE.
+  </text>
+  <text x="56" y="484" font-size="21">
+    Compute moves. Your work comes with it.
+  </text>
+  <path fill="#f2f2f2" d="M742 157H1144V505H742Z" />
+  <path
+    d="M774 278H907V463H774Z M979 278H1112V463H979Z"
+    fill="white"
+    stroke="black"
+    stroke-width="2"
+  />
+  <path d="M774 316H907M979 316H1112" stroke="black" stroke-width="2" />
+  <text x="790" y="301" class="label">NODE A</text>
+  <text x="995" y="301" class="label">NODE B</text>
+  <circle
+    cx="840"
+    cy="385"
+    r="42"
+    fill="none"
+    stroke="black"
+    stroke-width="2"
+    stroke-dasharray="4 6"
+  />
+  <circle cx="1045" cy="385" r="42" fill="black" />
+  <text
+    x="1045"
+    y="399"
+    text-anchor="middle"
+    font-size="36"
+    font-weight="800"
+    style="fill: white"
+  >
+    VM
+  </text>
+  <path
+    d="M840 263V214H1045V258M1037 248L1045 259L1053 248"
+    fill="none"
+    stroke="#ff3000"
+    stroke-width="3"
+  />
+  <text x="56" y="587" class="label">
+    OCI BASE / S3 STATE / LOCAL WORKING DISK
+  </text>
+  <text x="1144" y="587" text-anchor="end" class="label">
+    DIALOHQ.GITHUB.IO/ROAMVM
+  </text>
+</svg>
