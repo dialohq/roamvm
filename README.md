@@ -1,5 +1,7 @@
 # RoamVM
 
+This branch is the [QEMU / online resizing spike](QEMU-SPIKE.md).
+
 A Kubernetes VM runtime for development machines. The root disk follows compute:
 OCI stores the immutable base, S3 stores stopped-VM changes, and a temporary PVC
 holds the working copy. No persistent root claim or storage replication is needed.
@@ -13,7 +15,7 @@ VirtualMachine → controller → runner Pod → kube-scheduler
                       runtime sidecar prepares disks
                          OCI base + S3 checkpoint
                                   │
-                       Cloud Hypervisor inside Pod
+                         QEMU/KVM inside Pod
                                   │
                     graceful shutdown → S3 commit
 ```

@@ -3,10 +3,12 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +21,62 @@ import (
 )
 
 func main() {
+	started := time.Now()
+	http.HandleFunc("/storage", func(w http.ResponseWriter, r *http.Request) {
+		var stat syscall.Statfs_t
+		if err := syscall.Statfs("/", &stat); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+		sectors, _ := os.ReadFile("/sys/class/block/vda/size")
+		var growthSize int64
+		var growthHash string
+		if f, err := os.Open("/growth-proof"); err == nil {
+			if info, e := f.Stat(); e == nil && info.Size() >= 128<<10 {
+				growthSize = info.Size()
+				marker := make([]byte, 128<<10)
+				if _, e = f.ReadAt(marker, growthSize-int64(len(marker))); e == nil {
+					sum := sha256.Sum256(marker)
+					growthHash = hex.EncodeToString(sum[:])
+				}
+			}
+			f.Close()
+		}
+		json.NewEncoder(w).Encode(map[string]any{"bootID": string(boot), "pid": os.Getpid(), "uptime": time.Since(started).Seconds(), "filesystemBytes": stat.Blocks * uint64(stat.Bsize), "diskSectors": string(sectors), "growthSize": growthSize, "growthHash": growthHash})
+	})
+	http.HandleFunc("/fill", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		size, err := strconv.ParseInt(r.URL.Query().Get("bytes"), 10, 64)
+		if err != nil || size < 128<<10 || size > 2<<30 {
+			http.Error(w, "invalid fill size", 400)
+			return
+		}
+		f, err := os.Create("/growth-proof")
+		if err == nil {
+			err = syscall.Fallocate(int(f.Fd()), 0, 0, size)
+			if err == nil {
+				marker := make([]byte, 128<<10)
+				_, err = rand.Read(marker)
+				if err == nil {
+					_, err = f.WriteAt(marker, size-int64(len(marker)))
+				}
+			}
+			if err == nil {
+				err = f.Sync()
+			}
+			f.Close()
+		}
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		fmt.Fprintln(w, size)
+	})
+
 	http.HandleFunc("/cpu", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			w.WriteHeader(http.StatusMethodNotAllowed)

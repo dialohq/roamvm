@@ -33,6 +33,7 @@ type VirtualMachine struct {
 	Status            VirtualMachineStatus `json:"status,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.rootDiskSize) || has(self.rootDiskSize)",message="rootDiskSize cannot be removed"
 type VirtualMachineSpec struct {
 	// Hostname is applied at guest boot; it does not change the Pod's DNS name.
 	// +kubebuilder:validation:MaxLength=63
@@ -53,6 +54,11 @@ type VirtualMachineSpec struct {
 	// Memory is guest RAM; resource requests must include hypervisor overhead.
 	// +kubebuilder:default="1Gi"
 	Memory string `json:"memory"`
+	// RootDiskSize is a minimum capacity. Growth applies to a running VM; shrinking is forbidden.
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="isQuantity(self) && quantity(self).isInteger() && quantity(self).compareTo(quantity('0')) > 0 && quantity(self).compareTo(quantity('16Ti')) <= 0 && quantity(self).asInteger() % 512 == 0",message="rootDiskSize must be a positive sector-aligned size up to 16Ti"
+	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) >= 0",message="rootDiskSize cannot shrink"
+	RootDiskSize string `json:"rootDiskSize,omitempty"`
 	// Hugepages uses native Kubernetes hugepages resource accounting.
 	// +kubebuilder:validation:Enum="2Mi";"1Gi"
 	Hugepages string `json:"hugepages,omitempty"`
@@ -117,6 +123,7 @@ type Checkpoint struct {
 	VersionID  string `json:"versionID,omitempty"`
 }
 type VirtualMachineStatus struct {
+	RootDiskSize       int64              `json:"rootDiskSize,omitempty"`
 	Phase              string             `json:"phase,omitempty"`
 	Message            string             `json:"message,omitempty"`
 	PodName            string             `json:"podName,omitempty"`

@@ -1,4 +1,4 @@
-.PHONY: build test generate image fmt fmt-check lab-up lab-install lab-down lab-guest lab-store integration benchmark
+.PHONY: build test generate image fmt fmt-check lab-up lab-install lab-down lab-guest lab-nixos-guest lab-store integration benchmark
 IMAGE ?= roamvm:dev
 GOFUMPT = go run mvdan.cc/gofumpt@v0.12.0
 COMPOSE = docker compose -f test/lab/compose.yaml
@@ -43,6 +43,11 @@ lab-guest: build
 	mkdir -p .lab
 	nix build .#test-guest --out-link .lab/guest.tar.gz
 	bin/roamvm image-push --plain-http --tag localhost:15001/test-guest:local --tar .lab/guest.tar.gz > .lab/guest-ref
+
+lab-nixos-guest: build
+	mkdir -p .lab
+	nix build .#test-nixos-guest --out-link .lab/nixos-guest.tar.gz
+	bin/roamvm image-push --plain-http --tag localhost:15001/test-nixos-guest:local --tar .lab/nixos-guest.tar.gz > .lab/nixos-guest-ref
 
 integration:
 	go test -tags=integration -race -count=1 -timeout=30m -v ./test/integration

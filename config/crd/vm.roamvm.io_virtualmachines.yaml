@@ -2080,6 +2080,19 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              rootDiskSize:
+                description: RootDiskSize is a minimum capacity. Growth applies to
+                  a running VM; shrinking is forbidden.
+                maxLength: 32
+                type: string
+                x-kubernetes-validations:
+                - message: rootDiskSize must be a positive sector-aligned size up
+                    to 16Ti
+                  rule: isQuantity(self) && quantity(self).isInteger() && quantity(self).compareTo(quantity('0'))
+                    > 0 && quantity(self).compareTo(quantity('16Ti')) <= 0 && quantity(self).asInteger()
+                    % 512 == 0
+                - message: rootDiskSize cannot shrink
+                  rule: quantity(self).compareTo(quantity(oldSelf)) >= 0
               shutdownTimeoutSeconds:
                 default: 120
                 format: int32
@@ -2305,6 +2318,9 @@ spec:
             - readinessPort
             - shutdownTimeoutSeconds
             type: object
+            x-kubernetes-validations:
+            - message: rootDiskSize cannot be removed
+              rule: '!has(oldSelf.rootDiskSize) || has(self.rootDiskSize)'
           status:
             properties:
               checkpoint:
@@ -2394,6 +2410,9 @@ spec:
                 type: string
               podName:
                 type: string
+              rootDiskSize:
+                format: int64
+                type: integer
             type: object
         required:
         - spec

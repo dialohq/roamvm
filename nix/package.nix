@@ -1,16 +1,5 @@
 {pkgs}: let
-  hypervisor = pkgs.stdenvNoCC.mkDerivation {
-    pname = "cloud-hypervisor";
-    version = "53.0";
-    src = pkgs.fetchurl {
-      url = "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static";
-      hash = "sha256-RIrz1OWbIsKYf335TCE61A+1OhDUN+QrXubE/OfCnsw=";
-    };
-    dontUnpack = true;
-    installPhase = ''
-      install -Dm755 $src $out/bin/cloud-hypervisor
-    '';
-  };
+  hypervisor = pkgs.qemu_kvm;
 in
   pkgs.buildGoModule {
     pname = "roamvm";
@@ -22,7 +11,7 @@ in
     vendorHash = "sha256-awYbt/g5JGU/k4YAP5dGxaBYh0p9mqVXEs+sX1DJVCk=";
     subPackages = ["cmd/roamvm"];
     nativeBuildInputs = [pkgs.makeWrapper];
-    nativeCheckInputs = [pkgs.qemu-utils];
+    nativeCheckInputs = [hypervisor pkgs.qemu-utils];
     ldflags = ["-s" "-w"];
     doCheck = true;
     checkPhase = ''

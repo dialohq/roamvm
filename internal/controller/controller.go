@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
@@ -26,6 +27,8 @@ const (
 	CheckpointAnnotation = "vm.roamvm.io/checkpoint"
 	Message              = "vm.roamvm.io/message"
 	SecretAnnotation     = "vm.roamvm.io/auth-secret"
+	DiskSizeAnnotation   = "vm.roamvm.io/root-disk-size"
+	ResizeAnnotation     = "vm.roamvm.io/resize-error"
 	SpecAnnotation       = "vm.roamvm.io/boot-spec"
 )
 
@@ -197,6 +200,22 @@ func (r *Reconciler) status(
 	checkpoint ...*api.Checkpoint,
 ) (ctrl.Result, error) {
 	old := vm.DeepCopy()
+	if pod != nil && vm.Spec.PowerState == "Running" && vm.DeletionTimestamp == nil && pod.DeletionTimestamp == nil && phase == "Running" {
+		resizeErr := r.expandWorkingPVC(ctx, vm, pod)
+		condition := metav1.Condition{Type: "DiskReady", Status: metav1.ConditionTrue, Reason: "CapacityReady", ObservedGeneration: vm.Generation}
+		size, _ := strconv.ParseInt(pod.Annotations[DiskSizeAnnotation], 10, 64)
+		vm.Status.RootDiskSize = size
+		desired, _ := api.DiskBytes(vm.Spec.RootDiskSize)
+		if size < desired || pod.Annotations[ResizeAnnotation] != "" || resizeErr != nil {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = "ResizePending"
+			condition.Message = pod.Annotations[ResizeAnnotation]
+			if resizeErr != nil {
+				condition.Message = resizeErr.Error()
+			}
+		}
+		meta.SetStatusCondition(&vm.Status.Conditions, condition)
+	}
 	if len(checkpoint) > 0 {
 		vm.Status.Checkpoint = checkpoint[0]
 	}

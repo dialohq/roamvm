@@ -40,9 +40,14 @@ Kubernetes metadata remain supported independently of this fixture.
 
 The default suite includes lifecycle/failure, Kubernetes integration, and CPU
 oversubscription tests. `test/lab/env` selects an idle worker for the CPU test.
+The QEMU unit tests also boot a paused TCG machine to exercise real QMP commands.
 Optional cases are explicit:
 
 ```sh
+# Partitioned NixOS root: grow online, preserve processes, stop and move.
+make lab-nixos-guest
+ROAMVM_TEST_RESIZE_IMAGE="$(cat .lab/nixos-guest-ref)" go test -tags=integration -race -run TestOnlineResize -v ./test/integration
+
 # Kills a kind worker container, proves fencing, and restores it afterward.
 ROAMVM_TEST_NODE_FAILURE=1 make integration
 

@@ -8,6 +8,8 @@
       config.permittedInsecurePackages = ["minio-2025-10-15T17-29-55Z"];
     };
   in {
+    nixosModules.online-grow = import ./nix/online-grow.nix;
+    packages.x86_64-linux.test-nixos-guest = import ./test/guest/nixos.nix {inherit pkgs nixpkgs;};
     packages.x86_64-linux.test-guest = import ./test/guest {inherit pkgs;};
     packages.x86_64-linux.test-store = pkgs.dockerTools.buildLayeredImage {
       name = "roamvm-test-store";
@@ -16,7 +18,7 @@
       config.Env = ["PATH=/bin"];
     };
     devShells.x86_64-linux.default = pkgs.mkShell {
-      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu-utils alejandra shellcheck];
+      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck];
     };
   };
 }

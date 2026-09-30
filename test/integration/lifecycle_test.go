@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dialohq/roamvm/internal/state"
 	core "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -70,6 +71,10 @@ func TestLifecycle(t *testing.T) {
 		p := l.pod(pod.Name)
 		s := p.Status.InitContainerStatuses
 		return len(s) > 0 && s[0].RestartCount > restarts && s[0].State.Running != nil, nil
+	})
+	l.wait("runtime socket serves after restart", func() (bool, error) {
+		_, err := l.exec(pod.Name, "runtime", nil, "curl", "--silent", "--max-time", "1", "--unix-socket", "/run/roamvm/runtime.sock", "http://runtime/", "-o", "/dev/null")
+		return err == nil, err
 	})
 	l.ready(v.Name)
 	equal(t, "sidecar restart preserves bytes", l.request(v.Name, "/data", nil), payload)
@@ -161,22 +166,25 @@ func TestLifecycle(t *testing.T) {
 		t.Log("worker failure disabled; set ROAMVM_TEST_NODE_FAILURE=1 to exercise it")
 	}
 
-	v = l.vm(v.Name)
-	durable := l.head(v)
-	owner := string(l.pod(v.Status.PodName).UID)
-	_, err = l.exec(v.Status.PodName, "runner", nil, "/bin/sh", "-ec", `
- for process in /proc/[0-9]*; do
-   read -r name < "$process/comm" || continue
-   case "$name" in cloud-hypervis*) kill -KILL "${process##*/}"; exit 0;; esac
- done
- exit 1`)
-	must(t, err)
-	l.phase(v.Name, "RecoveryRequired")
-	equal(t, "VMM crash retains checkpoint", l.head(v).Checkpoint, durable.Checkpoint)
-	equal(t, "VMM crash retains owner", l.head(v).Owner, owner)
-	l.recover(v, owner)
-	l.start(v.Name)
-	equal(t, "crash recovery", l.request(v.Name, "/data", nil), payload)
+	var durable state.Head
+	for _, signal := range []string{"KILL", "TERM"} {
+		v = l.vm(v.Name)
+		durable = l.head(v)
+		owner := string(l.pod(v.Status.PodName).UID)
+		_, err = l.exec(v.Status.PodName, "runner", nil, "/bin/sh", "-ec", `
+   for process in /proc/[0-9]*; do
+    read -r name < "$process/comm" || continue
+    case "$name" in qemu-system-*) kill -"$1" "${process##*/}"; exit 0;; esac
+   done
+   exit 1`, "terminate-vmm", signal)
+		must(t, err)
+		l.phase(v.Name, "RecoveryRequired")
+		equal(t, "VMM exit retains checkpoint", l.head(v).Checkpoint, durable.Checkpoint)
+		equal(t, "VMM exit retains owner", l.head(v).Owner, owner)
+		l.recover(v, owner)
+		l.start(v.Name)
+		equal(t, "VMM exit recovery", l.request(v.Name, "/data", nil), payload)
+	}
 	durable = l.stop(v.Name)
 	object, err := l.store.Get(l.ctx, durable.Checkpoint.Key)
 	must(t, err)
@@ -207,7 +215,7 @@ func TestLifecycle(t *testing.T) {
 	if !strings.Contains(string(log), "integrity mismatch") || strings.Contains(string(log), "Linux version") {
 		t.Fatalf("corruption was not rejected before boot: %s", log)
 	}
-	owner = l.head(v).Owner
+	owner := l.head(v).Owner
 	overwrite(original)
 	damaged = false
 	l.recover(v, owner)

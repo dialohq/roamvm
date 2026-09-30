@@ -27,6 +27,9 @@ rules:
   resources: [pods, secrets]
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: [""]
+  resources: [persistentvolumeclaims]
+  verbs: [get, list, watch, update, patch]
+- apiGroups: [""]
   resources: [events]
   verbs: [create, patch]
 ---
@@ -79,7 +82,7 @@ rules:
   resources: [pods]
   verbs: [get, update, patch]
 - apiGroups: [""]
-  resources: [secrets]
+  resources: [secrets, persistentvolumeclaims]
   verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
