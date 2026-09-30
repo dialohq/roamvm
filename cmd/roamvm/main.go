@@ -59,7 +59,7 @@ func kubeClient() (client.Client, error) {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: roamvm controller|daemon|runner|device-plugin|start|stop|image-push|state|recover")
+		return errors.New("usage: roamvm controller|daemon|checkpoint|runner|device-plugin|start|stop|image-push|state|recover")
 	}
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctx := ctrl.SetupSignalHandler()
@@ -96,7 +96,7 @@ func run() error {
 		_ = m.AddHealthzCheck("healthz", healthz.Ping)
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
-	case "daemon":
+	case "daemon", "checkpoint":
 		c, err := kubeClient()
 		if err != nil {
 			return err
@@ -111,12 +111,14 @@ func run() error {
 			return err
 		}
 		server := &daemon.Server{
-			Client:  c,
-			Node:    os.Getenv("NODE_NAME"),
-			PodUID:  os.Getenv("POD_UID"),
-			Root:    root,
-			State:   state.Manager{Store: backend},
-			BaseDir: "/base/disk",
+			Client:    c,
+			PodName:   os.Getenv("POD_NAME"),
+			Namespace: os.Getenv("POD_NAMESPACE"),
+			Node:      os.Getenv("NODE_NAME"),
+			PodUID:    os.Getenv("POD_UID"),
+			Root:      root,
+			State:     state.Manager{Store: backend},
+			BaseDir:   "/base/disk",
 		}
 		if server.Node == "" || server.PodUID == "" || store.Bucket == "" {
 			return errors.New("NODE_NAME, POD_UID and S3_BUCKET are required")
@@ -130,6 +132,9 @@ func run() error {
 		}
 		if err != nil {
 			return fmt.Errorf("unsafe or unavailable object store: %w", err)
+		}
+		if os.Args[1] == "checkpoint" {
+			return server.CheckpointTerminatedRunner(ctx)
 		}
 		return server.Serve(ctx, "/run/roamvm/runtime.sock")
 	case "start", "stop":

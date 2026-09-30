@@ -63,13 +63,12 @@ func TestLifecycle(t *testing.T) {
 	t.Log("scheduler moved VM after cordoning; all bytes preserved")
 
 	pod = l.pod(v.Status.PodName)
-	restarts := pod.Status.InitContainerStatuses[0].RestartCount
-	_, err = l.exec(pod.Name, "runtime", nil, "/bin/sh", "-c", "kill -TERM 1")
-	must(t, err)
+	restarts := pod.Status.ContainerStatuses[1].RestartCount
+	l.killContainer(pod, "runtime")
 	l.wait("runtime sidecar restart", func() (bool, error) {
 		p := l.pod(pod.Name)
-		s := p.Status.InitContainerStatuses
-		return len(s) > 0 && s[0].RestartCount > restarts && s[0].State.Running != nil, nil
+		s := p.Status.ContainerStatuses
+		return len(s) > 1 && s[1].RestartCount > restarts && s[1].State.Running != nil, nil
 	})
 	l.ready(v.Name)
 	equal(t, "sidecar restart preserves bytes", l.request(v.Name, "/data", nil), payload)
@@ -171,10 +170,9 @@ func TestLifecycle(t *testing.T) {
  done
  exit 1`)
 	must(t, err)
-	l.phase(v.Name, "RecoveryRequired")
-	equal(t, "VMM crash retains checkpoint", l.head(v).Checkpoint, durable.Checkpoint)
-	equal(t, "VMM crash retains owner", l.head(v).Owner, owner)
-	l.recover(v, owner)
+	l.phase(v.Name, "Stopped")
+	equal(t, "VMM crash checkpoints working bytes", l.head(v).Checkpoint.Generation, durable.Checkpoint.Generation+1)
+	equal(t, "VMM crash releases owner", l.head(v).Owner, "")
 	l.start(v.Name)
 	equal(t, "crash recovery", l.request(v.Name, "/data", nil), payload)
 	durable = l.stop(v.Name)

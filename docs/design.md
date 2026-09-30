@@ -29,9 +29,10 @@ its [QCOW2 hardening guidance](https://github.com/cloud-hypervisor/cloud-hypervi
 Kubelet owns OCI pulling, registry credentials, caching and read-only image-volume
 mounts. Each incarnation receives a generic ephemeral PVC on the node selected
 by the scheduler. WaitForFirstConsumer preserves normal placement; the old claim
-is not reused on restart. The runtime is a native sidecar, so Kubernetes stops it
-after the runner exits, including after a checkpoint upload finishes. Its restart
-retains the same Pod/PVC and ownership epoch.
+is not reused on restart. The runtime is a regular container with per-container `OnFailure` restart policy.
+It exits successfully only after observing the runner exit and completing the
+checkpoint. A runtime failure restarts that container with the same Pod/PVC and
+ownership epoch; the runner has `Never` restart policy.
 
 The runtime and Kubernetes administrators are trusted. VM configuration cannot
 project the reserved runtime Secret, service account tokens or Pod certificates. Pod creation,
@@ -118,8 +119,11 @@ root claim, custom CSI driver, or manual local-disk inventory is involved.
 | Old-checkpoint deletion fails | New checkpoint is durable; Pod stays Checkpointing and retries cleanup |
 | Runtime sidecar restarts | Same runner/epoch resumes using saved metadata |
 | Control contact lost for 30 seconds | Runner requests guest shutdown; ownership stays held |
-| Guest ignores ACPI timeout | VMM killed, no new checkpoint, RecoveryRequired |
-| Hypervisor crashes / OOM / node disappears | No automatic takeover; last committed generation remains valid |
+| Guest ignores ACPI timeout | VMM killed; validate and checkpoint the crash-consistent disk |
+| Hypervisor / runner crashes or is OOM-killed | Surviving runtime validates and checkpoints the working disk, then stops the VM |
+| Runtime crashes / OOM | Container restarts independently; saved session resumes |
+| Node disappears / Pod cannot finish | No automatic takeover; ownership and local disk retained |
+| Invalid local QCOW2 or failed upload after a crash | RecoveryRequired; keep the working disk and retry, never silently restore old data |
 | Corrupt downloaded checkpoint | Hash failure before VMM launch |
 | Stale owner uploads after recovery | Head CAS fails; it cannot publish a new current generation |
 | Unscheduled Pod cancelled | Resource-version checked deletion, no ownership acquired |
@@ -131,7 +135,15 @@ when that grace period expires. Prefer setting VM powerState to Stopped before
 maintenance; wait for Stopped before draining/shutting down the node. Forced
 Pod deletion, eviction or node loss follows the stated crash model.
 
-If recovery is necessary, first prove the old VMM has exited, or fence/power off
+For local process failures, the runtime requires the exact Pod UID and node, a
+terminated runner with no restart policy, VM owner identity, the saved session,
+and an exclusive working-directory lock. Normal QCOW2 validation and state CAS
+still gate publication. It never infers termination from a timeout or NodeReady.
+A stopped incarnation cannot overwrite a newer start/configuration generation.
+
+For an older failed Pod, prefer [preserving its working disk](recovery.md).
+
+If local recovery is impossible, first prove the old VMM has exited, or fence/power off
 its old node. Kubernetes NotReady and timeouts are not proof. Record the VM UID
 and old Pod UID, then run the operator command with S3 and Kubernetes credentials:
 

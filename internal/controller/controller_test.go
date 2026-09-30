@@ -62,7 +62,7 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 	if pod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue() != 250 {
 		t.Fatal("CPU overcommit request lost")
 	}
-	if pod.Spec.Containers[0].Resources.Requests.Memory().Value() != (1216 << 20) {
+	if pod.Spec.Containers[0].Resources.Requests.Memory().Value() != (1568 << 20) {
 		t.Fatal("guest memory overhead not accounted")
 	}
 	var working, base bool
@@ -84,11 +84,11 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 	if !working || !base {
 		t.Fatal("missing ephemeral PVC or immutable image volume")
 	}
-	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].RestartPolicy == nil ||
-		*pod.Spec.InitContainers[0].RestartPolicy != core.ContainerRestartPolicyAlways {
-		t.Fatal("runtime must follow native sidecar shutdown ordering")
+	if len(pod.Spec.InitContainers) != 0 || len(pod.Spec.Containers) != 2 || pod.Spec.Containers[1].RestartPolicy == nil ||
+		*pod.Spec.Containers[1].RestartPolicy != core.ContainerRestartPolicyOnFailure {
+		t.Fatal("runtime must survive runner failure and restart independently")
 	}
-	config := pod.Spec.InitContainers[0].EnvFrom
+	config := pod.Spec.Containers[1].EnvFrom
 	if len(config) != 2 || config[0].ConfigMapRef == nil || config[0].ConfigMapRef.Name != "roamvm-runtime" ||
 		config[1].SecretRef.Name != "roamvm-object-store" {
 		t.Fatal("runtime namespace settings/credentials missing")
@@ -182,7 +182,7 @@ func TestHugepagesUseNativeAccounting(t *testing.T) {
 	var pods core.PodList
 	r.List(context.Background(), &pods)
 	resources := pods.Items[0].Spec.Containers[0].Resources
-	if resources.Requests.Memory().Value() != 192<<20 {
+	if resources.Requests.Memory().Value() != 512<<20 {
 		t.Fatal("ordinary RAM should reserve only VMM overhead")
 	}
 	q := resources.Requests["hugepages-2Mi"]
@@ -266,5 +266,83 @@ func TestGuestCannotProjectRuntimeCredentials(t *testing.T) {
 				t.Fatal("credential-bearing Pod was created", err)
 			}
 		}
+	}
+}
+
+func TestCheckpointedCrashStopsInsteadOfBootLooping(t *testing.T) {
+	r, vm := setup(t)
+	ctx := context.Background()
+	if err := r.createPod(ctx, vm); err != nil {
+		t.Fatal(err)
+	}
+	var pod core.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Spec.NodeName = "node"
+	pod.Annotations[Phase] = "Stopped"
+	pod.Annotations[Message] = "OOMKilled; crash-consistent working disk checkpointed"
+	pod.Annotations[CheckpointAnnotation] = `{"generation":1,"key":"checkpoint"}`
+	if err := r.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Phase = core.PodFailed
+	if err := r.Status().Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}
+	for range 3 {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Get(ctx, req.NamespacedName, vm); err != nil {
+		t.Fatal(err)
+	}
+	if vm.Spec.PowerState != "Stopped" || vm.Status.Phase != "Stopped" || vm.Status.Checkpoint == nil || vm.Status.Message == "" {
+		t.Fatal(vm)
+	}
+	var pods core.PodList
+	if err := r.List(ctx, &pods); err != nil {
+		t.Fatal(err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatal("crashed incarnation was restarted", pods.Items)
+	}
+}
+
+func TestCompletedPodDoesNotOverwriteNewStart(t *testing.T) {
+	r, vm := setup(t)
+	ctx := context.Background()
+	if err := r.createPod(ctx, vm); err != nil {
+		t.Fatal(err)
+	}
+	var pod core.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Spec.NodeName = "node"
+	pod.Annotations[Phase] = "Stopped"
+	pod.Annotations[CheckpointAnnotation] = `{"generation":1,"key":"checkpoint"}`
+	if err := r.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Phase = core.PodFailed
+	if err := r.Status().Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	vm.Generation = 2
+	if err := r.Update(ctx, vm); err != nil {
+		t.Fatal(err)
+	}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, req.NamespacedName, vm); err != nil {
+		t.Fatal(err)
+	}
+	if vm.Spec.PowerState != "Running" {
+		t.Fatal("old crash canceled a newer start")
 	}
 }
