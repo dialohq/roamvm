@@ -34,11 +34,24 @@ func Validate(path string, standalone bool) error {
 	}
 	if version == 3 {
 		features := binary.BigEndian.Uint64(h[72:80])
-		// Dirty and corrupt flags are left for qemu-img check to diagnose. External
-		// data files, alternate compression and extended L2 are outside the format
-		// this runtime creates and must not broaden access to the node filesystem.
-		if features & ^uint64(3) != 0 {
+		allowed := uint64(3) // Dirty/corrupt flags are diagnosed by qemu-img check.
+		if standalone {
+			allowed |= 8 // Alternate compression is supported only for immutable bases.
+		}
+		if features & ^allowed != 0 {
 			return errors.New("unsupported QCOW2 incompatible features (including external data files)")
+		}
+		if features&8 != 0 {
+			compression := make([]byte, 1)
+			if binary.BigEndian.Uint32(h[100:104]) < 112 {
+				return errors.New("missing QCOW2 compression header")
+			}
+			if _, e = io.ReadFull(f, compression); e != nil {
+				return e
+			}
+			if compression[0] != 1 {
+				return errors.New("unsupported QCOW2 compression type")
+			}
 		}
 	}
 	return nil

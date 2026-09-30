@@ -1,6 +1,7 @@
 package images
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -27,6 +28,21 @@ func TestMountedBase(t *testing.T) {
 	}
 	if data, err := os.ReadFile(base.Disk()); err != nil || len(data) != 8192 {
 		t.Fatal("base was modified", err)
+	}
+}
+
+func TestMountedCompressedBase(t *testing.T) {
+	for _, codec := range []string{"zlib", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			dir := fixture(t)
+			raw := filepath.Join(dir, "root.raw")
+			require.NoError(t, os.WriteFile(raw, bytes.Repeat([]byte("compressed base data"), 1<<16), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"format":"qcow2"}`), 0o600))
+			out, err := exec.Command("qemu-img", "convert", "-f", "raw", "-O", "qcow2", "-c", "-o", "compression_type="+codec, raw, filepath.Join(dir, "root.qcow2")).CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			_, err = Open(t.Context(), dir)
+			require.NoError(t, err)
+		})
 	}
 }
 
