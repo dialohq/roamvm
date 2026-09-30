@@ -91,3 +91,30 @@ filesystem journal replay and does not preserve RAM or unflushed writes.
 For a lost node, fence it before using the explicit `recover --fenced` command.
 That operation restores the last durable checkpoint and may lose newer work;
 it cannot recover a workspace that never produced a checkpoint.
+
+## Host storage exhaustion
+
+Writable root overlays and secondary disks use direct I/O with flushes enabled.
+Read-only base images and configuration disks may use the host page cache. This
+avoids QEMU permanently retaining a failed buffered `fdatasync` error after the
+host page cache becomes inconsistent. Storage must support direct I/O; startup
+fails if it cannot, rather than silently falling back to buffered writes.
+
+QEMU pauses on ENOSPC using its native write-error policy. Inspect `query-status`
+and `query-block` on the runner's `qmp.sock`; `io-error` and `nospace` identify this
+case. Keep the runner alive, restore physical capacity and confirm the storage
+layer is healthy before issuing QMP `cont`. Verify the guest responds and writes
+succeed. Direct I/O does not add capacity or repair filesystem corruption, and
+RoamVM does not automatically resume guests after arbitrary I/O errors.
+
+Existing running Pods retain their original cache mode. Update the runtime, then
+stop and start normally to pick up the change. A buffered runner whose flushes
+already fail permanently can still require the retained-disk procedure above;
+changing the runtime image cannot repair its in-memory state.
+
+Monitor thin-pool data and metadata usage, automatic-extension monitoring, and
+free space in the containing volume group. Allow space for both the working
+overlay and its compacted checkpoint during Stop. Virtual disk capacity is not a
+physical reservation when thin provisioning is enabled. Keep independent
+backups; a checkpoint or snapshot on the same storage is not protection against
+physical storage loss.

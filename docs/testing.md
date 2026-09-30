@@ -57,6 +57,11 @@ ROAMVM_TEST_FIRMWARE_IMAGE="$(cat .lab/firmware-guest-ref)" \
 # Kills a kind worker container, proves fencing, and restores it afterward.
 ROAMVM_TEST_NODE_FAILURE=1 make integration
 
+# Root, KVM, util-linux and e2fsprogs; uses only a disposable loopback filesystem.
+# Extract the archive produced by make lab-guest, then point at its disk directory.
+ROAMVM_TEST_DISK_FULL_BASE=/absolute/path/to/disk \
+  go test -tags=integration -run TestDiskFullRecovery -v ./internal/runner
+
 # On the separate kind-roamvm-cilium lab with an enforcing CNI:
 ROAMVM_TEST_NETWORK_POLICY=1 go test -tags=integration -run TestKubernetes -v ./test/integration
 
@@ -117,6 +122,11 @@ builds the container. KVM tests require the local lab.
   scheduling and byte-exact payload persistence, runtime sidecar restart, S3 outage during
   stop, hypervisor kill, corrupt object refusal and explicit fenced recovery.
   Every successful stop asserts that exactly the current checkpoint remains in S3.
+- Host filesystem exhaustion: a real KVM guest fills a disposable 64 MiB ext4
+  filesystem, pauses with `io-error`/`nospace`, resumes after online expansion,
+  and verifies a 96 MiB payload before and after checkpoint compaction and reboot.
+  The test also checks the effective writable file cache mode through QMP. It
+  does not emulate thin-pool metadata exhaustion or physical device failure.
 - Worker-container failure: last checkpoint retained, ownership never expires,
   explicit recovery runs elsewhere and discards uncommitted changes as specified.
 - Kubernetes integration: queued cancellation, immutable-base CRD validation,
@@ -201,8 +211,10 @@ and subsequent checkpoint restores:
 The small guest's final range was 2.076–3.151 seconds; report the slower initial
 Service setup along with the median. The runtime changes disable dnsmasq's
 redundant address-conflict ping on the one-guest TAP, probe startup readiness at
-100 ms while retaining one-second ownership heartbeats, and use buffered root
-disk I/O. Guest flushes and checkpoint integrity/commit rules remain unchanged.
+100 ms while retaining one-second ownership heartbeats. Those historical runs
+used buffered root disk I/O; writable disks now use direct I/O with guest flushes
+enabled. The timings above have not been remeasured for the new cache mode.
+Checkpoint integrity/commit rules remain unchanged.
 Startup logs expose base download, prepare, network, hypervisor and guest-ready
 stages. The tested full Nix guest also passed a memory-pressure workload holding
 about 3.4 GB, reading 851 MB, and writing/fsyncing 32 MiB with no cgroup OOM.
