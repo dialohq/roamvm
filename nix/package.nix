@@ -8,7 +8,7 @@ in
       root = ../.;
       fileset = pkgs.lib.fileset.unions [../go.mod ../go.sum ../api ../cmd ../internal];
     };
-    vendorHash = "sha256-awYbt/g5JGU/k4YAP5dGxaBYh0p9mqVXEs+sX1DJVCk=";
+    vendorHash = "sha256-P1t0NmWQAjtvR6t3K+2MyWHt8ymeua4eR78RjYF3GuA=";
     subPackages = ["cmd/roamvm"];
     nativeBuildInputs = [pkgs.makeWrapper];
     nativeCheckInputs = [hypervisor pkgs.qemu-utils];
