@@ -48,7 +48,7 @@ integration:
 	go test -tags=integration -race -count=1 -timeout=30m -v ./test/integration
 
 benchmark:
-	go test -tags=integration -run '^$$' -bench BenchmarkStartup -benchtime=5x -count=1 -timeout=30m ./test/integration
+	go test -tags=integration -run '^$$' -bench BenchmarkStartup -benchtime=5x -count=1 -timeout=30m -v ./test/integration
 
 lab-down:
 	kind delete cluster --name roamvm-test
