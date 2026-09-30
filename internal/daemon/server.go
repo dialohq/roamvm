@@ -2,25 +2,24 @@ package daemon
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/disk"
+	"github.com/dialohq/roamvm/internal/fileio"
 	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/state"
-	"github.com/google/go-containerregistry/pkg/authn"
-	"github.com/google/go-containerregistry/pkg/name"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,12 +28,10 @@ import (
 )
 
 type Request struct {
-	Namespace string `json:"namespace"`
-	Pod       string `json:"pod"`
-	UID       string `json:"uid"`
-	Token     string `json:"token"`
-	Phase     string `json:"phase,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Phase       string `json:"phase,omitempty"`
+	Message     string `json:"message,omitempty"`
+	DiskSize    int64  `json:"diskSize,omitempty"`
+	ResizeError string `json:"resizeError,omitempty"`
 }
 type Prepared struct {
 	Session state.Session
@@ -44,34 +41,51 @@ type Prepared struct {
 	PodUID  string
 }
 type Response struct {
-	Prepared *Prepared `json:"prepared,omitempty"`
-	Stop     bool      `json:"stop,omitempty"`
-	Error    string    `json:"error,omitempty"`
+	Prepared    *Prepared `json:"prepared,omitempty"`
+	DiskSize    int64     `json:"diskSize,omitempty"`
+	ResizeError string    `json:"resizeError,omitempty"`
+	Stop        bool      `json:"stop,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 type Server struct {
-	Client     client.Client
-	Node, Root string
-	State      state.Manager
-	Cache      images.Cache
-	locks      sync.Map
+	Client                    client.Client
+	Pod                       types.NamespacedName
+	Node, PodUID, VMUID, Root string
+	State                     state.Manager
+	BaseDir                   string
+	mu                        sync.Mutex
 }
 
 func (s *Server) Serve(ctx context.Context, socket string) error {
-	if err := os.MkdirAll(filepath.Dir(socket), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(socket), 0o755); err != nil {
 		return err
 	}
-	// DaemonSet has one instance per node. Restart replaces only its stale socket.
+	// A restarted sidecar replaces only its own stale socket.
 	_ = os.Remove(socket)
 	l, err := net.Listen("unix", socket)
 	if err != nil {
 		return err
 	}
-	if err = os.Chmod(socket, 0600); err != nil {
+	if err = os.Chmod(socket, 0o600); err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
 	for _, action := range []string{"prepare", "heartbeat", "status", "finish"} {
 		mux.HandleFunc("POST /"+action, s.handler(action))
+	}
+	parent := ctx
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	if s.Pod.Name != "" {
+		go s.watchRunner(ctx, cancel)
+	} else {
+		go func() {
+			select {
+			case <-parent.Done():
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 	}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -86,6 +100,7 @@ func (s *Server) Serve(ctx context.Context, socket string) error {
 	}
 	return err
 }
+
 func (s *Server) handler(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -94,21 +109,22 @@ func (s *Server) handler(action string) http.HandlerFunc {
 			http.Error(w, "invalid request", 400)
 			return
 		}
-		pod, vm, err := s.authenticate(r.Context(), req)
+		pod, vm, err := s.incarnation(r.Context())
 		if err != nil {
 			w.WriteHeader(403)
 			_ = json.NewEncoder(w).Encode(Response{Error: err.Error()})
 			return
 		}
-		lock, _ := s.locks.LoadOrStore(string(vm.UID), &sync.Mutex{})
-		lock.(*sync.Mutex).Lock()
-		defer lock.(*sync.Mutex).Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		var response Response
 		switch action {
 		case "prepare":
 			response.Prepared, err = s.prepare(r.Context(), pod, vm)
 		case "heartbeat":
-			response.Stop = vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil || pod.DeletionTimestamp != nil || pod.Annotations[controller.Stop] == "true"
+			response.Stop = vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil ||
+				pod.DeletionTimestamp != nil ||
+				pod.Annotations[controller.Stop] == "true"
 			if response.Stop {
 				break
 			} // Stopping never depends on S3 availability.
@@ -121,10 +137,16 @@ func (s *Server) handler(action string) http.HandlerFunc {
 					response.Stop = true
 				}
 			}
+			if err == nil && !response.Stop {
+				response.DiskSize, response.ResizeError = s.resizeTarget(r.Context(), pod, vm)
+			}
 		case "status":
-			if req.Phase != "Running" && req.Phase != "Stopping" && req.Phase != "Checkpointing" && req.Phase != "Error" {
+			if req.Phase != "Running" && req.Phase != "Stopping" && req.Phase != "Checkpointing" &&
+				req.Phase != "Error" {
 				err = errors.New("invalid runtime phase")
 			} else {
+				pod.Annotations[controller.DiskSizeAnnotation] = strconv.FormatInt(req.DiskSize, 10)
+				pod.Annotations[controller.ResizeAnnotation] = req.ResizeError
 				err = s.annotate(r.Context(), pod, req.Phase, req.Message, nil)
 			}
 		case "finish":
@@ -137,19 +159,19 @@ func (s *Server) handler(action string) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(response)
 	}
 }
-func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api.VirtualMachine, error) {
+
+// incarnation is selected only by the sidecar's downward API identity. The
+// private Pod socket grants access; a request cannot select another runner.
+func (s *Server) incarnation(ctx context.Context) (*core.Pod, *api.VirtualMachine, error) {
 	var pod core.Pod
-	if req.Namespace == "" || req.Pod == "" || req.UID == "" || req.Token == "" {
-		return nil, nil, errors.New("missing runner identity")
-	}
-	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: req.Pod}, &pod); err != nil {
+	if err := s.Client.Get(ctx, s.Pod, &pod); err != nil {
 		return nil, nil, err
 	}
-	if string(pod.UID) != req.UID || pod.Spec.NodeName != s.Node {
-		return nil, nil, errors.New("runner does not belong to this node")
+	if string(pod.UID) != s.PodUID || pod.Spec.NodeName != s.Node {
+		return nil, nil, errors.New("runner incarnation changed")
 	}
 	owner := metav1.GetControllerOf(&pod)
-	if owner == nil || owner.Kind != "VirtualMachine" || owner.APIVersion != api.GroupVersion.String() {
+	if owner == nil || owner.Kind != "VirtualMachine" || owner.APIVersion != api.GroupVersion.String() || string(owner.UID) != s.VMUID {
 		return nil, nil, errors.New("not a VM runner")
 	}
 	var vm api.VirtualMachine
@@ -158,13 +180,6 @@ func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api
 	}
 	if owner.UID != vm.UID {
 		return nil, nil, errors.New("VM identity mismatch")
-	}
-	var secret core.Secret
-	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Annotations[controller.SecretAnnotation]}, &secret); err != nil {
-		return nil, nil, err
-	}
-	if !metav1.IsControlledBy(&secret, &vm) || subtle.ConstantTimeCompare(secret.Data["token"], []byte(req.Token)) != 1 {
-		return nil, nil, errors.New("invalid runner credential")
 	}
 	return &pod, &vm, nil
 }
@@ -177,33 +192,29 @@ func (s *Server) load(uid string) (Prepared, error) {
 	}
 	return p, err
 }
+
 func (s *Server) save(p Prepared) error {
 	path := s.meta(p.PodUID)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path+".partial", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path+".partial", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	_, err = f.Write(b)
-	if err == nil {
-		err = f.Sync()
-	}
-	ce := f.Close()
-	if err != nil {
+	if err = fileio.SyncClose(f, err); err != nil {
 		return err
-	}
-	if ce != nil {
-		return ce
 	}
 	return os.Rename(path+".partial", path)
 }
+
 func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) (*Prepared, error) {
+	started := time.Now()
 	if vm.Spec.PowerState != "Running" || vm.DeletionTimestamp != nil || pod.DeletionTimestamp != nil {
 		return nil, errors.New("VM no longer requests a start")
 	}
@@ -215,27 +226,24 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	}
 	// Use the exact configuration for which this Pod reserved resources. Changes
 	// to the VM spec while it is queued or running apply to the next incarnation.
-	bootVM, err := incarnation(vm, pod)
+	spec, err := bootSpec(vm, pod)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.annotate(ctx, pod, "Restoring", "", nil); err != nil {
 		return nil, err
 	}
-	keys, err := s.registryKeys(ctx, bootVM)
+	base, err := images.Open(ctx, s.BaseDir)
 	if err != nil {
 		return nil, err
 	}
-	base, err := s.Cache.Ensure(ctx, vm.Spec.Image, keys)
-	if err != nil {
-		return nil, err
-	}
+	log.Printf("startup pod=%s stage=base elapsed=%s", pod.Name, time.Since(started))
 	session, err := s.State.Acquire(ctx, string(vm.UID), vm.Spec.Image, string(pod.UID), s.Node)
 	if err != nil {
 		return nil, err
 	}
 	dir := filepath.Join(s.Root, "running", string(vm.UID))
-	if err = os.MkdirAll(dir, 0700); err != nil {
+	if err = os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	overlay := filepath.Join(dir, "overlay.qcow2")
@@ -255,24 +263,25 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 			return nil, err
 		}
 	}
-	prepared := Prepared{session, base, dir, bootVM.Spec, string(pod.UID)}
+	prepared := Prepared{session, base, dir, spec, string(pod.UID)}
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
+	log.Printf("startup pod=%s stage=prepared elapsed=%s", pod.Name, time.Since(started))
 	return &prepared, nil
 }
 
-func incarnation(vm *api.VirtualMachine, pod *core.Pod) (*api.VirtualMachine, error) {
-	boot := vm.DeepCopy()
-	boot.Spec = api.VirtualMachineSpec{}
-	if err := json.Unmarshal([]byte(pod.Annotations[controller.SpecAnnotation]), &boot.Spec); err != nil {
-		return nil, fmt.Errorf("invalid runner boot configuration: %w", err)
+func bootSpec(vm *api.VirtualMachine, pod *core.Pod) (api.VirtualMachineSpec, error) {
+	var spec api.VirtualMachineSpec
+	if err := json.Unmarshal([]byte(pod.Annotations[controller.SpecAnnotation]), &spec); err != nil {
+		return spec, fmt.Errorf("invalid runner boot configuration: %w", err)
 	}
-	if boot.Spec.Image != vm.Spec.Image {
-		return nil, errors.New("runner base identity changed")
+	if spec.Image != vm.Spec.Image {
+		return spec, errors.New("runner base identity changed")
 	}
-	return boot, nil
+	return spec, nil
 }
+
 func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) error {
 	p, err := s.load(string(pod.UID))
 	if err != nil {
@@ -283,6 +292,9 @@ func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachi
 		return err
 	}
 	if current.Head.State == "Stopped" && current.Head.Epoch == p.Session.Head.Epoch && current.Head.Checkpoint != nil {
+		if err = s.State.Prune(ctx, current); err != nil {
+			return err
+		}
 		return s.complete(ctx, pod, p, current)
 	}
 	if err = s.State.Check(ctx, p.Session); err != nil {
@@ -301,8 +313,13 @@ func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachi
 	}
 	return s.complete(ctx, pod, p, committed)
 }
+
 func (s *Server) complete(ctx context.Context, pod *core.Pod, p Prepared, committed state.Session) error {
-	if err := s.annotate(ctx, pod, "Stopped", "", committed.Head.Checkpoint); err != nil {
+	message := ""
+	if reason := pod.Annotations[controller.ExitAnnotation]; reason != "" {
+		message = reason + "; crash-consistent working disk checkpointed"
+	}
+	if err := s.annotate(ctx, pod, "Stopped", message, committed.Head.Checkpoint); err != nil {
 		return err
 	}
 	// Cleanup follows both the durable commit and its Kubernetes projection.
@@ -314,6 +331,7 @@ func (s *Server) complete(ctx context.Context, pod *core.Pod, p Prepared, commit
 	}
 	return nil
 }
+
 func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message string, cp *api.Checkpoint) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current core.Pod
@@ -326,6 +344,11 @@ func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message str
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
 		}
+		for _, key := range []string{controller.DiskSizeAnnotation, controller.ResizeAnnotation} {
+			if value, ok := pod.Annotations[key]; ok {
+				current.Annotations[key] = value
+			}
+		}
 		current.Annotations[controller.Phase] = phase
 		current.Annotations[controller.Message] = message
 		if cp != nil {
@@ -337,41 +360,4 @@ func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message str
 		}
 		return s.Client.Update(ctx, &current)
 	})
-}
-
-type keychain map[string]authn.AuthConfig
-
-func (k keychain) Resolve(r authn.Resource) (authn.Authenticator, error) {
-	if c, ok := k[r.RegistryStr()]; ok {
-		return authn.FromConfig(c), nil
-	}
-	return authn.Anonymous, nil
-}
-func (s *Server) registryKeys(ctx context.Context, vm *api.VirtualMachine) (authn.Keychain, error) {
-	k := keychain{}
-	for _, ref := range vm.Spec.ImagePullSecrets {
-		var secret core.Secret
-		if err := s.Client.Get(ctx, types.NamespacedName{Namespace: vm.Namespace, Name: ref.Name}, &secret); err != nil {
-			return nil, err
-		}
-		var config struct {
-			Auths map[string]authn.AuthConfig `json:"auths"`
-		}
-		if err := json.Unmarshal(secret.Data[core.DockerConfigJsonKey], &config); err != nil {
-			return nil, fmt.Errorf("invalid image pull secret %s", ref.Name)
-		}
-		for host, auth := range config.Auths {
-			host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
-			host = strings.SplitN(host, "/", 2)[0]
-			if host == "docker.io" || host == "registry-1.docker.io" {
-				host = "index.docker.io"
-			}
-			reg, err := name.NewRegistry(host)
-			if err != nil {
-				return nil, err
-			}
-			k[reg.RegistryStr()] = auth
-		}
-	}
-	return k, nil
 }

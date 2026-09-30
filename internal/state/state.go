@@ -1,5 +1,5 @@
 // Package state implements the durable state machine. Kubernetes status is only
-// a projection: the conditional S3 head is authoritative, including ownership.
+// a projection: the conditionally updated head is authoritative, including ownership.
 package state
 
 import (
@@ -15,11 +15,14 @@ import (
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/dialohq/roamvm/internal/fileio"
 )
 
-var ErrNotFound = errors.New("object not found")
-var ErrConflict = errors.New("conditional write conflict")
-var ErrOwned = errors.New("VM already owned; fence the previous runtime before recovery")
+var (
+	ErrNotFound = errors.New("object not found")
+	ErrConflict = errors.New("conditional write conflict")
+	ErrOwned    = errors.New("VM already owned; fence the previous runtime before recovery")
+)
 
 type Object struct {
 	Body            io.ReadCloser
@@ -30,6 +33,8 @@ type Store interface {
 	Get(context.Context, string) (Object, error)
 	// match="" means create-only; otherwise compare the current ETag.
 	Put(context.Context, string, io.ReadSeeker, int64, string) (Object, error)
+	List(context.Context, string) ([]string, error)
+	Delete(context.Context, string) error
 }
 
 type Head struct {
@@ -141,24 +146,17 @@ func (m Manager) Restore(ctx context.Context, s Session, path string) error {
 	if cp.VersionID != "" && obj.VersionID != cp.VersionID {
 		return errors.New("checkpoint object version changed")
 	}
-	f, err := os.OpenFile(path+".partial", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(path+".partial", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(path + ".partial")
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(obj.Body, cp.Size+1))
+	n, err := fileio.CopySparse(f, io.TeeReader(io.LimitReader(obj.Body, cp.Size+1), h))
 	if err == nil && (n != cp.Size || hex.EncodeToString(h.Sum(nil)) != cp.SHA256) {
 		err = errors.New("checkpoint integrity mismatch")
 	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
+	if err = fileio.SyncClose(f, err); err != nil {
 		return err
 	}
 	return os.Rename(path+".partial", path)
@@ -208,7 +206,13 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 		return Session{}, errors.New("uploaded checkpoint failed verification")
 	}
 	h2 := s.Head
-	h2.Checkpoint = &api.Checkpoint{Generation: generation, Key: key, SHA256: hash, Size: size, VersionID: obj.VersionID}
+	h2.Checkpoint = &api.Checkpoint{
+		Generation: generation,
+		Key:        key,
+		SHA256:     hash,
+		Size:       size,
+		VersionID:  obj.VersionID,
+	}
 	h2.Owner = ""
 	h2.Node = ""
 	h2.State = "Stopped"
@@ -216,9 +220,14 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 	if err != nil {
 		// The CAS may have succeeded while the HTTP response was lost.
 		current, e := m.Read(ctx, h2.VMID)
-		if e == nil && current.Head.Epoch == h2.Epoch && current.Head.State == "Stopped" && current.Head.Checkpoint != nil && current.Head.Checkpoint.Key == key {
-			return current, nil
+		if e == nil && current.Head.Epoch == h2.Epoch && current.Head.State == "Stopped" &&
+			current.Head.Checkpoint != nil &&
+			current.Head.Checkpoint.Key == key {
+			out, err = current, nil
 		}
+	}
+	if err == nil {
+		err = m.Prune(ctx, out)
 	}
 	return out, err
 }

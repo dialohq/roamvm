@@ -10,12 +10,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var GroupVersion = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
-var SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
-	metav1.AddToGroupVersion(s, GroupVersion)
-	return nil
-})
+var (
+	GroupVersion  = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
+	SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
+		metav1.AddToGroupVersion(s, GroupVersion)
+		return nil
+	})
+)
 var AddToScheme = SchemeBuilder.AddToScheme
 
 // +kubebuilder:object:root=true
@@ -31,7 +33,12 @@ type VirtualMachine struct {
 	Status            VirtualMachineStatus `json:"status,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.rootDiskSize) || has(self.rootDiskSize)",message="rootDiskSize cannot be removed"
 type VirtualMachineSpec struct {
+	// Hostname is applied at guest boot; it does not change the Pod's DNS name.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Hostname string `json:"hostname,omitempty"`
 	// +kubebuilder:validation:Enum=Running;Stopped
 	// +kubebuilder:default=Stopped
 	PowerState string `json:"powerState"`
@@ -47,6 +54,11 @@ type VirtualMachineSpec struct {
 	// Memory is guest RAM; resource requests must include hypervisor overhead.
 	// +kubebuilder:default="1Gi"
 	Memory string `json:"memory"`
+	// RootDiskSize is a minimum capacity. Growth applies to a running VM; shrinking is forbidden.
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="isQuantity(self) && quantity(self).isInteger() && quantity(self).compareTo(quantity('0')) > 0 && quantity(self).compareTo(quantity('16Ti')) <= 0 && quantity(self).asInteger() % 512 == 0",message="rootDiskSize must be a positive sector-aligned size up to 16Ti"
+	// +kubebuilder:validation:XValidation:rule="quantity(self).compareTo(quantity(oldSelf)) >= 0",message="rootDiskSize cannot shrink"
+	RootDiskSize string `json:"rootDiskSize,omitempty"`
 	// Hugepages uses native Kubernetes hugepages resource accounting.
 	// +kubebuilder:validation:Enum="2Mi";"1Gi"
 	Hugepages string `json:"hugepages,omitempty"`
@@ -70,6 +82,22 @@ type VirtualMachineSpec struct {
 	// Projected files become a read-only ISO disk labelled ROAMVM_CONFIG.
 	// Secrets and ConfigMaps are resolved by kubelet and refreshed at next boot.
 	Config *corev1.ProjectedVolumeSource `json:"config,omitempty"`
+	// ConfigDisks exposes named projected sources as individually labelled ISO disks.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:XValidation:rule="self.all(x, self.filter(y, y.label == x.label).size() == 1)",message="config disk labels must be unique"
+	ConfigDisks []ConfigDisk `json:"configDisks,omitempty"`
+}
+
+type ConfigDisk struct {
+	// +kubebuilder:validation:MaxLength=31
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,30}$`
+	Name string `json:"name"`
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]{1,32}$`
+	Label      string                       `json:"label"`
+	Projection corev1.ProjectedVolumeSource `json:"projection"`
 }
 
 type SecondaryDisk struct {
@@ -95,6 +123,7 @@ type Checkpoint struct {
 	VersionID  string `json:"versionID,omitempty"`
 }
 type VirtualMachineStatus struct {
+	RootDiskSize       int64              `json:"rootDiskSize,omitempty"`
 	Phase              string             `json:"phase,omitempty"`
 	Message            string             `json:"message,omitempty"`
 	PodName            string             `json:"podName,omitempty"`

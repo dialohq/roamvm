@@ -3,11 +3,12 @@ package disk
 import (
 	"context"
 	"fmt"
-	"github.com/dialohq/roamvm/internal/images"
-	"github.com/dialohq/roamvm/internal/qcow"
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/dialohq/roamvm/internal/images"
+	"github.com/dialohq/roamvm/internal/qcow"
 )
 
 func run(ctx context.Context, args ...string) error {
@@ -17,8 +18,21 @@ func run(ctx context.Context, args ...string) error {
 	}
 	return nil
 }
+
 func Create(ctx context.Context, base images.Base, path string) error {
-	return run(ctx, "create", "-f", "qcow2", "-F", base.Manifest.Format, "-b", base.Disk(), "-o", "compat=1.1,lazy_refcounts=off", path)
+	return run(
+		ctx,
+		"create",
+		"-f",
+		"qcow2",
+		"-F",
+		base.Manifest.Format,
+		"-b",
+		base.Disk(),
+		"-o",
+		"compat=1.1,lazy_refcounts=off",
+		path,
+	)
 }
 
 // Rebase changes only a verified immutable backing identity's local path. It
@@ -39,7 +53,7 @@ func Compact(ctx context.Context, base images.Base, path string) (string, error)
 	if err := Check(ctx, path); err != nil {
 		return "", err
 	}
-	if err := run(ctx, "convert", "-f", "qcow2", "-O", "qcow2", "-B", base.Disk(), "-F", base.Manifest.Format, path, target+".partial"); err != nil {
+	if err := run(ctx, "convert", "-t", "directsync", "-f", "qcow2", "-O", "qcow2", "-B", base.Disk(), "-F", base.Manifest.Format, path, target+".partial"); err != nil {
 		return "", err
 	}
 	if err := Check(ctx, target+".partial"); err != nil {

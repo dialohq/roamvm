@@ -3,8 +3,6 @@ package state
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type memoryObject struct {
@@ -21,15 +21,41 @@ type memoryObject struct {
 	etag string
 }
 type memoryStore struct {
-	mu                 sync.Mutex
-	objects            map[string]memoryObject
-	revision           int
-	failOverlay        bool
-	corruptOverlay     bool
-	loseCommitResponse bool
+	failure  string
+	mu       sync.Mutex
+	objects  map[string]memoryObject
+	revision int
 }
 
 func newMemory() *memoryStore { return &memoryStore{objects: map[string]memoryObject{}} }
+func (s *memoryStore) List(ctx context.Context, prefix string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure == "list" {
+		return nil, errors.New("injected list failure")
+	}
+	var keys []string
+	for key := range s.objects {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+
+func (s *memoryStore) Delete(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure == "delete" {
+		return errors.New("injected delete failure")
+	}
+	delete(s.objects, key)
+	if s.failure == "lost-delete-response" {
+		return errors.New("response lost after successful delete")
+	}
+	return nil
+}
+
 func (s *memoryStore) Get(ctx context.Context, key string) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -38,15 +64,16 @@ func (s *memoryStore) Get(ctx context.Context, key string) (Object, error) {
 		return Object{}, ErrNotFound
 	}
 	b := append([]byte(nil), v.body...)
-	if s.corruptOverlay && strings.Contains(key, "/overlay/") {
+	if (s.failure == "verification") && strings.Contains(key, "/overlay/") {
 		b = append(b, '!')
 	}
 	return Object{Body: io.NopCloser(bytes.NewReader(b)), ETag: v.etag, Size: int64(len(b))}, nil
 }
+
 func (s *memoryStore) Put(ctx context.Context, key string, r io.ReadSeeker, size int64, match string) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failOverlay && strings.Contains(key, "/overlay/") {
+	if (s.failure == "upload") && strings.Contains(key, "/overlay/") {
 		return Object{}, errors.New("injected upload failure")
 	}
 	old, exists := s.objects[key]
@@ -63,25 +90,24 @@ func (s *memoryStore) Put(ctx context.Context, key string, r io.ReadSeeker, size
 	s.revision++
 	etag := fmt.Sprintf("\"%d\"", s.revision)
 	s.objects[key] = memoryObject{b, etag}
-	if s.loseCommitResponse && strings.Contains(string(b), `"state":"Stopped"`) && strings.Contains(string(b), `"checkpoint"`) {
+	if (s.failure == "lost-response") && strings.Contains(string(b), `"state":"Stopped"`) &&
+		strings.Contains(string(b), `"checkpoint"`) {
 		return Object{}, errors.New("response lost after successful commit")
 	}
 	return Object{ETag: etag, Size: size}, nil
 }
+
 func fixture(t *testing.T) (context.Context, Manager, Session, string) {
 	t.Helper()
 	ctx := context.Background()
 	m := Manager{newMemory()}
 	s, e := m.Acquire(ctx, "vm-1", "registry/base@sha256:abc", "pod-1", "node-a")
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	file := filepath.Join(t.TempDir(), "overlay")
-	if e = os.WriteFile(file, []byte("persistent project and installed packages"), 0600); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, os.WriteFile(file, []byte("persistent project and installed packages"), 0o600))
 	return ctx, m, s, file
 }
+
 func TestExclusiveOwnership(t *testing.T) {
 	ctx := context.Background()
 	m := Manager{newMemory()}
@@ -104,23 +130,18 @@ func TestExclusiveOwnership(t *testing.T) {
 		t.Fatalf("writers=%d", winners.Load())
 	}
 }
+
 func TestStopRestoreOnAnotherNode(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	committed, e := m.Commit(ctx, s, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if committed.Head.State != "Stopped" || committed.Head.Owner != "" || committed.Head.Checkpoint.Generation != 1 {
 		t.Fatalf("bad commit %+v", committed)
 	}
 	next, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, "pod-2", "node-b")
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	restored := filepath.Join(t.TempDir(), "overlay")
-	if e = m.Restore(ctx, next, restored); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, m.Restore(ctx, next, restored))
 	want, _ := os.ReadFile(file)
 	got, _ := os.ReadFile(restored)
 	if !bytes.Equal(want, got) {
@@ -133,6 +154,7 @@ func TestStopRestoreOnAnotherNode(t *testing.T) {
 		t.Fatalf("old writer accepted: %v", e)
 	}
 }
+
 func TestAcquisitionRetryAndBasePin(t *testing.T) {
 	ctx, m, s, _ := fixture(t)
 	again, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, s.Head.Owner, s.Head.Node)
@@ -146,9 +168,10 @@ func TestAcquisitionRetryAndBasePin(t *testing.T) {
 		t.Fatal("owner stolen", e)
 	}
 }
+
 func TestUploadFailureNeverAdvancesHead(t *testing.T) {
 	ctx, m, s, file := fixture(t)
-	m.Store.(*memoryStore).failOverlay = true
+	m.Store.(*memoryStore).failure = "upload"
 	if _, e := m.Commit(ctx, s, file); e == nil {
 		t.Fatal("upload unexpectedly succeeded")
 	}
@@ -156,14 +179,15 @@ func TestUploadFailureNeverAdvancesHead(t *testing.T) {
 	if e != nil || now.ETag != s.ETag || now.Head.State != "Running" {
 		t.Fatal("head advanced", e)
 	}
-	m.Store.(*memoryStore).failOverlay = false
+	m.Store.(*memoryStore).failure = ""
 	if _, e = m.Commit(ctx, s, file); e != nil {
 		t.Fatal("retry failed", e)
 	}
 }
+
 func TestCorruptUploadNeverCommits(t *testing.T) {
 	ctx, m, s, file := fixture(t)
-	m.Store.(*memoryStore).corruptOverlay = true
+	m.Store.(*memoryStore).failure = "verification"
 	if _, e := m.Commit(ctx, s, file); e == nil {
 		t.Fatal("corrupt object committed")
 	}
@@ -172,25 +196,23 @@ func TestCorruptUploadNeverCommits(t *testing.T) {
 		t.Fatal("head advanced")
 	}
 }
+
 func TestLostCommitResponse(t *testing.T) {
 	ctx, m, s, file := fixture(t)
-	m.Store.(*memoryStore).loseCommitResponse = true
+	m.Store.(*memoryStore).failure = "lost-response"
 	committed, e := m.Commit(ctx, s, file)
 	if e != nil || committed.Head.State != "Stopped" {
 		t.Fatal("lost response not reconciled", e)
 	}
 }
+
 func TestRestoreCorruptionDoesNotExposeFile(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	committed, e := m.Commit(ctx, s, file)
-	if e != nil {
-		t.Fatal(e)
-	}
-	m.Store.(*memoryStore).corruptOverlay = true
+	require.NoError(t, e)
+	m.Store.(*memoryStore).failure = "verification"
 	path := filepath.Join(t.TempDir(), "overlay")
-	if e = m.Restore(ctx, committed, path); e == nil {
-		t.Fatal("corruption not detected")
-	}
+	require.Error(t, m.Restore(ctx, committed, path), "corruption not detected")
 	if _, e = os.Stat(path); !os.IsNotExist(e) {
 		t.Fatal("unverified file exposed")
 	}
@@ -198,15 +220,14 @@ func TestRestoreCorruptionDoesNotExposeFile(t *testing.T) {
 		t.Fatal("partial file leaked")
 	}
 }
+
 func TestRecoveryFencesOldEpoch(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	if _, e := m.Recover(ctx, s.Head.VMID, "wrong-pod"); !errors.Is(e, ErrConflict) {
 		t.Fatal("wrong owner recovered", e)
 	}
 	recovered, e := m.Recover(ctx, s.Head.VMID, s.Head.Owner)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if recovered.Head.Checkpoint != nil || recovered.Head.Epoch <= s.Head.Epoch {
 		t.Fatal("bad recovery")
 	}
@@ -217,35 +238,21 @@ func TestRecoveryFencesOldEpoch(t *testing.T) {
 		t.Fatal(e)
 	}
 }
-func TestGenerationsImmutableAndSurviveFailure(t *testing.T) {
+
+func TestStopReplacesPreviousCheckpoint(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	first, e := m.Commit(ctx, s, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	original := *first.Head.Checkpoint
 	second, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, "pod-2", "node-b")
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = os.WriteFile(file, []byte("next version"), 0600); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
+	require.NoError(t, os.WriteFile(file, []byte("next version"), 0o600))
 	final, e := m.Commit(ctx, second, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if final.Head.Checkpoint.Generation != 2 || final.Head.Checkpoint.Key == original.Key {
 		t.Fatal("generation overwritten")
 	}
-	object, e := m.Store.Get(ctx, original.Key)
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer object.Body.Close()
-	h := sha256.New()
-	io.Copy(h, object.Body)
-	if hex.EncodeToString(h.Sum(nil)) != original.SHA256 {
-		t.Fatal("old generation changed")
+	if _, e = m.Store.Get(ctx, original.Key); !errors.Is(e, ErrNotFound) {
+		t.Fatal("previous stop retained", e)
 	}
 }

@@ -1,0 +1,16 @@
+[Unit]
+Description=KVM and TUN device plugin for RoamVM
+After=kubelet.service
+
+[Service]
+ExecStart=/usr/local/bin/roamvm device-plugin
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kubelet/device-plugins
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

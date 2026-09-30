@@ -3,3 +3,5 @@
 /.lab-disks/
 /test-results/
 *.test
+__pycache__/
+/test/lab/store.env

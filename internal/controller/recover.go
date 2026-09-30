@@ -74,14 +74,6 @@ func Recover(ctx context.Context, c client.Client, m state.Manager, id, owner st
 		if err = c.Delete(ctx, pod, client.GracePeriodSeconds(0)); client.IgnoreNotFound(err) != nil {
 			return state.Session{}, err
 		}
-		secret := &core.Secret{}
-		secret.Name = pod.Annotations[SecretAnnotation]
-		secret.Namespace = pod.Namespace
-		if secret.Name != "" {
-			if err = c.Delete(ctx, secret); client.IgnoreNotFound(err) != nil {
-				return state.Session{}, err
-			}
-		}
 	}
 	if head.Head.Owner != "" {
 		head, err = m.Recover(ctx, id, owner)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,13 +17,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dialohq/roamvm/internal/daemon"
+	"github.com/dialohq/roamvm/internal/qmp"
 	"golang.org/x/sys/unix"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 type Client struct {
@@ -31,10 +31,14 @@ type Client struct {
 }
 
 func unixHTTP(socket string) *http.Client {
-	return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-	}}, Timeout: 30 * time.Minute}
+	return &http.Client{
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}},
+		Timeout: 30 * time.Minute,
+	}
 }
+
 func (c *Client) Call(ctx context.Context, action string) (daemon.Response, error) {
 	b, err := json.Marshal(c.Request)
 	if err != nil {
@@ -58,22 +62,25 @@ func (c *Client) Call(ctx context.Context, action string) (daemon.Response, erro
 	}
 	return out, nil
 }
-func (c *Client) status(phase, message string) {
+
+func (c *Client) status(phase, message string) bool {
 	c.Request.Phase = phase
 	c.Request.Message = message
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = c.Call(ctx, "status")
+	_, err := c.Call(ctx, "status")
+	if err != nil {
+		log.Printf("report VM status: %v", err)
+	}
+	return err == nil
 }
 
 func Run() error {
+	started := time.Now()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread() // Keep the Pdeathsig parent thread alive.
-	token, err := os.ReadFile("/run/roamvm-auth/token")
-	if err != nil {
-		return err
-	}
-	c := &Client{unixHTTP("/run/roamvm/runtime.sock"), daemon.Request{Namespace: os.Getenv("POD_NAMESPACE"), Pod: os.Getenv("POD_NAME"), UID: os.Getenv("POD_UID"), Token: string(token)}}
+	c := &Client{HTTP: unixHTTP("/run/roamvm/runtime.sock")}
+	var err error
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	var response daemon.Response
@@ -84,12 +91,14 @@ func Run() error {
 			break
 		}
 		var transportError *url.Error
-		if (!errors.As(err, &transportError) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) || ctx.Err() != nil || time.Now().After(deadline) {
+		if (!errors.As(err, &transportError) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) ||
+			ctx.Err() != nil ||
+			time.Now().After(deadline) {
 			break
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(time.Second):
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 	if err != nil {
@@ -100,7 +109,8 @@ func Run() error {
 		return errors.New("daemon returned no prepared VM")
 	}
 	p := response.Prepared
-	lock, err := os.OpenFile(filepath.Join(p.Dir, "runner.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	log.Printf("startup stage=prepared elapsed=%s", time.Since(started))
+	lock, err := os.OpenFile(filepath.Join(p.Dir, "runner.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -114,64 +124,22 @@ func Run() error {
 		c.status("Error", err.Error())
 		return err
 	}
+	log.Printf("startup stage=network elapsed=%s", time.Since(started))
 	dnsExited := make(chan error, 1)
 	go func() { dnsExited <- dns.Wait() }()
 	defer dns.Process.Kill()
-	select {
-	case e := <-dnsExited:
-		return fmt.Errorf("DHCP server failed: %w", e)
-	case <-time.After(100 * time.Millisecond):
-	}
-	socket := filepath.Join(p.Dir, "ch.sock")
+	socket := filepath.Join(p.Dir, "qmp.sock")
 	_ = os.Remove(socket)
-	memory, err := resource.ParseQuantity(p.Spec.Memory)
-	if err != nil {
-		return err
-	}
-	memoryArg := "size=" + strconv.FormatInt(memory.Value(), 10)
-	if p.Spec.Hugepages != "" {
-		q, e := resource.ParseQuantity(p.Spec.Hugepages)
-		if e != nil {
-			return e
-		}
-		memoryArg += ",hugepages=on,hugepage_size=" + strconv.FormatInt(q.Value(), 10)
-	}
 	if len(p.Spec.Devices) > 0 {
 		if e := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: unix.RLIM_INFINITY, Max: unix.RLIM_INFINITY}); e != nil {
 			return e
 		}
 	}
-	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
-	if _, e := os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); e == nil {
-		args = append(args, "--kernel", filepath.Join(p.Base.Dir, "vmlinux"), "--cmdline", p.Base.Manifest.Cmdline)
-		if _, e = os.Stat(filepath.Join(p.Base.Dir, "initrd")); e == nil {
-			args = append(args, "--initramfs", filepath.Join(p.Base.Dir, "initrd"))
-		}
-	} else {
-		args = append(args, "--firmware", filepath.Join(p.Base.Dir, "firmware"))
+	args, err := qemuArgs(ctx, p, socket)
+	if err != nil {
+		return err
 	}
-	for _, d := range p.Spec.Disks {
-		path := "/dev/disks/" + d.Name
-		if d.VolumeMode == "Filesystem" {
-			path = "/disks/" + d.Name + "/disk.img"
-		}
-		readonly := "off"
-		if d.ReadOnly {
-			readonly = "on"
-		}
-		args = append(args, "--disk", "path="+path+",image_type=raw,readonly="+readonly)
-	}
-	for _, device := range p.Spec.Devices {
-		args = append(args, "--device", "path=/sys/bus/pci/devices/"+device.PCIAddress)
-	}
-	if p.Spec.Config != nil {
-		configDisk := "/tmp/config.iso"
-		if err = command(ctx, "genisoimage", "-quiet", "-follow-links", "-rock", "-joliet", "-V", "ROAMVM_CONFIG", "-o", configDisk, "/config"); err != nil {
-			return err
-		}
-		args = append(args, "--disk", "path="+configDisk+",image_type=raw,readonly=on")
-	}
-	hypervisor := exec.Command("cloud-hypervisor", args...)
+	hypervisor := exec.Command("qemu-system-x86_64", args...)
 	hypervisor.Stdout = os.Stdout
 	hypervisor.Stderr = os.Stderr
 	// A killed runner must not leave a VMM alive holding the writable disk.
@@ -179,12 +147,13 @@ func Run() error {
 	if err = hypervisor.Start(); err != nil {
 		return err
 	}
+	log.Printf("startup stage=hypervisor elapsed=%s", time.Since(started))
 	defer hypervisor.Process.Kill()
 	exited := make(chan error, 1)
 	go func() { exited <- hypervisor.Wait() }()
 	setReady := func(value bool) {
 		if value {
-			if e := os.WriteFile("/tmp/guest-ready", []byte("ready"), 0600); e != nil {
+			if e := os.WriteFile("/tmp/guest-ready", []byte("ready"), 0o600); e != nil {
 				fmt.Fprintln(os.Stderr, "readiness file:", e)
 			}
 		} else {
@@ -192,13 +161,15 @@ func Run() error {
 		}
 	}
 	defer setReady(false)
-	ch := unixHTTP(socket)
-	ch.Timeout = 3 * time.Second
+	q := qmp.Client(socket)
+	cleanShutdown := false
 	lastContact := time.Now()
+	var lastHeartbeat time.Time
+	stopRequested := false
 	var stopping time.Time
 	powerSent := false
 	runningReported := false
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {
@@ -208,19 +179,44 @@ func Run() error {
 			dnsExited = nil
 		case err = <-exited:
 			setReady(false)
+			if err == nil && !cleanShutdown {
+				err = errors.New("hypervisor exited without guest shutdown")
+			}
 			if err != nil {
 				c.status("Error", "hypervisor failed; working disk retained: "+err.Error())
 				return err
 			}
 			return finish(c)
 		case <-tick.C:
-			heartbeatCtx, done := context.WithTimeout(context.Background(), 3*time.Second)
-			h, e := c.Call(heartbeatCtx, "heartbeat")
-			done()
-			if e == nil {
-				lastContact = time.Now()
+			if time.Since(lastHeartbeat) >= time.Second {
+				lastHeartbeat = time.Now()
+				heartbeatCtx, done := context.WithTimeout(context.Background(), 3*time.Second)
+				h, e := c.Call(heartbeatCtx, "heartbeat")
+				done()
+				if e == nil {
+					lastContact = time.Now()
+				}
+				stopRequested = h.Stop
+				if e == nil && !h.Stop && stopping.IsZero() {
+					resizeError := h.ResizeError
+					size := c.Request.DiskSize
+					if size == 0 || h.DiskSize > size {
+						var resizeErr error
+						size, resizeErr = q.Grow(context.Background(), h.DiskSize)
+						if resizeErr != nil {
+							resizeError = resizeErr.Error()
+						}
+					}
+					if c.Request.DiskSize != size || c.Request.ResizeError != resizeError {
+						previous := c.Request
+						c.Request.DiskSize, c.Request.ResizeError = size, resizeError
+						if runningReported && !c.status("Running", "") {
+							c.Request = previous
+						}
+					}
+				}
 			}
-			shouldStop := h.Stop || ctx.Err() != nil || time.Since(lastContact) > 30*time.Second
+			shouldStop := stopRequested || ctx.Err() != nil || time.Since(lastContact) > 30*time.Second
 			if shouldStop && stopping.IsZero() {
 				stopping = time.Now()
 				setReady(false)
@@ -228,7 +224,7 @@ func Run() error {
 			}
 			if !stopping.IsZero() {
 				if !powerSent {
-					if e = chCall(ch, "PUT", "vm.power-button", nil); e == nil {
+					if e := q.Call(context.Background(), "system_powerdown", nil, nil); e == nil {
 						powerSent = true
 					}
 				}
@@ -244,41 +240,25 @@ func Run() error {
 					conn.Close()
 					setReady(true)
 					if !runningReported {
-						c.status("Running", "")
-						runningReported = true
+						log.Printf("startup stage=guest-ready elapsed=%s", time.Since(started))
+						runningReported = c.status("Running", "")
+						tick.Reset(time.Second)
 					}
 				} else {
 					setReady(false)
 				}
 			}
 			var info struct {
-				State string `json:"state"`
+				Status string `json:"status"`
 			}
-			if e = chCall(ch, "GET", "vm.info", &info); e == nil && strings.EqualFold(info.State, "Shutdown") {
-				_ = chCall(ch, "PUT", "vmm.shutdown", nil)
+			if e := q.Call(context.Background(), "query-status", nil, &info); e == nil && info.Status == "shutdown" {
+				cleanShutdown = true
+				_ = q.Call(context.Background(), "quit", nil, nil)
 			}
 		}
 	}
 }
-func chCall(c *http.Client, method, action string, out any) error {
-	req, err := http.NewRequest(method, "http://vmm/api/v1/"+action, nil)
-	if err != nil {
-		return err
-	}
-	res, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("%s: %s", action, b)
-	}
-	if out != nil {
-		return json.NewDecoder(res.Body).Decode(out)
-	}
-	return nil
-}
+
 func finish(c *Client) error {
 	c.status("Checkpointing", "")
 	for {

@@ -1,0 +1,12 @@
+#!/bin/sh
+export PATH=/bin:/sbin
+case "$1" in
+  bound|renew)
+    ip addr flush dev "$interface"
+    ip addr add "$ip/30" dev "$interface"
+    ip route replace default via "$router" dev "$interface"
+    : > /etc/resolv.conf
+    for server in $dns; do echo "nameserver $server" >> /etc/resolv.conf; done
+    echo "search $search" >> /etc/resolv.conf
+    ;;
+esac

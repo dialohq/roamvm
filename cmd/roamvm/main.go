@@ -2,17 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/daemon"
 	"github.com/dialohq/roamvm/internal/device"
-	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/runner"
 	"github.com/dialohq/roamvm/internal/state"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -37,21 +38,28 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func env(k, fallback string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
 	return fallback
 }
+
 func scheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = core.AddToScheme(s)
 	_ = api.AddToScheme(s)
 	return s
 }
+
+func kubeClient() (client.Client, error) {
+	return client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+}
+
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: roamvm controller|daemon|runner|device-plugin|start|stop|image-push|state|recover")
+		return errors.New("usage: roamvm controller|daemon|checkpoint|runner|device-plugin|start|stop|image-push|state|recover")
 	}
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctx := ctrl.SetupSignalHandler()
@@ -61,19 +69,35 @@ func run() error {
 	case "device-plugin":
 		return (&device.Plugin{Slots: 1024}).Run(ctx, "/var/lib/kubelet/device-plugins")
 	case "controller":
-		m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme(), LeaderElection: true, LeaderElectionID: "roamvm-controller", LeaderElectionNamespace: env("POD_NAMESPACE", "roamvm-system"), Metrics: metrics.Options{BindAddress: ":8080"}, HealthProbeBindAddress: ":8081"})
+		m, err := ctrl.NewManager(
+			ctrl.GetConfigOrDie(),
+			ctrl.Options{
+				Scheme:                  scheme(),
+				LeaderElection:          true,
+				LeaderElectionID:        "roamvm-controller",
+				LeaderElectionNamespace: env("POD_NAMESPACE", "roamvm-system"),
+				Metrics:                 metrics.Options{BindAddress: ":8080"},
+				HealthProbeBindAddress:  ":8081",
+			},
+		)
 		if err != nil {
 			return err
 		}
-		r := &controller.Reconciler{Client: m.GetClient(), Scheme: m.GetScheme(), Image: env("RUNNER_IMAGE", "roamvm:dev"), Root: env("RUNTIME_ROOT", "/var/lib/roamvm")}
+		r := &controller.Reconciler{
+			Client:       m.GetClient(),
+			Scheme:       m.GetScheme(),
+			Image:        env("RUNNER_IMAGE", "roamvm:dev"),
+			StorageClass: os.Getenv("WORKING_STORAGE_CLASS"),
+			StorageSize:  env("WORKING_STORAGE_SIZE", "64Gi"),
+		}
 		if err = r.Setup(m); err != nil {
 			return err
 		}
 		_ = m.AddHealthzCheck("healthz", healthz.Ping)
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
-	case "daemon":
-		c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+	case "daemon", "checkpoint":
+		c, err := kubeClient()
 		if err != nil {
 			return err
 		}
@@ -82,12 +106,35 @@ func run() error {
 			return err
 		}
 		root := env("RUNTIME_ROOT", "/var/lib/roamvm")
-		server := &daemon.Server{Client: c, Node: os.Getenv("NODE_NAME"), Root: root, State: state.Manager{Store: store}, Cache: images.Cache{Root: root + "/images", PlainHTTP: os.Getenv("REGISTRY_PLAIN_HTTP") == "true"}}
-		if server.Node == "" || store.Bucket == "" {
-			return errors.New("NODE_NAME and S3_BUCKET are required")
+		backend, err := metadataStore(store, c)
+		if err != nil {
+			return err
 		}
-		if err = store.CheckSemantics(ctx); err != nil {
+		server := &daemon.Server{
+			Client:  c,
+			Node:    os.Getenv("NODE_NAME"),
+			PodUID:  os.Getenv("POD_UID"),
+			VMUID:   os.Getenv("VM_UID"),
+			Pod:     types.NamespacedName{Namespace: os.Getenv("POD_NAMESPACE"), Name: os.Getenv("POD_NAME")},
+			Root:    root,
+			State:   state.Manager{Store: backend},
+			BaseDir: "/base/disk",
+		}
+		if server.Node == "" || server.PodUID == "" || server.VMUID == "" || server.Pod.Name == "" || server.Pod.Namespace == "" || store.Bucket == "" {
+			return errors.New("NODE_NAME, POD_UID, VM_UID, POD_NAME, POD_NAMESPACE and S3_BUCKET are required")
+		}
+		if kubernetes, ok := backend.(*state.Kubernetes); ok {
+			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			err = kubernetes.CheckObjects(probeCtx, "runtime-probes/"+rand.Text())
+			cancel()
+		} else {
+			err = store.CheckSemantics(ctx)
+		}
+		if err != nil {
 			return fmt.Errorf("unsafe or unavailable object store: %w", err)
+		}
+		if os.Args[1] == "checkpoint" {
+			return server.CheckpointTerminatedRunner(ctx)
 		}
 		return server.Serve(ctx, "/run/roamvm/runtime.sock")
 	case "start", "stop":
@@ -99,7 +146,7 @@ func run() error {
 		if f.NArg() != 1 {
 			return errors.New("specify one VM name")
 		}
-		c, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+		c, err := kubeClient()
 		if err != nil {
 			return err
 		}
@@ -130,15 +177,22 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		m := state.Manager{Store: store}
+		var c client.Client
+		if os.Args[1] == "recover" || os.Getenv("STATE_BACKEND") == "kubernetes" {
+			c, err = kubeClient()
+			if err != nil {
+				return err
+			}
+		}
+		backend, err := metadataStore(store, c)
+		if err != nil {
+			return err
+		}
+		m := state.Manager{Store: backend}
 		var session state.Session
 		if os.Args[1] == "recover" {
 			if !*fenced || *owner == "" {
 				return errors.New("recovery requires --fenced and the exact --owner; a timeout is not fencing")
-			}
-			c, e := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
-			if e != nil {
-				return e
 			}
 			session, err = controller.Recover(ctx, c, m, *id, *owner)
 		} else {
@@ -152,6 +206,21 @@ func run() error {
 		return fmt.Errorf("unknown command %q", os.Args[1])
 	}
 }
+
+func metadataStore(objects state.Store, c client.Client) (state.Store, error) {
+	switch env("STATE_BACKEND", "s3") {
+	case "s3":
+		return objects, nil
+	case "kubernetes":
+		if c == nil {
+			return nil, errors.New("Kubernetes metadata requires a Kubernetes client")
+		}
+		return &state.Kubernetes{Client: c, Namespace: env("STATE_NAMESPACE", "roamvm-system"), Objects: objects}, nil
+	default:
+		return nil, errors.New("STATE_BACKEND must be s3 or kubernetes")
+	}
+}
+
 func push(ctx context.Context, args []string) error {
 	f := flag.NewFlagSet("image-push", flag.ContinueOnError)
 	tag := f.String("tag", "", "registry image tag")
