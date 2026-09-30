@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -39,24 +40,14 @@ func TestCheckpointReplacementFailures(t *testing.T) {
 				objects := newMemory()
 				m := retentionManager(objects, backend)
 				path := filepath.Join(t.TempDir(), "overlay")
-				if err := os.WriteFile(path, []byte("first stop"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.WriteFile(path, []byte("first stop"), 0o600))
 				first, err := m.Acquire(ctx, "vm", "base", "one", "node-a")
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				first, err = m.Commit(ctx, first, path)
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				second, err := m.Acquire(ctx, "vm", "base", "two", "node-b")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err = os.WriteFile(path, []byte("second stop"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(path, []byte("second stop"), 0o600))
 				objects.failure = failure
 				_, err = m.Commit(ctx, second, path)
 				if failure != "lost-response" && err == nil {
@@ -67,23 +58,17 @@ func TestCheckpointReplacementFailures(t *testing.T) {
 				}
 				objects.failure = ""
 				current, err := m.Read(ctx, "vm")
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				if failure == "upload" || failure == "verification" {
 					if current.ETag != second.ETag {
 						t.Fatal("failed upload replaced current checkpoint")
 					}
 					checkRestore(t, m, first, "first stop")
 					current, err = m.Commit(ctx, second, path)
-					if err != nil {
-						t.Fatal(err)
-					}
+					require.NoError(t, err)
 				} else {
 					// A restarted sidecar resumes cleanup from the durable head.
-					if err = m.Prune(ctx, current); err != nil {
-						t.Fatal(err)
-					}
+					require.NoError(t, m.Prune(ctx, current))
 				}
 				keys, err := objects.List(ctx, "vm/vm/overlay/")
 				if err != nil || len(keys) != 1 || keys[0] != current.Head.Checkpoint.Key {
@@ -98,9 +83,7 @@ func TestCheckpointReplacementFailures(t *testing.T) {
 func checkRestore(t *testing.T, m Manager, s Session, want string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "restored")
-	if err := m.Restore(context.Background(), s, path); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, m.Restore(context.Background(), s, path))
 	b, err := os.ReadFile(path)
 	if err != nil || string(b) != want {
 		t.Fatalf("restore: %q, %v", b, err)
@@ -136,17 +119,11 @@ func TestDelayedCleanupCannotDeleteNewCheckpoint(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "overlay")
 			commit := func(owner, data string) Session {
 				t.Helper()
-				if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
 				s, err := m.Acquire(ctx, "vm", "base", owner, owner)
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				s, err = m.Commit(ctx, s, path)
-				if err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, err)
 				return s
 			}
 			first := commit("one", "first stop")
@@ -161,9 +138,7 @@ func TestDelayedCleanupCannotDeleteNewCheckpoint(t *testing.T) {
 			<-paused.entered
 			third := commit("three", "newest stop")
 			close(paused.resume)
-			if err := <-result; err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, <-result)
 			keys, err := objects.List(ctx, "vm/vm/overlay/")
 			if err != nil || len(keys) != 1 || keys[0] != third.Head.Checkpoint.Key {
 				t.Fatal(keys, err)
@@ -176,9 +151,7 @@ func TestDelayedCleanupCannotDeleteNewCheckpoint(t *testing.T) {
 func TestCleanupPreservesFutureUploadsAndUnrelatedObjects(t *testing.T) {
 	ctx, m, s, path := fixture(t)
 	committed, err := m.Commit(ctx, s, path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	future := fmt.Sprintf("vm/%s/overlay/%020d-%020d-%s.qcow2", s.Head.VMID, 2, s.Head.Epoch+1, strings.Repeat("a", 64))
 	keys := []string{future, "vm/other/overlay/keep", "vm/vm-1/overlay/unknown-format"}
 	for _, key := range keys {
@@ -186,9 +159,7 @@ func TestCleanupPreservesFutureUploadsAndUnrelatedObjects(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err = m.Prune(ctx, committed); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, m.Prune(ctx, committed))
 	for _, key := range keys {
 		object, err := m.Store.Get(ctx, key)
 		if err != nil {

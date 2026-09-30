@@ -146,10 +146,15 @@ and retries. The next successful stop also removes history from older releases.
 The controller and daemon are trusted cluster components. VM creation is comparable
 to Pod creation: it can reference namespace-local Secrets and PVCs. Do not grant
 untrusted users Pod creation/exec/mutation or runtime Secret access in VM namespaces,
-or access to the runtime S3 prefix. Per-incarnation runner tokens are bound to VM, Pod UID
-and assigned node. Guest configuration rejects token and Pod-certificate projections
-and the reserved `roamvm-object-store` Secret. The runner container has neither
-the runtime API token nor its object-store environment.
+or access to the runtime S3 prefix. The runtime accepts requests only through its
+mode-0600 Unix socket, mounted into its own Pod's two containers. It selects the
+Pod from its downward API identity and verifies the Pod UID, assigned node and VM
+owner on every request; callers cannot select another VM. Guest configuration rejects
+token and Pod-certificate projections and the reserved `roamvm-object-store` Secret.
+The runner container has neither the Kubernetes token nor the object-store environment.
+New Pods need no per-runner authentication Secret. The runtime Role retains
+Secret reads for older Pods until their next cold start. Their existing token
+Secrets remain owned by the VM and are garbage-collected when that VM is deleted.
 
 ## Package a NixOS or other Linux image
 

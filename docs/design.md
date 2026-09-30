@@ -18,7 +18,8 @@ its [QCOW2 hardening guidance](https://github.com/cloud-hypervisor/cloud-hypervi
 
 - Controller: creates one named runner incarnation, mirrors status, requests stop,
   and removes resources after durable completion. It has no S3 credentials.
-- Runtime sidecar: authorizes its own runner by token/Pod UID/node/VM ownership,
+- Runtime sidecar: serves a private Pod-local Unix socket, verifies its downward API
+  Pod identity and VM ownership,
   validates the mounted base disk, restores state and commits checkpoints.
 - Runner: holds a local file lock, sets up TAP/NAT/DHCP, runs the hypervisor,
   sends heartbeats and reports guest readiness. It cannot access the sidecar's

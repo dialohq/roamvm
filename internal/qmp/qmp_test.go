@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestProtocol(t *testing.T) {
@@ -17,9 +19,7 @@ func TestProtocol(t *testing.T) {
 		t.Run(map[bool]string{false: "events-and-command-error", true: "wrong-response-id"}[malformed], func(t *testing.T) {
 			socket := filepath.Join(t.TempDir(), "qmp")
 			listener, err := net.Listen("unix", socket)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err)
 			defer listener.Close()
 			go func() {
 				conn, e := listener.Accept()
@@ -58,22 +58,16 @@ func TestLiveBlockGrowth(t *testing.T) {
 	}
 	dir := t.TempDir()
 	base, overlay, socket := filepath.Join(dir, "base.raw"), filepath.Join(dir, "overlay.qcow2"), filepath.Join(dir, "qmp")
-	if err = os.WriteFile(base, make([]byte, 1<<20), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(base, make([]byte, 1<<20), 0o600))
 	if out, err := exec.Command("qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", base, overlay).CombinedOutput(); err != nil {
 		t.Fatalf("%s: %v", out, err)
 	}
 	logFile, err := os.Create(filepath.Join(dir, "qemu.log"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer logFile.Close()
 	cmd := exec.Command(binary, "-machine", "q35,accel=tcg", "-m", "32", "-S", "-nodefaults", "-display", "none", "-qmp", "unix:"+socket+",server=on,wait=off", "-blockdev", `{"driver":"qcow2","node-name":"root","file":{"driver":"file","filename":"`+overlay+`"}}`, "-device", "virtio-blk-pci,drive=root")
 	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err = cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, cmd.Start())
 	defer func() { cmd.Process.Kill(); cmd.Wait() }()
 	q := Client(socket)
 	deadline := time.Now().Add(10 * time.Second)
@@ -97,19 +91,11 @@ func TestLiveBlockGrowth(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := q.Call(ctx, "query-status", nil, nil); err == nil {
-		t.Fatal("cancelled call succeeded")
-	}
-	if err = q.Call(t.Context(), "quit", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err = cmd.Wait(); err != nil {
-		t.Fatal(err)
-	}
+	require.Error(t, q.Call(ctx, "query-status", nil, nil), "cancelled call succeeded")
+	require.NoError(t, q.Call(t.Context(), "quit", nil, nil))
+	require.NoError(t, cmd.Wait())
 	out, err := exec.Command("qemu-img", "info", "--output=json", overlay).Output()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	var info struct {
 		Size int64 `json:"virtual-size"`
 	}

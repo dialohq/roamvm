@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,13 +16,9 @@ func TestWorkingPVCExpansion(t *testing.T) {
 	r, vm := setup(t)
 	r.StorageSize = "1Gi"
 	vm.Spec.RootDiskSize = "2Gi"
-	if err := r.createPod(t.Context(), vm); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, r.createPod(t.Context(), vm))
 	var pod core.Pod
-	if err := r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod))
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == "working" && v.Ephemeral.VolumeClaimTemplate.Spec.Resources.Requests.Storage().Value() != 5<<30 {
 			t.Fatal("missing checkpoint headroom")
@@ -33,27 +30,17 @@ func TestWorkingPVCExpansion(t *testing.T) {
 		Spec:       core.PersistentVolumeClaimSpec{Resources: core.VolumeResourceRequirements{Requests: core.ResourceList{core.ResourceStorage: resource.MustParse("5Gi")}}},
 		Status:     core.PersistentVolumeClaimStatus{Capacity: core.ResourceList{core.ResourceStorage: resource.MustParse("5Gi")}},
 	}
-	if err := r.Create(t.Context(), pvc); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, r.Create(t.Context(), pvc))
 	vm.Spec.RootDiskSize = "4Gi"
-	if err := r.expandWorkingPVC(t.Context(), vm, &pod); err == nil {
-		t.Fatal("accepted unfinished expansion")
-	}
-	if err := r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc); err != nil {
-		t.Fatal(err)
-	}
+	require.Error(t, r.expandWorkingPVC(t.Context(), vm, &pod), "accepted unfinished expansion")
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), pvc))
 	if pvc.Spec.Resources.Requests.Storage().Value() != 9<<30 {
 		t.Fatal("PVC not expanded")
 	}
 	// An unrelated PVC with the expected name must never be mutated.
 	pvc.OwnerReferences = nil
-	if err := r.Update(t.Context(), pvc); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.expandWorkingPVC(t.Context(), vm, &pod); err == nil {
-		t.Fatal("accepted foreign PVC")
-	}
+	require.NoError(t, r.Update(t.Context(), pvc))
+	require.Error(t, r.expandWorkingPVC(t.Context(), vm, &pod), "accepted foreign PVC")
 }
 
 func TestDiskSizeValidation(t *testing.T) {

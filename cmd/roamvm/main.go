@@ -114,12 +114,14 @@ func run() error {
 			Client:  c,
 			Node:    os.Getenv("NODE_NAME"),
 			PodUID:  os.Getenv("POD_UID"),
+			VMUID:   os.Getenv("VM_UID"),
+			Pod:     types.NamespacedName{Namespace: os.Getenv("POD_NAMESPACE"), Name: os.Getenv("POD_NAME")},
 			Root:    root,
 			State:   state.Manager{Store: backend},
 			BaseDir: "/base/disk",
 		}
-		if server.Node == "" || server.PodUID == "" || store.Bucket == "" {
-			return errors.New("NODE_NAME, POD_UID and S3_BUCKET are required")
+		if server.Node == "" || server.PodUID == "" || server.VMUID == "" || server.Pod.Name == "" || server.Pod.Namespace == "" || store.Bucket == "" {
+			return errors.New("NODE_NAME, POD_UID, VM_UID, POD_NAME, POD_NAMESPACE and S3_BUCKET are required")
 		}
 		if kubernetes, ok := backend.(*state.Kubernetes); ok {
 			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)

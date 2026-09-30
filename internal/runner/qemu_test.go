@@ -15,18 +15,15 @@ import (
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/daemon"
 	"github.com/dialohq/roamvm/internal/images"
+	"github.com/stretchr/testify/require"
 )
 
 func TestQEMUBlockGraphAndResources(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "vmlinux"), []byte("kernel"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "vmlinux"), []byte("kernel"), 0o600))
 	p := &daemon.Prepared{Dir: dir, Base: images.Base{Dir: dir, Manifest: images.Manifest{Format: "qcow2", Cmdline: "root=/dev/vda"}}, Spec: api.VirtualMachineSpec{CPUs: 8, Memory: "2Gi", Hugepages: "2Mi", Hostname: "devbox", Disks: []api.SecondaryDisk{{Name: "shared", VolumeMode: "Filesystem", ReadOnly: true}}, Devices: []api.Device{{PCIAddress: "0000:01:00.0"}}}}
 	args, err := qemuArgs(t.Context(), p, filepath.Join(dir, "qmp"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	text := strings.Join(args, " ")
 	for _, want := range []string{"-smp 8", "-m 2048", "memory-backend-memfd", "hugetlbsize=2097152", "vfio-pci,host=0000:01:00.0", "systemd.hostname=devbox", "-no-shutdown"} {
 		if !strings.Contains(text, want) {
@@ -37,9 +34,7 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 	for i, arg := range args {
 		if arg == "-blockdev" {
 			var node map[string]any
-			if err := json.Unmarshal([]byte(args[i+1]), &node); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, json.Unmarshal([]byte(args[i+1]), &node))
 			nodes = append(nodes, node)
 		}
 	}

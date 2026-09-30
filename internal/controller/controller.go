@@ -26,7 +26,6 @@ const (
 	Finalizer            = "vm.roamvm.io/checkpoint"
 	CheckpointAnnotation = "vm.roamvm.io/checkpoint"
 	Message              = "vm.roamvm.io/message"
-	SecretAnnotation     = "vm.roamvm.io/auth-secret"
 	DiskSizeAnnotation   = "vm.roamvm.io/root-disk-size"
 	ResizeAnnotation     = "vm.roamvm.io/resize-error"
 	SpecAnnotation       = "vm.roamvm.io/boot-spec"
@@ -186,10 +185,7 @@ func (r *Reconciler) releasePod(ctx context.Context, pod *core.Pod) (ctrl.Result
 			return ctrl.Result{}, err
 		}
 	}
-	secret := &core.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: pod.Annotations[SecretAnnotation], Namespace: pod.Namespace},
-	}
-	return ctrl.Result{RequeueAfter: time.Second}, client.IgnoreNotFound(r.Delete(ctx, secret))
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 func (r *Reconciler) status(
@@ -199,7 +195,7 @@ func (r *Reconciler) status(
 	pod *core.Pod,
 	checkpoint ...*api.Checkpoint,
 ) (ctrl.Result, error) {
-	old := vm.DeepCopy()
+	old := vm.Status.DeepCopy()
 	if pod != nil && vm.Spec.PowerState == "Running" && vm.DeletionTimestamp == nil && pod.DeletionTimestamp == nil && phase == "Running" {
 		resizeErr := r.expandWorkingPVC(ctx, vm, pod)
 		condition := metav1.Condition{Type: "DiskReady", Status: metav1.ConditionTrue, Reason: "CapacityReady", ObservedGeneration: vm.Generation}
@@ -242,27 +238,16 @@ func (r *Reconciler) status(
 	if phase == "Stopped" {
 		stopped = metav1.ConditionTrue
 	}
-	meta.SetStatusCondition(
-		&vm.Status.Conditions,
-		metav1.Condition{
-			Type:               "Ready",
-			Status:             ready,
-			Reason:             phase,
-			Message:            message,
-			ObservedGeneration: vm.Generation,
-		},
-	)
-	meta.SetStatusCondition(
-		&vm.Status.Conditions,
-		metav1.Condition{
-			Type:               "Stopped",
-			Status:             stopped,
-			Reason:             phase,
-			Message:            message,
-			ObservedGeneration: vm.Generation,
-		},
-	)
-	if equality.Semantic.DeepEqual(old.Status, vm.Status) {
+	for _, condition := range []struct {
+		name   string
+		status metav1.ConditionStatus
+	}{{"Ready", ready}, {"Stopped", stopped}} {
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type: condition.name, Status: condition.status, Reason: phase,
+			Message: message, ObservedGeneration: vm.Generation,
+		})
+	}
+	if equality.Semantic.DeepEqual(*old, vm.Status) {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	return ctrl.Result{RequeueAfter: 2 * time.Second}, r.Status().Update(ctx, vm)

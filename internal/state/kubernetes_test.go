@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -50,9 +51,7 @@ func TestKubernetesOwnershipWithObjectOnlyStore(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "overlay")
 	os.WriteFile(p, []byte("durable bytes"), 0o600)
 	committed, e := m.Commit(ctx, s, p)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if committed.Head.Checkpoint.Generation != 1 {
 		t.Fatal(committed)
 	}
@@ -60,13 +59,9 @@ func TestKubernetesOwnershipWithObjectOnlyStore(t *testing.T) {
 		t.Fatal("S3 used for mutable coordination")
 	}
 	next, e := m.Acquire(ctx, "vm-1", "base", "next-pod", "node-b")
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	restored := filepath.Join(t.TempDir(), "restored")
-	if e = m.Restore(ctx, next, restored); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, m.Restore(ctx, next, restored))
 	got, _ := os.ReadFile(restored)
 	if string(got) != "durable bytes" {
 		t.Fatal("restore differs")
@@ -114,9 +109,7 @@ func TestOwnershipChangeDuringUploadCannotPublishStaleCheckpoint(t *testing.T) {
 			ctx := context.Background()
 			m := Manager{Store: store}
 			first, e := m.Acquire(ctx, "vm-race", "base", "old-pod", "node-a")
-			if e != nil {
-				t.Fatal(e)
-			}
+			require.NoError(t, e)
 			path := filepath.Join(t.TempDir(), "overlay")
 			os.WriteFile(path, []byte("stale overlay"), 0o600)
 			result := make(chan error, 1)
@@ -126,17 +119,13 @@ func TestOwnershipChangeDuringUploadCannotPublishStaleCheckpoint(t *testing.T) {
 				t.Fatal(e)
 			}
 			replacement, e := m.Acquire(ctx, "vm-race", "base", "new-pod", "node-b")
-			if e != nil {
-				t.Fatal(e)
-			}
+			require.NoError(t, e)
 			close(paused.resume)
 			if e = <-result; !errors.Is(e, ErrConflict) {
 				t.Fatalf("stale upload committed: %v", e)
 			}
 			current, e := m.Read(ctx, "vm-race")
-			if e != nil {
-				t.Fatal(e)
-			}
+			require.NoError(t, e)
 			if current.ETag != replacement.ETag || current.Head.Checkpoint != nil || current.Head.Owner != "new-pod" {
 				t.Fatal("new owner was overwritten", current)
 			}

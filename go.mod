@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
 	github.com/aws/smithy-go v1.28.1
 	github.com/google/go-containerregistry v0.20.6
+	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.79.1
 	k8s.io/api v0.35.0
