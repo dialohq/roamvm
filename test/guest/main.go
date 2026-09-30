@@ -13,8 +13,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +24,50 @@ import (
 
 func main() {
 	started := time.Now()
+	http.HandleFunc("/generation", func(w http.ResponseWriter, r *http.Request) {
+		values := map[string]string{}
+		for name, path := range map[string]string{"generation": "/etc/generation-test", "cmdline": "/proc/cmdline", "bootID": "/proc/sys/kernel/random/boot_id", "hostname": "/proc/sys/kernel/hostname"} {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			values[name] = strings.TrimSpace(string(b))
+		}
+		for _, name := range []string{"current-system", "booted-system"} {
+			values[name], _ = os.Readlink("/run/" + name)
+		}
+		json.NewEncoder(w).Encode(values)
+	})
+	http.HandleFunc("/rebuild", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		target, err := os.ReadFile("/generation-target")
+		if err != nil {
+			http.Error(w, err.Error(), 404)
+			return
+		}
+		var args []string
+		switch r.URL.Query().Get("action") {
+		case "test", "switch":
+			args = []string{r.URL.Query().Get("action"), "--store-path", strings.TrimSpace(string(target))}
+		case "rollback":
+			args = []string{"switch", "--rollback"}
+		default:
+			http.Error(w, "invalid rebuild action", 400)
+			return
+		}
+		cmd := exec.CommandContext(r.Context(), "/run/current-system/sw/bin/nixos-rebuild", append(args, "--no-reexec")...)
+		cmd.Env = append(os.Environ(), "PATH=/run/current-system/sw/bin")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			http.Error(w, string(out)+err.Error(), 500)
+			return
+		}
+		w.Write(out)
+	})
 	http.HandleFunc("/storage", func(w http.ResponseWriter, r *http.Request) {
 		var stat syscall.Statfs_t
 		if err := syscall.Statfs("/", &stat); err != nil {

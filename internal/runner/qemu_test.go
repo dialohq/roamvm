@@ -50,6 +50,55 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 	}
 }
 
+func TestQEMUBootMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode       string
+		kernel, firmware bool
+		direct           bool
+	}{
+		{name: "existing image", kernel: true, direct: true},
+		{name: "explicit image", mode: "Image", kernel: true, firmware: true, direct: true},
+		{name: "firmware image", firmware: true},
+		{name: "existing disk migration", mode: "Disk", kernel: true},
+		{name: "disk with image firmware", mode: "Disk", kernel: true, firmware: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for file, present := range map[string]bool{"vmlinux": tc.kernel, "initrd": tc.kernel, "firmware": tc.firmware} {
+				if present {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, file), []byte(file), 0o600))
+				}
+			}
+			p := &daemon.Prepared{Dir: dir, Base: images.Base{Dir: dir, Manifest: images.Manifest{Format: "qcow2", Cmdline: "init=/original/init"}}, Spec: api.VirtualMachineSpec{CPUs: 2, Memory: "2Gi", Hostname: "workspace-123", BootMode: tc.mode}}
+			args, err := qemuArgs(t.Context(), p, filepath.Join(dir, "qmp"))
+			require.NoError(t, err)
+			require.Contains(t, args, "virtio-blk-pci,drive=root,bootindex=1")
+			if tc.direct {
+				require.Contains(t, args, "-kernel")
+				require.Contains(t, args, "-initrd")
+				require.Contains(t, args, "init=/original/init systemd.hostname=workspace-123")
+				require.NotContains(t, args, "-bios")
+			} else {
+				require.NotContains(t, args, "-kernel")
+				require.NotContains(t, args, "-initrd")
+				require.NotContains(t, args, "-append")
+				require.Contains(t, args, "type=11,value=io.systemd.credential:system.hostname=workspace-123")
+				if tc.firmware {
+					require.Contains(t, args, "-bios")
+					require.Contains(t, args, filepath.Join(dir, "firmware"))
+				} else {
+					require.NotContains(t, args, "-bios")
+				}
+			}
+		})
+	}
+}
+
+func TestQEMURejectsUnknownBootMode(t *testing.T) {
+	_, err := qemuArgs(t.Context(), &daemon.Prepared{Spec: api.VirtualMachineSpec{BootMode: "unknown"}}, "")
+	require.ErrorContains(t, err, "unsupported boot mode")
+}
+
 func TestStatusAcknowledgement(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,9 @@ import (
 )
 
 func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string, error) {
+	if p.Spec.BootMode != "" && p.Spec.BootMode != "Image" && p.Spec.BootMode != "Disk" {
+		return nil, fmt.Errorf("unsupported boot mode %q", p.Spec.BootMode)
+	}
 	memory, err := resource.ParseQuantity(p.Spec.Memory)
 	if err != nil {
 		return nil, err
@@ -40,7 +44,11 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 		if err != nil {
 			return err
 		}
-		args = append(args, "-blockdev", string(encoded), "-device", "virtio-blk-pci,drive="+name)
+		device := "virtio-blk-pci,drive=" + name
+		if name == "root" {
+			device += ",bootindex=1"
+		}
+		args = append(args, "-blockdev", string(encoded), "-device", device)
 		return nil
 	}
 	if err = addDisk(root, "root"); err != nil {
@@ -49,7 +57,7 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 	addRaw := func(path, name string, readonly bool) error {
 		return addDisk(map[string]any{"driver": "raw", "node-name": name, "file": file(path), "read-only": readonly}, name)
 	}
-	if _, err = os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); err == nil {
+	if _, err = os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); err == nil && p.Spec.BootMode != "Disk" {
 		cmdline := p.Base.Manifest.Cmdline
 		if p.Spec.Hostname != "" {
 			cmdline += " systemd.hostname=" + p.Spec.Hostname
@@ -59,7 +67,12 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 			args = append(args, "-initrd", filepath.Join(p.Base.Dir, "initrd"))
 		}
 	} else {
-		args = append(args, "-bios", filepath.Join(p.Base.Dir, "firmware"))
+		if _, err = os.Stat(filepath.Join(p.Base.Dir, "firmware")); err == nil {
+			args = append(args, "-bios", filepath.Join(p.Base.Dir, "firmware"))
+		}
+		if p.Spec.Hostname != "" {
+			args = append(args, "-smbios", "type=11,value=io.systemd.credential:system.hostname="+p.Spec.Hostname)
+		}
 	}
 	for i, d := range p.Spec.Disks {
 		path := "/dev/disks/" + d.Name
