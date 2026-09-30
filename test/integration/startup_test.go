@@ -28,6 +28,10 @@ func BenchmarkStartup(b *testing.B) {
 		b.Fatal("set ROAMVM_TEST_NODE to hold placement constant")
 	}
 	l.exclusiveNode(nodeName, "")
+	if os.Getenv("ROAMVM_TEST_COLD_CACHE") == "1" {
+		// Ensure the image exists before the first timed iteration removes it.
+		l.run(nil, "docker", "exec", nodeName, "crictl", "pull", l.image)
+	}
 	node := &core.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 	l.get(node)
 	ip := ""

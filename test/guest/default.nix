@@ -1,9 +1,5 @@
 {pkgs}: let
   kernel = pkgs.linuxPackages.kernel;
-  extractVmlinux = pkgs.fetchurl {
-    url = "https://raw.githubusercontent.com/torvalds/linux/v6.18/scripts/extract-vmlinux";
-    hash = "sha256-qstrsJryJ6bPUI9Sg0WPABcio5q9nEz7AmvJfDFiSRA=";
-  };
   moduleNames = ["virtio_pci" "virtio_blk" "virtio_net" "ext4" "isofs" "af_packet" "button" "evdev"];
   modules = pkgs.makeModulesClosure {
     kernel = kernel.modules;
@@ -51,7 +47,7 @@
   };
 in
   pkgs.runCommand "roamvm-test-guest.tar.gz" {
-    nativeBuildInputs = [pkgs.e2fsprogs pkgs.gzip pkgs.xz pkgs.zstd pkgs.binutils];
+    nativeBuildInputs = [pkgs.e2fsprogs pkgs.qemu-utils];
   } ''
     mkdir -p root/{sbin,proc,sys,dev,tmp,run,mnt} disk
     cp -r ${applets}/bin root/bin
@@ -59,10 +55,12 @@ in
     chmod -R u+w root
     ln -s /bin/busybox root/sbin/init
     cp ${guest}/bin/guest root/bin/guest-test
-    truncate -s 256M disk/root.raw
-    mke2fs -q -t ext4 -F -d root disk/root.raw
+    truncate -s 256M root.raw
+    mke2fs -q -t ext4 -F -d root root.raw
+    qemu-img convert -f raw -O qcow2 -c -o compression_type=zstd root.raw disk/root.qcow2
+    qemu-img compare -f raw -F qcow2 root.raw disk/root.qcow2
     cp ${initrd}/initrd disk/initrd
-    bash ${extractVmlinux} ${kernel}/bzImage > disk/vmlinux
-    echo '{"format":"raw","cmdline":"console=ttyS0 root=/dev/vda rw panic=1 net.ifnames=0"}' > disk/manifest.json
+    cp ${kernel}/bzImage disk/vmlinux
+    echo '{"format":"qcow2","cmdline":"console=ttyS0 root=/dev/vda rw panic=1 net.ifnames=0"}' > disk/manifest.json
     tar -czf $out disk
   ''

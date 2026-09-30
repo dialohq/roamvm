@@ -175,7 +175,7 @@ An ordinary OCI image layer contains files, **not** a container rootfs to execut
 disk/
   manifest.json       {"format":"qcow2","cmdline":"console=ttyS0 ..."}
   root.qcow2          standalone immutable disk; root.raw also supported
-  vmlinux             uncompressed ELF Linux kernel, for direct boot
+  vmlinux             Linux bzImage or ELF kernel, for direct boot
   initrd              optional initramfs
 ```
 
@@ -189,10 +189,12 @@ Copy files **dereferencing Nix store symlinks**, preserve the Nix image's kernel
 command line, and package them:
 
 ```sh
-# To keep OCI transfers small, optionally convert an existing raw disk first:
-qemu-img convert -f raw -O qcow2 /path/to/root.raw disk/root.qcow2
+# Recommended immutable base for the QEMU runner:
+qemu-img convert -f raw -O qcow2 -c -o compression_type=zstd \
+  /path/to/root.raw disk/root.qcow2
+qemu-img compare -f raw -F qcow2 /path/to/root.raw disk/root.qcow2
 # Supply disk/manifest.json, vmlinux and initrd from the same NixOS build.
-# Linux scripts/extract-vmlinux can extract an ELF kernel from bzImage.
+# Copy the kernel's bzImage directly to disk/vmlinux; no extraction is needed.
 tar -C . -czf vm-image.tar.gz disk
 roamvm image-push --tag registry.example.com/vm-images/devbox:BUILD \
   --tar vm-image.tar.gz
@@ -202,6 +204,16 @@ The push command uses standard Docker credentials and prints the immutable diges
 Private pulls use `spec.imagePullSecrets` in the VM namespace. A base with its own
 backing dependency is rejected. The base digest cannot change on an existing VM:
 create a new VM to change the base, or install packages into its current overlay.
+
+QCOW2 keeps unallocated disk space out of the OCI payload and the node's unpacked
+image. Gzip around a raw disk saves transfer bytes, but an ordinary OCI layer
+can still unpack to the disk's full virtual capacity. Zstd-compressed QCOW2 also
+reduces the cached base's size; QEMU decompresses clusters as they are read.
+Uncompressed QCOW2 avoids that read CPU cost at the expense of more node storage.
+Raw, uncompressed QCOW2 and zlib-compressed QCOW2 remain supported. The writable
+overlay stays uncompressed, and its checkpoint format does not change. This
+recommendation requires the QEMU runner; do not publish Zstd bases to the older
+Cloud Hypervisor deployment.
 
 ## Kubernetes integration
 

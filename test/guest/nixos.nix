@@ -50,11 +50,14 @@
     copyChannel = false;
   };
 in
-  pkgs.runCommand "roamvm-nixos-resize-test.tar.gz" {} ''
+  pkgs.runCommand "roamvm-nixos-resize-test.tar.gz" {
+    nativeBuildInputs = [pkgs.qemu-utils];
+  } ''
     mkdir disk
-    ln -s ${disk}/nixos.img disk/root.raw
+    qemu-img convert -f raw -O qcow2 -c -o compression_type=zstd ${disk}/nixos.img disk/root.qcow2
+    qemu-img compare -f raw -F qcow2 ${disk}/nixos.img disk/root.qcow2
     ln -s ${guest.config.system.build.kernel}/bzImage disk/vmlinux
     ln -s ${guest.config.system.build.initialRamdisk}/initrd disk/initrd
-    echo '{"format":"raw","cmdline":"init=${guest.config.system.build.toplevel}/init console=ttyS0 net.ifnames=0"}' > disk/manifest.json
+    echo '{"format":"qcow2","cmdline":"init=${guest.config.system.build.toplevel}/init console=ttyS0 net.ifnames=0"}' > disk/manifest.json
     tar -chzf $out disk
   ''
