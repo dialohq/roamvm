@@ -9,6 +9,11 @@
     };
   in {
     nixosModules.online-grow = import ./nix/online-grow.nix;
+    packages.x86_64-linux.test-firmware-guest = import ./test/guest/generations.nix {
+      inherit pkgs nixpkgs;
+      diskBoot = true;
+    };
+    packages.x86_64-linux.test-generation-guest = import ./test/guest/generations.nix {inherit pkgs nixpkgs;};
     packages.x86_64-linux.test-nixos-guest = import ./test/guest/nixos.nix {inherit pkgs nixpkgs;};
     packages.x86_64-linux.test-guest = import ./test/guest {inherit pkgs;};
     packages.x86_64-linux.test-store = pkgs.dockerTools.buildLayeredImage {

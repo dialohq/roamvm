@@ -47,6 +47,10 @@ type VirtualMachineSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="the immutable base cannot change; create a new VM"
 	Image            string                        `json:"image"`
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+	// BootMode selects image-provided boot files or the bootloader on the writable root disk.
+	// Changes take effect at the next start; Disk preserves the immutable base and checkpoints.
+	// +kubebuilder:validation:Enum=Image;Disk
+	BootMode string `json:"bootMode,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=256
 	// +kubebuilder:default=2

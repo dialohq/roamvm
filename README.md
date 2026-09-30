@@ -180,7 +180,22 @@ disk/
 ```
 
 Alternatively put `firmware` in the directory instead of `vmlinux`, with a guest
-bootloader on the disk. Direct Linux boot was integration-tested; UEFI was not.
+bootloader on the disk. Direct Linux boot and SeaBIOS/GRUB disk boot are covered
+by the real-KVM tests; UEFI is not.
+
+`spec.bootMode: Disk` boots the root disk's bootloader even when the original
+image contains `vmlinux`. It uses the image's `firmware` when present, otherwise
+QEMU's default BIOS. This lets an existing BIOS-bootable NixOS workspace use its
+selected system generation after `nixos-rebuild switch`, without replacing its
+immutable base or checkpoints. Stop the VM, set `bootMode: Disk`, then start it.
+The original disk must already contain a working BIOS bootloader; this option
+does not install one. Omitted `bootMode` (or `Image`) preserves image-selected
+booting, with `vmlinux` taking precedence over `firmware`.
+
+For disk boot, `spec.hostname` is supplied through the standard systemd
+`system.hostname` SMBIOS credential. Leave NixOS `networking.hostName = ""` to
+accept the runtime hostname. Other distributions must support that credential
+or configure their hostname themselves.
 The image needs virtio PCI/block/net support, DHCP, ACPI power-button shutdown,
 and the service named by `readinessPort`. There is no required guest agent.
 NixOS images should have guest firewall/SSH/authentication configured intentionally.

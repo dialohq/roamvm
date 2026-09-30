@@ -961,6 +961,14 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
+              bootMode:
+                description: |-
+                  BootMode selects image-provided boot files or the bootloader on the writable root disk.
+                  Changes take effect at the next start; Disk preserves the immutable base and checkpoints.
+                enum:
+                - Image
+                - Disk
+                type: string
               config:
                 description: |-
                   Projected files become a read-only ISO disk labelled ROAMVM_CONFIG.

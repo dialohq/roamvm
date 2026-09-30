@@ -48,6 +48,12 @@ Optional cases are explicit:
 make lab-nixos-guest
 ROAMVM_TEST_RESIZE_IMAGE="$(cat .lab/nixos-guest-ref)" go test -tags=integration -race -run TestOnlineResize -v ./test/integration
 
+# GRUB generation selection, existing-image migration, and persistent rollback.
+make lab-generation-guest
+ROAMVM_TEST_GENERATION_IMAGE="$(cat .lab/generation-guest-ref)" \
+ROAMVM_TEST_FIRMWARE_IMAGE="$(cat .lab/firmware-guest-ref)" \
+  go test -tags=integration -race -run TestNixOSGenerations -v ./test/integration
+
 # Kills a kind worker container, proves fencing, and restores it afterward.
 ROAMVM_TEST_NODE_FAILURE=1 make integration
 
@@ -116,6 +122,12 @@ builds the container. KVM tests require the local lab.
 - Kubernetes integration: queued cancellation, immutable-base CRD validation,
   configuration ISO refresh at next boot, secondary PVC writes/persistence,
   port forwarding, and durable VM deletion.
+- NixOS generations: `nixos-rebuild test`, `switch`, and `switch --rollback`
+  using prebuilt system closures through the native `--store-path` interface.
+  Checks the active and booted system, kernel command line, runtime hostname,
+  unchanged image/VM identity, user data, and checkpoint restore on another node.
+  Covers migration from direct kernel boot and new SeaBIOS/GRUB images. This
+  isolates activation and boot persistence; it does not rebuild packages in-guest.
 - Existing NixOS 26.05 disk: actual boot to SSH, ACPI shutdown, checkpoint commit,
   restart and identical generated SSH host key after restore.
 - CPU oversubscription: two four-vCPU guests on a worker restricted to two CPU
