@@ -131,7 +131,7 @@ func TestResizeWithoutExpandableStorage(t *testing.T) {
 	l.wait("PVC expansion refused without stopping VM", func() (bool, error) {
 		current := l.vm(v.Name)
 		condition := apimeta.FindStatusCondition(current.Status.Conditions, "DiskReady")
-		return current.Status.Phase == "Running" && condition != nil && condition.Status == "False" && strings.Contains(condition.Message, "expansion"), nil
+		return current.Status.Phase == "Running" && condition != nil && condition.Status == "False" && strings.Contains(condition.Message, "support resize"), nil
 	})
 	equal(t, "guest still responds with original data", l.request(v.Name, "/data", nil), before)
 	equal(t, "same runner", l.vm(v.Name).Status.PodName, pod.Name)
