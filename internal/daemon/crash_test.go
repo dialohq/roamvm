@@ -32,7 +32,7 @@ func crashFixture(t *testing.T) (*Server, *core.Pod, *committedStore) {
 	}
 	controllerutil.SetControllerReference(vm, pod, scheme)
 	store := &committedStore{head: state.Head{Schema: 1, VMID: "vm-uid", State: "Stopped", Epoch: 1, Checkpoint: &api.Checkpoint{Key: "vm/vm-uid/overlay/00000000000000000001-00000000000000000001-" + strings.Repeat("a", 64) + ".qcow2", Generation: 1}}}
-	s := &Server{Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), Node: pod.Spec.NodeName, Root: t.TempDir(), State: state.Manager{Store: store}, Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm, pod).Build()}
+	s := &Server{Pod: client.ObjectKeyFromObject(pod), VMUID: string(vm.UID), PodUID: string(pod.UID), Node: pod.Spec.NodeName, Root: t.TempDir(), State: state.Manager{Store: store}, Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm, pod).Build()}
 	for _, f := range []string{"overlay.qcow2", "runner.lock"} {
 		if err := os.WriteFile(filepath.Join(s.Root, f), []byte("retained"), 0o600); err != nil {
 			t.Fatal(err)

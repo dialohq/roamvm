@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dialohq/roamvm/internal/images"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOverlayPortabilityPreservesWritesAndZeroes(t *testing.T) {
@@ -26,37 +27,23 @@ func TestOverlayPortabilityPreservesWritesAndZeroes(t *testing.T) {
 		baseData[i] = 0x55
 	}
 	base := images.Base{Dir: a, Manifest: images.Manifest{Format: "raw"}}
-	if e := os.WriteFile(base.Disk(), baseData, 0o444); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, os.WriteFile(base.Disk(), baseData, 0o444))
 	overlay := filepath.Join(a, "overlay.qcow2")
-	if e := Create(ctx, base, overlay); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, Create(ctx, base, overlay))
 	out, e := exec.Command("qemu-io", "-f", "qcow2", "-c", "write -P 0x42 0 64k", "-c", "write -z 128k 64k", overlay).
 		CombinedOutput()
 	if e != nil {
 		t.Fatalf("write: %v %s", e, out)
 	}
 	cp, e := Compact(ctx, base, overlay)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	other := images.Base{Dir: b, Manifest: base.Manifest}
-	if e = os.WriteFile(other.Disk(), baseData, 0o444); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, os.WriteFile(other.Disk(), baseData, 0o444))
 	data, e := os.ReadFile(cp)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	moved := filepath.Join(b, "overlay.qcow2")
-	if e = os.WriteFile(moved, data, 0o600); e != nil {
-		t.Fatal(e)
-	}
-	if e = Rebase(ctx, other, moved); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, os.WriteFile(moved, data, 0o600))
+	require.NoError(t, Rebase(ctx, other, moved))
 	out, e = exec.Command("qemu-img", "compare", "-f", "qcow2", "-F", "qcow2", overlay, moved).CombinedOutput()
 	if e != nil {
 		t.Fatalf("relocated disk differs: %v %s", e, out)

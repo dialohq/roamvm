@@ -15,6 +15,7 @@ import (
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/state"
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -82,18 +83,10 @@ func TestRestartedSidecarCompletesCleanupBeforeStopped(t *testing.T) {
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
 	}
 	working := filepath.Join(server.Root, "overlay.qcow2")
-	if err := os.WriteFile(working, []byte("working copy"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := server.save(Prepared{Session: state.Session{Head: state.Head{Epoch: 2, State: "Running"}}, PodUID: string(pod.UID), Dir: server.Root}); err != nil {
-		t.Fatal(err)
-	}
-	if err := server.finish(ctx, pod, vm); err == nil {
-		t.Fatal("cleanup failure ignored")
-	}
-	if err := server.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(working, []byte("working copy"), 0o600))
+	require.NoError(t, server.save(Prepared{Session: state.Session{Head: state.Head{Epoch: 2, State: "Running"}}, PodUID: string(pod.UID), Dir: server.Root}))
+	require.Error(t, server.finish(ctx, pod, vm), "cleanup failure ignored")
+	require.NoError(t, server.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod))
 	if pod.Annotations[controller.Phase] != "Checkpointing" {
 		t.Fatal("reported Stopped before cleanup")
 	}
@@ -102,12 +95,8 @@ func TestRestartedSidecarCompletesCleanupBeforeStopped(t *testing.T) {
 	}
 	store.fail = false
 	// No prepare/compact/upload occurs on this retry; only persisted session/head state is available.
-	if err := server.finish(ctx, pod, vm); err != nil {
-		t.Fatal(err)
-	}
-	if err := server.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, server.finish(ctx, pod, vm))
+	require.NoError(t, server.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod))
 	if pod.Annotations[controller.Phase] != "Stopped" || store.old != "" {
 		t.Fatal("cleanup did not complete")
 	}

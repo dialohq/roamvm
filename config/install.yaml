@@ -24,7 +24,7 @@ rules:
   resources: [virtualmachines, virtualmachines/status, virtualmachines/finalizers]
   verbs: [get, list, watch, update, patch]
 - apiGroups: [""]
-  resources: [pods, secrets]
+  resources: [pods]
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: [""]
   resources: [persistentvolumeclaims]
@@ -82,6 +82,7 @@ rules:
   resources: [pods]
   verbs: [get, update, patch]
 - apiGroups: [""]
+  # Existing runner Pods still use token Secrets until their next cold start.
   resources: [secrets, persistentvolumeclaims]
   verbs: [get]
 ---

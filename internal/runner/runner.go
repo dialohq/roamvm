@@ -79,19 +79,8 @@ func Run() error {
 	started := time.Now()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread() // Keep the Pdeathsig parent thread alive.
-	token, err := os.ReadFile("/run/roamvm-auth/token")
-	if err != nil {
-		return err
-	}
-	c := &Client{
-		unixHTTP("/run/roamvm/runtime.sock"),
-		daemon.Request{
-			Namespace: os.Getenv("POD_NAMESPACE"),
-			Pod:       os.Getenv("POD_NAME"),
-			UID:       os.Getenv("POD_UID"),
-			Token:     string(token),
-		},
-	}
+	c := &Client{HTTP: unixHTTP("/run/roamvm/runtime.sock")}
+	var err error
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	var response daemon.Response

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,17 +24,13 @@ func TestKubernetesAPIOwnership(t *testing.T) {
 		t.Skip("set TEST_KUBERNETES_NAMESPACE and KUBECONFIG for an isolated test cluster")
 	}
 	config, err := clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	config.QPS = 200
 	config.Burst = 100
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
 	c, err := client.New(config, client.Options{Scheme: scheme})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	id := fmt.Sprintf("race-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
 		err := c.Delete(
@@ -68,9 +65,7 @@ func TestKubernetesAPIOwnership(t *testing.T) {
 	}
 	old := <-winners
 	path := filepath.Join(t.TempDir(), "overlay")
-	if err = os.WriteFile(path, []byte("delayed old checkpoint"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte("delayed old checkpoint"), 0o600))
 	result := make(chan error, 1)
 	go func() { _, err := m.Commit(ctx, old, path); result <- err }()
 	<-objects.entered

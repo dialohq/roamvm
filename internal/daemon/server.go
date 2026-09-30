@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,10 +28,6 @@ import (
 )
 
 type Request struct {
-	Namespace   string `json:"namespace"`
-	Pod         string `json:"pod"`
-	UID         string `json:"uid"`
-	Token       string `json:"token"`
 	Phase       string `json:"phase,omitempty"`
 	Message     string `json:"message,omitempty"`
 	DiskSize    int64  `json:"diskSize,omitempty"`
@@ -53,12 +48,12 @@ type Response struct {
 	Error       string    `json:"error,omitempty"`
 }
 type Server struct {
-	Client             client.Client
-	Namespace, PodName string
-	Node, PodUID, Root string
-	State              state.Manager
-	BaseDir            string
-	locks              sync.Map
+	Client                    client.Client
+	Pod                       types.NamespacedName
+	Node, PodUID, VMUID, Root string
+	State                     state.Manager
+	BaseDir                   string
+	mu                        sync.Mutex
 }
 
 func (s *Server) Serve(ctx context.Context, socket string) error {
@@ -81,7 +76,7 @@ func (s *Server) Serve(ctx context.Context, socket string) error {
 	parent := ctx
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
-	if s.PodName != "" {
+	if s.Pod.Name != "" {
 		go s.watchRunner(ctx, cancel)
 	} else {
 		go func() {
@@ -114,15 +109,14 @@ func (s *Server) handler(action string) http.HandlerFunc {
 			http.Error(w, "invalid request", 400)
 			return
 		}
-		pod, vm, err := s.authenticate(r.Context(), req)
+		pod, vm, err := s.incarnation(r.Context())
 		if err != nil {
 			w.WriteHeader(403)
 			_ = json.NewEncoder(w).Encode(Response{Error: err.Error()})
 			return
 		}
-		lock, _ := s.locks.LoadOrStore(string(vm.UID), &sync.Mutex{})
-		lock.(*sync.Mutex).Lock()
-		defer lock.(*sync.Mutex).Unlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		var response Response
 		switch action {
 		case "prepare":
@@ -166,19 +160,18 @@ func (s *Server) handler(action string) http.HandlerFunc {
 	}
 }
 
-func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api.VirtualMachine, error) {
+// incarnation is selected only by the sidecar's downward API identity. The
+// private Pod socket grants access; a request cannot select another runner.
+func (s *Server) incarnation(ctx context.Context) (*core.Pod, *api.VirtualMachine, error) {
 	var pod core.Pod
-	if req.Namespace == "" || req.Pod == "" || req.UID == "" || req.Token == "" {
-		return nil, nil, errors.New("missing runner identity")
-	}
-	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: req.Pod}, &pod); err != nil {
+	if err := s.Client.Get(ctx, s.Pod, &pod); err != nil {
 		return nil, nil, err
 	}
-	if string(pod.UID) != req.UID || req.UID != s.PodUID || pod.Spec.NodeName != s.Node {
-		return nil, nil, errors.New("runner does not belong to this node")
+	if string(pod.UID) != s.PodUID || pod.Spec.NodeName != s.Node {
+		return nil, nil, errors.New("runner incarnation changed")
 	}
 	owner := metav1.GetControllerOf(&pod)
-	if owner == nil || owner.Kind != "VirtualMachine" || owner.APIVersion != api.GroupVersion.String() {
+	if owner == nil || owner.Kind != "VirtualMachine" || owner.APIVersion != api.GroupVersion.String() || string(owner.UID) != s.VMUID {
 		return nil, nil, errors.New("not a VM runner")
 	}
 	var vm api.VirtualMachine
@@ -187,14 +180,6 @@ func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api
 	}
 	if owner.UID != vm.UID {
 		return nil, nil, errors.New("VM identity mismatch")
-	}
-	var secret core.Secret
-	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Annotations[controller.SecretAnnotation]}, &secret); err != nil {
-		return nil, nil, err
-	}
-	if !metav1.IsControlledBy(&secret, &vm) ||
-		subtle.ConstantTimeCompare(secret.Data["token"], []byte(req.Token)) != 1 {
-		return nil, nil, errors.New("invalid runner credential")
 	}
 	return &pod, &vm, nil
 }
@@ -241,7 +226,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	}
 	// Use the exact configuration for which this Pod reserved resources. Changes
 	// to the VM spec while it is queued or running apply to the next incarnation.
-	bootVM, err := incarnation(vm, pod)
+	spec, err := bootSpec(vm, pod)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +263,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 			return nil, err
 		}
 	}
-	prepared := Prepared{session, base, dir, bootVM.Spec, string(pod.UID)}
+	prepared := Prepared{session, base, dir, spec, string(pod.UID)}
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
@@ -286,16 +271,15 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	return &prepared, nil
 }
 
-func incarnation(vm *api.VirtualMachine, pod *core.Pod) (*api.VirtualMachine, error) {
-	boot := vm.DeepCopy()
-	boot.Spec = api.VirtualMachineSpec{}
-	if err := json.Unmarshal([]byte(pod.Annotations[controller.SpecAnnotation]), &boot.Spec); err != nil {
-		return nil, fmt.Errorf("invalid runner boot configuration: %w", err)
+func bootSpec(vm *api.VirtualMachine, pod *core.Pod) (api.VirtualMachineSpec, error) {
+	var spec api.VirtualMachineSpec
+	if err := json.Unmarshal([]byte(pod.Annotations[controller.SpecAnnotation]), &spec); err != nil {
+		return spec, fmt.Errorf("invalid runner boot configuration: %w", err)
 	}
-	if boot.Spec.Image != vm.Spec.Image {
-		return nil, errors.New("runner base identity changed")
+	if spec.Image != vm.Spec.Image {
+		return spec, errors.New("runner base identity changed")
 	}
-	return boot, nil
+	return spec, nil
 }
 
 func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) error {

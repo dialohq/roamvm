@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type memoryObject struct {
@@ -100,13 +102,9 @@ func fixture(t *testing.T) (context.Context, Manager, Session, string) {
 	ctx := context.Background()
 	m := Manager{newMemory()}
 	s, e := m.Acquire(ctx, "vm-1", "registry/base@sha256:abc", "pod-1", "node-a")
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	file := filepath.Join(t.TempDir(), "overlay")
-	if e = os.WriteFile(file, []byte("persistent project and installed packages"), 0o600); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, os.WriteFile(file, []byte("persistent project and installed packages"), 0o600))
 	return ctx, m, s, file
 }
 
@@ -136,20 +134,14 @@ func TestExclusiveOwnership(t *testing.T) {
 func TestStopRestoreOnAnotherNode(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	committed, e := m.Commit(ctx, s, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if committed.Head.State != "Stopped" || committed.Head.Owner != "" || committed.Head.Checkpoint.Generation != 1 {
 		t.Fatalf("bad commit %+v", committed)
 	}
 	next, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, "pod-2", "node-b")
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	restored := filepath.Join(t.TempDir(), "overlay")
-	if e = m.Restore(ctx, next, restored); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, m.Restore(ctx, next, restored))
 	want, _ := os.ReadFile(file)
 	got, _ := os.ReadFile(restored)
 	if !bytes.Equal(want, got) {
@@ -217,14 +209,10 @@ func TestLostCommitResponse(t *testing.T) {
 func TestRestoreCorruptionDoesNotExposeFile(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	committed, e := m.Commit(ctx, s, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	m.Store.(*memoryStore).failure = "verification"
 	path := filepath.Join(t.TempDir(), "overlay")
-	if e = m.Restore(ctx, committed, path); e == nil {
-		t.Fatal("corruption not detected")
-	}
+	require.Error(t, m.Restore(ctx, committed, path), "corruption not detected")
 	if _, e = os.Stat(path); !os.IsNotExist(e) {
 		t.Fatal("unverified file exposed")
 	}
@@ -239,9 +227,7 @@ func TestRecoveryFencesOldEpoch(t *testing.T) {
 		t.Fatal("wrong owner recovered", e)
 	}
 	recovered, e := m.Recover(ctx, s.Head.VMID, s.Head.Owner)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if recovered.Head.Checkpoint != nil || recovered.Head.Epoch <= s.Head.Epoch {
 		t.Fatal("bad recovery")
 	}
@@ -256,21 +242,13 @@ func TestRecoveryFencesOldEpoch(t *testing.T) {
 func TestStopReplacesPreviousCheckpoint(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	first, e := m.Commit(ctx, s, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	original := *first.Head.Checkpoint
 	second, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, "pod-2", "node-b")
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = os.WriteFile(file, []byte("next version"), 0o600); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
+	require.NoError(t, os.WriteFile(file, []byte("next version"), 0o600))
 	final, e := m.Commit(ctx, second, file)
-	if e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, e)
 	if final.Head.Checkpoint.Generation != 2 || final.Head.Checkpoint.Key == original.Key {
 		t.Fatal("generation overwritten")
 	}

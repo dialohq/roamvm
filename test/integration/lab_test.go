@@ -17,6 +17,7 @@ import (
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/state"
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -49,9 +50,7 @@ type lab struct {
 
 func must(t testing.TB, err error) {
 	t.Helper()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 }
 
 func equal(t testing.TB, description string, got, want any) {

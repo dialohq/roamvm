@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type zeroReader struct{}
@@ -15,9 +17,7 @@ func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
 
 func TestSparseCopyAcrossWritebackBoundary(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "disk"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer f.Close()
 	const hole = 33 << 20
 	tail := []byte("persistent changes")
@@ -43,9 +43,7 @@ func TestSparseCopyAcrossWritebackBoundary(t *testing.T) {
 
 func TestSparseCopyPropagatesReadFailure(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "disk"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer f.Close()
 	_, err = CopySparse(f, brokenReader{})
 	if !errors.Is(err, io.ErrClosedPipe) {

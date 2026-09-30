@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -15,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -88,15 +85,6 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	if name == "" {
 		return fmt.Errorf("runner name must be persisted before Pod creation")
 	}
-	token := make([]byte, 32)
-	rand.Read(token)
-	secret := &core.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: vm.Namespace},
-		Data:       map[string][]byte{"token": []byte(hex.EncodeToString(token))},
-	}
-	if err = r.createOwned(ctx, vm, secret); err != nil {
-		return err
-	}
 	bootSpec, err := json.Marshal(vm.Spec)
 	if err != nil {
 		return err
@@ -106,7 +94,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			Name:        name,
 			Namespace:   vm.Namespace,
 			Labels:      map[string]string{},
-			Annotations: map[string]string{SecretAnnotation: name, SpecAnnotation: string(bootSpec), GenerationAnnotation: strconv.FormatInt(vm.Generation, 10)},
+			Annotations: map[string]string{SpecAnnotation: string(bootSpec), GenerationAnnotation: strconv.FormatInt(vm.Generation, 10)},
 			Finalizers:  []string{Finalizer},
 		},
 	}
@@ -145,11 +133,6 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			ImagePullPolicy: core.PullIfNotPresent,
 			Args:            []string{"runner"},
 			Resources:       resources,
-			Env: []core.EnvVar{
-				{Name: "POD_NAME", Value: name},
-				{Name: "POD_NAMESPACE", Value: vm.Namespace},
-				fieldEnv("POD_UID", "metadata.uid"),
-			},
 			SecurityContext: containerSecurityContext("NET_ADMIN", "NET_RAW"),
 			ReadinessProbe: &core.Probe{
 				ProbeHandler: core.ProbeHandler{
@@ -230,9 +213,10 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		RestartPolicy:   ptr.To(core.ContainerRestartPolicyOnFailure),
 		Env: []core.EnvVar{
 			fieldEnv("NODE_NAME", "spec.nodeName"),
-			{Name: "POD_NAME", Value: name},
-			{Name: "POD_NAMESPACE", Value: vm.Namespace},
+			fieldEnv("POD_NAME", "metadata.name"),
+			fieldEnv("POD_NAMESPACE", "metadata.namespace"),
 			fieldEnv("POD_UID", "metadata.uid"),
+			{Name: "VM_UID", Value: string(vm.UID)},
 			{Name: "GOMEMLIMIT", Value: "256MiB"},
 		},
 		EnvFrom: []core.EnvFromSource{
@@ -263,12 +247,6 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			{Name: "kube-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
 		},
 	}
-	mount(
-		"auth",
-		"/run/roamvm-auth",
-		core.VolumeSource{Secret: &core.SecretVolumeSource{SecretName: name, DefaultMode: ptr.To(int32(0o400))}},
-		true,
-	)
 	if vm.Spec.Hugepages != "" || len(vm.Spec.Devices) > 0 {
 		runner.SecurityContext.Capabilities.Add = append(runner.SecurityContext.Capabilities.Add, "IPC_LOCK")
 	}
@@ -296,14 +274,10 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		mount(disk.VolumeName(), disk.MountPath(), core.VolumeSource{Projected: &disk.Projection}, true)
 	}
 	pod.Spec.Containers = append(pod.Spec.Containers, runtimeContainer)
-	return r.createOwned(ctx, vm, pod)
-}
-
-func (r *Reconciler) createOwned(ctx context.Context, vm *api.VirtualMachine, object client.Object) error {
-	if err := controllerutil.SetControllerReference(vm, object, r.Scheme); err != nil {
+	if err := controllerutil.SetControllerReference(vm, pod, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, object); !apierrors.IsAlreadyExists(err) {
+	if err := r.Create(ctx, pod); !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil

@@ -49,6 +49,8 @@ spec:
           value: WORKSPACE_NAMESPACE
         - name: POD_UID
           value: ORIGINAL_POD_UID
+        - name: VM_UID
+          value: ORIGINAL_VM_UID
         - name: NODE_NAME
           valueFrom:
             fieldRef:

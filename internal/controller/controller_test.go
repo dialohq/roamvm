@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,13 +46,9 @@ func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
 func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()
-	if e := r.createPod(ctx, vm); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.createPod(ctx, vm))
 	var pods core.PodList
-	if e := r.List(ctx, &pods); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.List(ctx, &pods))
 	if len(pods.Items) != 1 {
 		t.Fatal("expected one Pod")
 	}
@@ -113,9 +110,7 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 func TestRejectMemoryUnderAccounting(t *testing.T) {
 	r, vm := setup(t)
 	vm.Spec.Resources.Requests[core.ResourceMemory] = resource.MustParse("512Mi")
-	if e := r.createPod(context.Background(), vm); e == nil {
-		t.Fatal("memory request below guest RAM accepted")
-	}
+	require.Error(t, r.createPod(context.Background(), vm), "memory request below guest RAM accepted")
 }
 
 func TestMemoryReservationAndOptionalLimit(t *testing.T) {
@@ -194,18 +189,12 @@ func TestCPUReservationDoesNotSetGuestSizeOrImplicitQuota(t *testing.T) {
 			if limit != "" {
 				vm.Spec.Resources.Limits = core.ResourceList{core.ResourceCPU: resource.MustParse(limit)}
 			}
-			if err := r.createPod(context.Background(), vm); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, r.createPod(context.Background(), vm))
 			var pod core.Pod
-			if err := r.Get(context.Background(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod))
 			resources := pod.Spec.Containers[0].Resources
 			var boot api.VirtualMachineSpec
-			if err := json.Unmarshal([]byte(pod.Annotations[SpecAnnotation]), &boot); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, json.Unmarshal([]byte(pod.Annotations[SpecAnnotation]), &boot))
 			if resources.Requests.Cpu().MilliValue() != 250 || boot.CPUs != 4 {
 				t.Fatal("guest size and scheduler request were coupled")
 			}
@@ -220,34 +209,19 @@ func TestCPUReservationDoesNotSetGuestSizeOrImplicitQuota(t *testing.T) {
 func TestCreateRetryDoesNotCreateSecondIncarnation(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()
-	if e := r.createPod(ctx, vm); e != nil {
-		t.Fatal(e)
-	}
-	var original core.Secret
-	if e := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &original); e != nil {
-		t.Fatal(e)
-	}
-	if e := r.createPod(ctx, vm); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.createPod(ctx, vm))
+	var original core.Pod
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &original))
+	require.NoError(t, r.createPod(ctx, vm))
 	var pods core.PodList
-	r.List(ctx, &pods)
-	if len(pods.Items) != 1 {
-		t.Fatal("retry created a second incarnation")
-	}
-	var secret core.Secret
-	r.Get(ctx, client.ObjectKeyFromObject(&original), &secret)
-	if string(secret.Data["token"]) != string(original.Data["token"]) {
-		t.Fatal("retry rotated a running Pod's credential")
-	}
+	require.NoError(t, r.List(ctx, &pods))
+	require.Equal(t, []core.Pod{original}, pods.Items, "retry changed the existing incarnation")
 }
 
 func TestHugepagesUseNativeAccounting(t *testing.T) {
 	r, vm := setup(t)
 	vm.Spec.Hugepages = "2Mi"
-	if e := r.createPod(context.Background(), vm); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.createPod(context.Background(), vm))
 	var pods core.PodList
 	r.List(context.Background(), &pods)
 	resources := pods.Items[0].Spec.Containers[0].Resources
@@ -263,22 +237,14 @@ func TestHugepagesUseNativeAccounting(t *testing.T) {
 func TestStopRequestsCheckpointWithoutDeletingPod(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()
-	if e := r.createPod(ctx, vm); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.createPod(ctx, vm))
 	var running core.Pod
-	if e := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &running); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &running))
 	running.Spec.NodeName = "node-a"
-	if e := r.Update(ctx, &running); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.Update(ctx, &running))
 
 	vm.Spec.PowerState = "Stopped"
-	if e := r.Update(ctx, vm); e != nil {
-		t.Fatal(e)
-	}
+	require.NoError(t, r.Update(ctx, vm))
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}
 	if _, e := r.Reconcile(ctx, req); e != nil {
 		t.Fatal(e)
@@ -327,9 +293,7 @@ func TestGuestCannotProjectRuntimeCredentials(t *testing.T) {
 			} else {
 				vm.Spec.Config = &projection
 			}
-			if err := r.createPod(context.Background(), vm); err == nil {
-				t.Fatal("guest received runtime credentials")
-			}
+			require.Error(t, r.createPod(context.Background(), vm), "guest received runtime credentials")
 			var pods core.PodList
 			if err := r.List(context.Background(), &pods); err != nil || len(pods.Items) != 0 {
 				t.Fatal("credential-bearing Pod was created", err)
