@@ -38,21 +38,25 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func env(k, fallback string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
 	return fallback
 }
+
 func scheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = core.AddToScheme(s)
 	_ = api.AddToScheme(s)
 	return s
 }
+
 func kubeClient() (client.Client, error) {
 	return client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
 }
+
 func run() error {
 	if len(os.Args) < 2 {
 		return errors.New("usage: roamvm controller|daemon|runner|device-plugin|start|stop|image-push|state|recover")
@@ -65,11 +69,27 @@ func run() error {
 	case "device-plugin":
 		return (&device.Plugin{Slots: 1024}).Run(ctx, "/var/lib/kubelet/device-plugins")
 	case "controller":
-		m, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{Scheme: scheme(), LeaderElection: true, LeaderElectionID: "roamvm-controller", LeaderElectionNamespace: env("POD_NAMESPACE", "roamvm-system"), Metrics: metrics.Options{BindAddress: ":8080"}, HealthProbeBindAddress: ":8081"})
+		m, err := ctrl.NewManager(
+			ctrl.GetConfigOrDie(),
+			ctrl.Options{
+				Scheme:                  scheme(),
+				LeaderElection:          true,
+				LeaderElectionID:        "roamvm-controller",
+				LeaderElectionNamespace: env("POD_NAMESPACE", "roamvm-system"),
+				Metrics:                 metrics.Options{BindAddress: ":8080"},
+				HealthProbeBindAddress:  ":8081",
+			},
+		)
 		if err != nil {
 			return err
 		}
-		r := &controller.Reconciler{Client: m.GetClient(), Scheme: m.GetScheme(), Image: env("RUNNER_IMAGE", "roamvm:dev"), StorageClass: os.Getenv("WORKING_STORAGE_CLASS"), StorageSize: env("WORKING_STORAGE_SIZE", "64Gi")}
+		r := &controller.Reconciler{
+			Client:       m.GetClient(),
+			Scheme:       m.GetScheme(),
+			Image:        env("RUNNER_IMAGE", "roamvm:dev"),
+			StorageClass: os.Getenv("WORKING_STORAGE_CLASS"),
+			StorageSize:  env("WORKING_STORAGE_SIZE", "64Gi"),
+		}
 		if err = r.Setup(m); err != nil {
 			return err
 		}
@@ -90,7 +110,14 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		server := &daemon.Server{Client: c, Node: os.Getenv("NODE_NAME"), PodUID: os.Getenv("POD_UID"), Root: root, State: state.Manager{Store: backend}, BaseDir: "/base/disk"}
+		server := &daemon.Server{
+			Client:  c,
+			Node:    os.Getenv("NODE_NAME"),
+			PodUID:  os.Getenv("POD_UID"),
+			Root:    root,
+			State:   state.Manager{Store: backend},
+			BaseDir: "/base/disk",
+		}
 		if server.Node == "" || server.PodUID == "" || store.Bucket == "" {
 			return errors.New("NODE_NAME, POD_UID and S3_BUCKET are required")
 		}
@@ -174,6 +201,7 @@ func run() error {
 		return fmt.Errorf("unknown command %q", os.Args[1])
 	}
 }
+
 func metadataStore(objects state.Store, c client.Client) (state.Store, error) {
 	switch env("STATE_BACKEND", "s3") {
 	case "s3":
@@ -187,6 +215,7 @@ func metadataStore(objects state.Store, c client.Client) (state.Store, error) {
 		return nil, errors.New("STATE_BACKEND must be s3 or kubernetes")
 	}
 }
+
 func push(ctx context.Context, args []string) error {
 	f := flag.NewFlagSet("image-push", flag.ContinueOnError)
 	tag := f.String("tag", "", "registry image tag")

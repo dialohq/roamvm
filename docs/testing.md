@@ -24,6 +24,10 @@ export PATH="$PWD/bin:$PATH"
 make test
 ```
 
+Go uses gofumpt and Python uses Ruff 0.15.14. Run `make fmt` before committing;
+`make fmt-check` checks formatting and Python imports without changing files.
+Format Nix with `alejandra nix/`. CI checks formatting, tests and generated schemas.
+
 `up.py` builds the actual multi-stage Dockerfile, loads it into kind, creates the
 bucket/credentials, installs the generated CRD, controller and node device-plugin service, and checks
 their rollouts. `--skip-build` uses an already built `roamvm:dev` image.

@@ -56,7 +56,7 @@ type Server struct {
 }
 
 func (s *Server) Serve(ctx context.Context, socket string) error {
-	if err := os.MkdirAll(filepath.Dir(socket), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(socket), 0o755); err != nil {
 		return err
 	}
 	// A restarted sidecar replaces only its own stale socket.
@@ -65,7 +65,7 @@ func (s *Server) Serve(ctx context.Context, socket string) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Chmod(socket, 0600); err != nil {
+	if err = os.Chmod(socket, 0o600); err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
@@ -85,6 +85,7 @@ func (s *Server) Serve(ctx context.Context, socket string) error {
 	}
 	return err
 }
+
 func (s *Server) handler(action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -107,7 +108,9 @@ func (s *Server) handler(action string) http.HandlerFunc {
 		case "prepare":
 			response.Prepared, err = s.prepare(r.Context(), pod, vm)
 		case "heartbeat":
-			response.Stop = vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil || pod.DeletionTimestamp != nil || pod.Annotations[controller.Stop] == "true"
+			response.Stop = vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil ||
+				pod.DeletionTimestamp != nil ||
+				pod.Annotations[controller.Stop] == "true"
 			if response.Stop {
 				break
 			} // Stopping never depends on S3 availability.
@@ -121,7 +124,8 @@ func (s *Server) handler(action string) http.HandlerFunc {
 				}
 			}
 		case "status":
-			if req.Phase != "Running" && req.Phase != "Stopping" && req.Phase != "Checkpointing" && req.Phase != "Error" {
+			if req.Phase != "Running" && req.Phase != "Stopping" && req.Phase != "Checkpointing" &&
+				req.Phase != "Error" {
 				err = errors.New("invalid runtime phase")
 			} else {
 				err = s.annotate(r.Context(), pod, req.Phase, req.Message, nil)
@@ -136,6 +140,7 @@ func (s *Server) handler(action string) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(response)
 	}
 }
+
 func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api.VirtualMachine, error) {
 	var pod core.Pod
 	if req.Namespace == "" || req.Pod == "" || req.UID == "" || req.Token == "" {
@@ -162,7 +167,8 @@ func (s *Server) authenticate(ctx context.Context, req Request) (*core.Pod, *api
 	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Annotations[controller.SecretAnnotation]}, &secret); err != nil {
 		return nil, nil, err
 	}
-	if !metav1.IsControlledBy(&secret, &vm) || subtle.ConstantTimeCompare(secret.Data["token"], []byte(req.Token)) != 1 {
+	if !metav1.IsControlledBy(&secret, &vm) ||
+		subtle.ConstantTimeCompare(secret.Data["token"], []byte(req.Token)) != 1 {
 		return nil, nil, errors.New("invalid runner credential")
 	}
 	return &pod, &vm, nil
@@ -176,16 +182,17 @@ func (s *Server) load(uid string) (Prepared, error) {
 	}
 	return p, err
 }
+
 func (s *Server) save(p Prepared) error {
 	path := s.meta(p.PodUID)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path+".partial", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(path+".partial", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -195,6 +202,7 @@ func (s *Server) save(p Prepared) error {
 	}
 	return os.Rename(path+".partial", path)
 }
+
 func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) (*Prepared, error) {
 	started := time.Now()
 	if vm.Spec.PowerState != "Running" || vm.DeletionTimestamp != nil || pod.DeletionTimestamp != nil {
@@ -225,7 +233,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 		return nil, err
 	}
 	dir := filepath.Join(s.Root, "running", string(vm.UID))
-	if err = os.MkdirAll(dir, 0700); err != nil {
+	if err = os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	overlay := filepath.Join(dir, "overlay.qcow2")
@@ -264,6 +272,7 @@ func incarnation(vm *api.VirtualMachine, pod *core.Pod) (*api.VirtualMachine, er
 	}
 	return boot, nil
 }
+
 func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) error {
 	p, err := s.load(string(pod.UID))
 	if err != nil {
@@ -295,6 +304,7 @@ func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachi
 	}
 	return s.complete(ctx, pod, p, committed)
 }
+
 func (s *Server) complete(ctx context.Context, pod *core.Pod, p Prepared, committed state.Session) error {
 	if err := s.annotate(ctx, pod, "Stopped", "", committed.Head.Checkpoint); err != nil {
 		return err
@@ -308,6 +318,7 @@ func (s *Server) complete(ctx context.Context, pod *core.Pod, p Prepared, commit
 	}
 	return nil
 }
+
 func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message string, cp *api.Checkpoint) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var current core.Pod

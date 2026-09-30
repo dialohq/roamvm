@@ -1,5 +1,17 @@
-.PHONY: build test generate image
+.PHONY: build test generate image fmt fmt-check
 IMAGE ?= roamvm:dev
+GOFUMPT = go run mvdan.cc/gofumpt@v0.12.0
+RUFF ?= ruff
+
+fmt:
+	$(GOFUMPT) -w api cmd internal test
+	$(RUFF) check --select I --fix test
+	$(RUFF) format test
+
+fmt-check:
+	@files="$$($(GOFUMPT) -l api cmd internal test)" && test -z "$$files" || { echo "Run make fmt to format Go sources"; exit 1; }
+	$(RUFF) check --select F,I test
+	$(RUFF) format --check test
 
 build:
 	CGO_ENABLED=0 go build -trimpath -o bin/roamvm ./cmd/roamvm

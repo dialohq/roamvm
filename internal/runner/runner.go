@@ -32,10 +32,14 @@ type Client struct {
 }
 
 func unixHTTP(socket string) *http.Client {
-	return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-	}}, Timeout: 30 * time.Minute}
+	return &http.Client{
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}},
+		Timeout: 30 * time.Minute,
+	}
 }
+
 func (c *Client) Call(ctx context.Context, action string) (daemon.Response, error) {
 	b, err := json.Marshal(c.Request)
 	if err != nil {
@@ -59,6 +63,7 @@ func (c *Client) Call(ctx context.Context, action string) (daemon.Response, erro
 	}
 	return out, nil
 }
+
 func (c *Client) status(phase, message string) {
 	c.Request.Phase = phase
 	c.Request.Message = message
@@ -75,7 +80,15 @@ func Run() error {
 	if err != nil {
 		return err
 	}
-	c := &Client{unixHTTP("/run/roamvm/runtime.sock"), daemon.Request{Namespace: os.Getenv("POD_NAMESPACE"), Pod: os.Getenv("POD_NAME"), UID: os.Getenv("POD_UID"), Token: string(token)}}
+	c := &Client{
+		unixHTTP("/run/roamvm/runtime.sock"),
+		daemon.Request{
+			Namespace: os.Getenv("POD_NAMESPACE"),
+			Pod:       os.Getenv("POD_NAME"),
+			UID:       os.Getenv("POD_UID"),
+			Token:     string(token),
+		},
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	var response daemon.Response
@@ -86,7 +99,9 @@ func Run() error {
 			break
 		}
 		var transportError *url.Error
-		if (!errors.As(err, &transportError) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) || ctx.Err() != nil || time.Now().After(deadline) {
+		if (!errors.As(err, &transportError) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) ||
+			ctx.Err() != nil ||
+			time.Now().After(deadline) {
 			break
 		}
 		select {
@@ -103,7 +118,7 @@ func Run() error {
 	}
 	p := response.Prepared
 	log.Printf("startup stage=prepared elapsed=%s", time.Since(started))
-	lock, err := os.OpenFile(filepath.Join(p.Dir, "runner.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := os.OpenFile(filepath.Join(p.Dir, "runner.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -140,7 +155,22 @@ func Run() error {
 			return e
 		}
 	}
-	args := []string{"--api-socket", socket, "--cpus", "boot=" + strconv.Itoa(int(p.Spec.CPUs)), "--memory", memoryArg, "--disk", "path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on,direct=off", "--net", "tap=vm-tap,mac=02:00:00:00:00:02", "--console", "off", "--serial", "tty"}
+	args := []string{
+		"--api-socket",
+		socket,
+		"--cpus",
+		"boot=" + strconv.Itoa(int(p.Spec.CPUs)),
+		"--memory",
+		memoryArg,
+		"--disk",
+		"path=" + filepath.Join(p.Dir, "overlay.qcow2") + ",image_type=qcow2,backing_files=on,direct=off",
+		"--net",
+		"tap=vm-tap,mac=02:00:00:00:00:02",
+		"--console",
+		"off",
+		"--serial",
+		"tty",
+	}
 	if _, e := os.Stat(filepath.Join(p.Base.Dir, "vmlinux")); e == nil {
 		cmdline := p.Base.Manifest.Cmdline
 		if p.Spec.Hostname != "" {
@@ -167,20 +197,14 @@ func Run() error {
 	for _, device := range p.Spec.Devices {
 		args = append(args, "--device", "path=/sys/bus/pci/devices/"+device.PCIAddress)
 	}
-	if p.Spec.Config != nil {
-		configDisk := "/tmp/config.iso"
-		if err = command(ctx, "genisoimage", "-quiet", "-follow-links", "-rock", "-joliet", "-V", "ROAMVM_CONFIG", "-o", configDisk, "/config"); err != nil {
-			return err
-		}
-		args = append(args, "--disk", "path="+configDisk+",image_type=raw,readonly=on")
-	}
-	for _, disk := range p.Spec.ConfigDisks {
-		path := "/tmp/config-" + disk.Name + ".iso"
-		if err = command(ctx, "genisoimage", "-quiet", "-follow-links", "-rock", "-joliet", "-V", disk.Label, "-o", path, "/config-disks/"+disk.Name); err != nil {
+	for _, disk := range p.Spec.ProjectedDisks() {
+		path := "/tmp/" + disk.VolumeName() + ".iso"
+		if err = command(ctx, "genisoimage", "-quiet", "-follow-links", "-rock", "-joliet", "-V", disk.Label, "-o", path, disk.MountPath()); err != nil {
 			return err
 		}
 		args = append(args, "--disk", "path="+path+",image_type=raw,readonly=on")
 	}
+
 	hypervisor := exec.Command("cloud-hypervisor", args...)
 	hypervisor.Stdout = os.Stdout
 	hypervisor.Stderr = os.Stderr
@@ -195,7 +219,7 @@ func Run() error {
 	go func() { exited <- hypervisor.Wait() }()
 	setReady := func(value bool) {
 		if value {
-			if e := os.WriteFile("/tmp/guest-ready", []byte("ready"), 0600); e != nil {
+			if e := os.WriteFile("/tmp/guest-ready", []byte("ready"), 0o600); e != nil {
 				fmt.Fprintln(os.Stderr, "readiness file:", e)
 			}
 		} else {
@@ -279,6 +303,7 @@ func Run() error {
 		}
 	}
 }
+
 func chCall(c *http.Client, method, action string, out any) error {
 	req, err := http.NewRequest(method, "http://vmm/api/v1/"+action, nil)
 	if err != nil {
@@ -298,6 +323,7 @@ func chCall(c *http.Client, method, action string, out any) error {
 	}
 	return nil
 }
+
 func finish(c *Client) error {
 	c.status("Checkpointing", "")
 	for {

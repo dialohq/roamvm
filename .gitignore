@@ -3,3 +3,4 @@
 /.lab-disks/
 /test-results/
 *.test
+__pycache__/

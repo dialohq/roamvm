@@ -20,7 +20,13 @@ func retentionManager(objects Store, backend string) Manager {
 	if backend == "kubernetes" {
 		scheme := runtime.NewScheme()
 		core.AddToScheme(scheme)
-		return Manager{&Kubernetes{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Namespace: "state", Objects: objects}}
+		return Manager{
+			&Kubernetes{
+				Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+				Namespace: "state",
+				Objects:   objects,
+			},
+		}
 	}
 	return Manager{objects}
 }
@@ -33,7 +39,7 @@ func TestCheckpointReplacementFailures(t *testing.T) {
 				objects := newMemory()
 				m := retentionManager(objects, backend)
 				path := filepath.Join(t.TempDir(), "overlay")
-				if err := os.WriteFile(path, []byte("first stop"), 0600); err != nil {
+				if err := os.WriteFile(path, []byte("first stop"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				first, err := m.Acquire(ctx, "vm", "base", "one", "node-a")
@@ -48,15 +54,10 @@ func TestCheckpointReplacementFailures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = os.WriteFile(path, []byte("second stop"), 0600); err != nil {
+				if err = os.WriteFile(path, []byte("second stop"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				objects.failOverlay = failure == "upload"
-				objects.corruptOverlay = failure == "verification"
-				objects.failList = failure == "list"
-				objects.failDelete = failure == "delete"
-				objects.loseCommitResponse = failure == "lost-response"
-				objects.loseDeleteResponse = failure == "lost-delete-response"
+				objects.failure = failure
 				_, err = m.Commit(ctx, second, path)
 				if failure != "lost-response" && err == nil {
 					t.Fatal("injected failure ignored")
@@ -64,8 +65,7 @@ func TestCheckpointReplacementFailures(t *testing.T) {
 				if failure == "lost-response" && err != nil {
 					t.Fatal(err)
 				}
-				objects.failOverlay, objects.corruptOverlay, objects.failList, objects.failDelete, objects.loseCommitResponse = false, false, false, false, false
-				objects.loseDeleteResponse = false
+				objects.failure = ""
 				current, err := m.Read(ctx, "vm")
 				if err != nil {
 					t.Fatal(err)
@@ -136,7 +136,7 @@ func TestDelayedCleanupCannotDeleteNewCheckpoint(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "overlay")
 			commit := func(owner, data string) Session {
 				t.Helper()
-				if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				s, err := m.Acquire(ctx, "vm", "base", owner, owner)

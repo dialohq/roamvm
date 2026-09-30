@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"testing"
+
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/controller"
 	core "k8s.io/api/core/v1"
@@ -10,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"testing"
 )
 
 func TestRunnerAuthenticationIsBoundToPodNodeAndVM(t *testing.T) {
@@ -18,11 +19,26 @@ func TestRunnerAuthenticationIsBoundToPodNodeAndVM(t *testing.T) {
 	core.AddToScheme(scheme)
 	api.AddToScheme(scheme)
 	vm := &api.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "a", UID: "vm-uid"}}
-	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "a", UID: "pod-uid", Annotations: map[string]string{controller.SecretAnnotation: "auth"}}, Spec: core.PodSpec{NodeName: "node-a"}}
-	secret := &core.Secret{ObjectMeta: metav1.ObjectMeta{Name: "auth", Namespace: "a"}, Data: map[string][]byte{"token": []byte("private-token")}}
+	pod := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "runner",
+			Namespace:   "a",
+			UID:         "pod-uid",
+			Annotations: map[string]string{controller.SecretAnnotation: "auth"},
+		},
+		Spec: core.PodSpec{NodeName: "node-a"},
+	}
+	secret := &core.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "auth", Namespace: "a"},
+		Data:       map[string][]byte{"token": []byte("private-token")},
+	}
 	controllerutil.SetControllerReference(vm, pod, scheme)
 	controllerutil.SetControllerReference(vm, secret, scheme)
-	server := &Server{Node: "node-a", PodUID: "pod-uid", Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm, pod, secret).Build()}
+	server := &Server{
+		Node:   "node-a",
+		PodUID: "pod-uid",
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(vm, pod, secret).Build(),
+	}
 	valid := Request{Namespace: "a", Pod: "runner", UID: "pod-uid", Token: "private-token"}
 	if _, _, e := server.authenticate(context.Background(), valid); e != nil {
 		t.Fatal(e)
@@ -53,7 +69,9 @@ func TestQueuedIncarnationDoesNotAdoptUnaccountedSpecChanges(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{controller.SpecAnnotation: string(b)}}}
+	pod := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{controller.SpecAnnotation: string(b)}},
+	}
 	vm := &api.VirtualMachine{Spec: original}
 	vm.Spec.CPUs = 8
 	vm.Spec.Memory = "16Gi"

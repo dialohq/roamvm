@@ -11,8 +11,10 @@ import (
 )
 
 // Link-local-only interfaces are treated as offline by common network monitors.
-const GuestIP = "192.168.127.2"
-const gatewayIP = "192.168.127.1"
+const (
+	GuestIP   = "192.168.127.2"
+	gatewayIP = "192.168.127.1"
+)
 
 func command(ctx context.Context, bin string, args ...string) error {
 	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
@@ -21,6 +23,7 @@ func command(ctx context.Context, bin string, args ...string) error {
 	}
 	return nil
 }
+
 func network(ctx context.Context) (*exec.Cmd, error) {
 	forward, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
 	if err != nil || strings.TrimSpace(string(forward)) != "1" {
@@ -38,7 +41,21 @@ func network(ctx context.Context) (*exec.Cmd, error) {
 		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", GuestIP + "/32", "-o", "eth0", "-j", "MASQUERADE"},
 		{"iptables", "-t", "nat", "-A", "PREROUTING", "-i", "eth0", "-j", "DNAT", "--to-destination", GuestIP},
 		{"iptables", "-t", "nat", "-A", "OUTPUT", "-d", "127.0.0.1/32", "-j", "DNAT", "--to-destination", GuestIP},
-		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "127.0.0.0/8", "-o", "vm-tap", "-j", "SNAT", "--to-source", gatewayIP},
+		{
+			"iptables",
+			"-t",
+			"nat",
+			"-A",
+			"POSTROUTING",
+			"-s",
+			"127.0.0.0/8",
+			"-o",
+			"vm-tap",
+			"-j",
+			"SNAT",
+			"--to-source",
+			gatewayIP,
+		},
 		{"iptables", "-A", "FORWARD", "-i", "eth0", "-o", "vm-tap", "-j", "ACCEPT"},
 		{"iptables", "-A", "FORWARD", "-i", "vm-tap", "-o", "eth0", "-j", "ACCEPT"},
 	}
@@ -65,7 +82,24 @@ func network(ctx context.Context) (*exec.Cmd, error) {
 		}
 	}
 	// Each private TAP has exactly one guest; address-conflict probes only delay DHCP.
-	args := []string{"--no-daemon", "--log-facility=-", "--port=0", "--interface=vm-tap", "--bind-interfaces", "--except-interface=lo", "--dhcp-range=" + GuestIP + "," + GuestIP + ",255.255.255.252,12h", "--dhcp-option=option:router," + gatewayIP, "--dhcp-option=option:dns-server," + dns, "--dhcp-option=26," + mtu, "--dhcp-authoritative", "--no-ping", "--user=root", "--no-hosts", "--pid-file=", "--dhcp-leasefile=/tmp/dnsmasq.leases"}
+	args := []string{
+		"--no-daemon",
+		"--log-facility=-",
+		"--port=0",
+		"--interface=vm-tap",
+		"--bind-interfaces",
+		"--except-interface=lo",
+		"--dhcp-range=" + GuestIP + "," + GuestIP + ",255.255.255.252,12h",
+		"--dhcp-option=option:router," + gatewayIP,
+		"--dhcp-option=option:dns-server," + dns,
+		"--dhcp-option=26," + mtu,
+		"--dhcp-authoritative",
+		"--no-ping",
+		"--user=root",
+		"--no-hosts",
+		"--pid-file=",
+		"--dhcp-leasefile=/tmp/dnsmasq.leases",
+	}
 	if search != "" {
 		args = append(args, "--dhcp-option=option:domain-search,"+search)
 	}

@@ -18,9 +18,11 @@ import (
 	"github.com/dialohq/roamvm/internal/fileio"
 )
 
-var ErrNotFound = errors.New("object not found")
-var ErrConflict = errors.New("conditional write conflict")
-var ErrOwned = errors.New("VM already owned; fence the previous runtime before recovery")
+var (
+	ErrNotFound = errors.New("object not found")
+	ErrConflict = errors.New("conditional write conflict")
+	ErrOwned    = errors.New("VM already owned; fence the previous runtime before recovery")
+)
 
 type Object struct {
 	Body            io.ReadCloser
@@ -144,7 +146,7 @@ func (m Manager) Restore(ctx context.Context, s Session, path string) error {
 	if cp.VersionID != "" && obj.VersionID != cp.VersionID {
 		return errors.New("checkpoint object version changed")
 	}
-	f, err := os.OpenFile(path+".partial", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(path+".partial", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
@@ -204,7 +206,13 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 		return Session{}, errors.New("uploaded checkpoint failed verification")
 	}
 	h2 := s.Head
-	h2.Checkpoint = &api.Checkpoint{Generation: generation, Key: key, SHA256: hash, Size: size, VersionID: obj.VersionID}
+	h2.Checkpoint = &api.Checkpoint{
+		Generation: generation,
+		Key:        key,
+		SHA256:     hash,
+		Size:       size,
+		VersionID:  obj.VersionID,
+	}
 	h2.Owner = ""
 	h2.Node = ""
 	h2.State = "Stopped"
@@ -212,7 +220,9 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 	if err != nil {
 		// The CAS may have succeeded while the HTTP response was lost.
 		current, e := m.Read(ctx, h2.VMID)
-		if e == nil && current.Head.Epoch == h2.Epoch && current.Head.State == "Stopped" && current.Head.Checkpoint != nil && current.Head.Checkpoint.Key == key {
+		if e == nil && current.Head.Epoch == h2.Epoch && current.Head.State == "Stopped" &&
+			current.Head.Checkpoint != nil &&
+			current.Head.Checkpoint.Key == key {
 			out, err = current, nil
 		}
 	}

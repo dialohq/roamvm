@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"testing"
+
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -11,7 +13,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"testing"
 )
 
 func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
@@ -19,11 +20,28 @@ func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
 	s := runtime.NewScheme()
 	core.AddToScheme(s)
 	api.AddToScheme(s)
-	vm := &api.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "devbox", Namespace: "default", UID: "vm-uid", Finalizers: []string{Finalizer}}, Spec: api.VirtualMachineSpec{PowerState: "Running", Image: "registry/base@sha256:abc", CPUs: 4, Memory: "1Gi", Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("250m")}}}}
+	vm := &api.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "devbox",
+			Namespace:  "default",
+			UID:        "vm-uid",
+			Finalizers: []string{Finalizer},
+		},
+		Spec: api.VirtualMachineSpec{
+			PowerState: "Running",
+			Image:      "registry/base@sha256:abc",
+			CPUs:       4,
+			Memory:     "1Gi",
+			Resources: core.ResourceRequirements{
+				Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("250m")},
+			},
+		},
+	}
 	vm.Status.PodName = "devbox-runner"
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&api.VirtualMachine{}).WithObjects(vm).Build()
 	return &Reconciler{Client: c, Scheme: s, Image: "runner:test"}, vm
 }
+
 func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()
@@ -56,7 +74,8 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 			t.Fatal("root reused a persistent claim across incarnations")
 		}
 		if v.Name == "working" {
-			working = v.Ephemeral != nil && v.Ephemeral.VolumeClaimTemplate.Spec.Resources.Requests.Storage().Cmp(resource.MustParse("64Gi")) == 0
+			working = v.Ephemeral != nil &&
+				v.Ephemeral.VolumeClaimTemplate.Spec.Resources.Requests.Storage().Cmp(resource.MustParse("64Gi")) == 0
 		}
 		if v.Name == "base" {
 			base = v.Image != nil && v.Image.Reference == vm.Spec.Image && v.Image.PullPolicy == core.PullIfNotPresent
@@ -65,11 +84,13 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 	if !working || !base {
 		t.Fatal("missing ephemeral PVC or immutable image volume")
 	}
-	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].RestartPolicy == nil || *pod.Spec.InitContainers[0].RestartPolicy != core.ContainerRestartPolicyAlways {
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].RestartPolicy == nil ||
+		*pod.Spec.InitContainers[0].RestartPolicy != core.ContainerRestartPolicyAlways {
 		t.Fatal("runtime must follow native sidecar shutdown ordering")
 	}
 	config := pod.Spec.InitContainers[0].EnvFrom
-	if len(config) != 2 || config[0].ConfigMapRef == nil || config[0].ConfigMapRef.Name != "roamvm-runtime" || config[1].SecretRef.Name != "roamvm-object-store" {
+	if len(config) != 2 || config[0].ConfigMapRef == nil || config[0].ConfigMapRef.Name != "roamvm-runtime" ||
+		config[1].SecretRef.Name != "roamvm-object-store" {
 		t.Fatal("runtime namespace settings/credentials missing")
 	}
 	runner := pod.Spec.Containers[0]
@@ -88,6 +109,7 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 		t.Fatal("missing lifecycle owner")
 	}
 }
+
 func TestRejectMemoryUnderAccounting(t *testing.T) {
 	r, vm := setup(t)
 	vm.Spec.Resources.Requests[core.ResourceMemory] = resource.MustParse("512Mi")
@@ -168,6 +190,7 @@ func TestHugepagesUseNativeAccounting(t *testing.T) {
 		t.Fatal("guest RAM not reserved as hugepages")
 	}
 }
+
 func TestStopRequestsCheckpointWithoutDeletingPod(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()
@@ -202,6 +225,7 @@ func TestStopRequestsCheckpointWithoutDeletingPod(t *testing.T) {
 		t.Fatal("reported stopped before commit")
 	}
 }
+
 func TestMissingRunnerNeverReportsDurableStop(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()

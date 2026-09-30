@@ -12,7 +12,7 @@ func fixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, data := range map[string][]byte{"root.raw": make([]byte, 8192), "manifest.json": []byte(`{"format":"raw"}`), "vmlinux": []byte("kernel fixture")} {
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -63,9 +63,9 @@ func TestRejectUnsafeMountedBase(t *testing.T) {
 			case "missing-kernel":
 				err = os.Remove(filepath.Join(dir, "vmlinux"))
 			case "format":
-				err = os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"format":"../unsafe"}`), 0600)
+				err = os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"format":"../unsafe"}`), 0o600)
 			case "unexpected":
-				err = os.WriteFile(filepath.Join(dir, "extra"), nil, 0600)
+				err = os.WriteFile(filepath.Join(dir, "extra"), nil, 0o600)
 			case "oversized":
 				err = os.Truncate(filepath.Join(dir, "root.raw"), 129<<30)
 			}
@@ -81,10 +81,11 @@ func TestRejectUnsafeMountedBase(t *testing.T) {
 
 func TestRejectMountedBaseWithBackingFile(t *testing.T) {
 	dir := fixture(t)
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"format":"qcow2"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"format":"qcow2"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command("qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", filepath.Join(dir, "root.raw"), filepath.Join(dir, "root.qcow2")).CombinedOutput()
+	output, err := exec.Command("qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b", filepath.Join(dir, "root.raw"), filepath.Join(dir, "root.qcow2")).
+		CombinedOutput()
 	if err != nil {
 		t.Fatal(err, string(output))
 	}

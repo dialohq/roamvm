@@ -36,7 +36,10 @@ func TestKubernetesAPIOwnership(t *testing.T) {
 	}
 	id := fmt.Sprintf("race-%d", time.Now().UnixNano())
 	t.Cleanup(func() {
-		err := c.Delete(context.Background(), &core.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "roamvm-" + id, Namespace: namespace}})
+		err := c.Delete(
+			context.Background(),
+			&core.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "roamvm-" + id, Namespace: namespace}},
+		)
 		if client.IgnoreNotFound(err) != nil {
 			t.Error(err)
 		}
@@ -65,7 +68,7 @@ func TestKubernetesAPIOwnership(t *testing.T) {
 	}
 	old := <-winners
 	path := filepath.Join(t.TempDir(), "overlay")
-	if err = os.WriteFile(path, []byte("delayed old checkpoint"), 0600); err != nil {
+	if err = os.WriteFile(path, []byte("delayed old checkpoint"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result := make(chan error, 1)
@@ -82,7 +85,8 @@ func TestKubernetesAPIOwnership(t *testing.T) {
 		t.Fatalf("old upload committed: %v", commitErr)
 	}
 	current, err := m.Read(ctx, id)
-	if err != nil || current.ETag != next.ETag || current.Head.Owner != "replacement" || current.Head.Checkpoint != nil {
+	if err != nil || current.ETag != next.ETag || current.Head.Owner != "replacement" ||
+		current.Head.Checkpoint != nil {
 		t.Fatalf("replacement ownership changed: %+v %v", current, err)
 	}
 }

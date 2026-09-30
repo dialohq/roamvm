@@ -2,9 +2,10 @@ package fileio
 
 import (
 	"bytes"
-	"golang.org/x/sys/unix"
 	"io"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 // SyncClose closes a completed write, preserving the first write or sync error.

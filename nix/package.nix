@@ -11,27 +11,28 @@
       install -Dm755 $src $out/bin/cloud-hypervisor
     '';
   };
-in pkgs.buildGoModule {
-  pname = "roamvm";
-  version = "0.1.0";
-  src = pkgs.lib.fileset.toSource {
-    root = ../.;
-    fileset = pkgs.lib.fileset.unions [../go.mod ../go.sum ../api ../cmd ../internal];
-  };
-  vendorHash = "sha256-RgcIlgEK4qtQ7YJhaOS1w6xwffXcfnCBMNgqwveejPw=";
-  subPackages = ["cmd/roamvm"];
-  nativeBuildInputs = [pkgs.makeWrapper];
-  nativeCheckInputs = [pkgs.qemu-utils];
-  ldflags = ["-s" "-w"];
-  doCheck = true;
-  checkPhase = ''
-    runHook preCheck
-    go test ./...
-    runHook postCheck
-  '';
-  postInstall = ''
-    wrapProgram $out/bin/roamvm --prefix PATH : ${pkgs.lib.makeBinPath [hypervisor pkgs.qemu-utils pkgs.iproute2 pkgs.iptables pkgs.dnsmasq pkgs.cdrkit pkgs.coreutils]}
-  '';
-  passthru = {inherit hypervisor;};
-  meta.platforms = ["x86_64-linux"];
-}
+in
+  pkgs.buildGoModule {
+    pname = "roamvm";
+    version = "0.1.0";
+    src = pkgs.lib.fileset.toSource {
+      root = ../.;
+      fileset = pkgs.lib.fileset.unions [../go.mod ../go.sum ../api ../cmd ../internal];
+    };
+    vendorHash = "sha256-RgcIlgEK4qtQ7YJhaOS1w6xwffXcfnCBMNgqwveejPw=";
+    subPackages = ["cmd/roamvm"];
+    nativeBuildInputs = [pkgs.makeWrapper];
+    nativeCheckInputs = [pkgs.qemu-utils];
+    ldflags = ["-s" "-w"];
+    doCheck = true;
+    checkPhase = ''
+      runHook preCheck
+      go test ./...
+      runHook postCheck
+    '';
+    postInstall = ''
+      wrapProgram $out/bin/roamvm --prefix PATH : ${pkgs.lib.makeBinPath [hypervisor pkgs.qemu-utils pkgs.iproute2 pkgs.iptables pkgs.dnsmasq pkgs.cdrkit pkgs.coreutils]}
+    '';
+    passthru = {inherit hypervisor;};
+    meta.platforms = ["x86_64-linux"];
+  }

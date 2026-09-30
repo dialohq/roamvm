@@ -3,11 +3,12 @@ package disk
 import (
 	"context"
 	"crypto/sha256"
-	"github.com/dialohq/roamvm/internal/images"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/dialohq/roamvm/internal/images"
 )
 
 func TestOverlayPortabilityPreservesWritesAndZeroes(t *testing.T) {
@@ -25,14 +26,15 @@ func TestOverlayPortabilityPreservesWritesAndZeroes(t *testing.T) {
 		baseData[i] = 0x55
 	}
 	base := images.Base{Dir: a, Manifest: images.Manifest{Format: "raw"}}
-	if e := os.WriteFile(base.Disk(), baseData, 0444); e != nil {
+	if e := os.WriteFile(base.Disk(), baseData, 0o444); e != nil {
 		t.Fatal(e)
 	}
 	overlay := filepath.Join(a, "overlay.qcow2")
 	if e := Create(ctx, base, overlay); e != nil {
 		t.Fatal(e)
 	}
-	out, e := exec.Command("qemu-io", "-f", "qcow2", "-c", "write -P 0x42 0 64k", "-c", "write -z 128k 64k", overlay).CombinedOutput()
+	out, e := exec.Command("qemu-io", "-f", "qcow2", "-c", "write -P 0x42 0 64k", "-c", "write -z 128k 64k", overlay).
+		CombinedOutput()
 	if e != nil {
 		t.Fatalf("write: %v %s", e, out)
 	}
@@ -41,7 +43,7 @@ func TestOverlayPortabilityPreservesWritesAndZeroes(t *testing.T) {
 		t.Fatal(e)
 	}
 	other := images.Base{Dir: b, Manifest: base.Manifest}
-	if e = os.WriteFile(other.Disk(), baseData, 0444); e != nil {
+	if e = os.WriteFile(other.Disk(), baseData, 0o444); e != nil {
 		t.Fatal(e)
 	}
 	data, e := os.ReadFile(cp)
@@ -49,7 +51,7 @@ func TestOverlayPortabilityPreservesWritesAndZeroes(t *testing.T) {
 		t.Fatal(e)
 	}
 	moved := filepath.Join(b, "overlay.qcow2")
-	if e = os.WriteFile(moved, data, 0600); e != nil {
+	if e = os.WriteFile(moved, data, 0o600); e != nil {
 		t.Fatal(e)
 	}
 	if e = Rebase(ctx, other, moved); e != nil {

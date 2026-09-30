@@ -36,7 +36,7 @@ func testStoreReplacement(t *testing.T, ctx context.Context, m Manager, objects 
 	path := filepath.Join(t.TempDir(), "overlay")
 	var previous string
 	for _, data := range []string{"first", "second", "third"} {
-		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		s, err := m.Acquire(ctx, id, "base", data, data)
@@ -104,7 +104,10 @@ func TestS3VersionedCheckpointReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := testStoreReplacement(t, ctx, Manager{store}, store)
-	versions, err := store.Client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: aws.String("vm/" + id + "/overlay/")})
+	versions, err := store.Client.ListObjectVersions(
+		ctx,
+		&s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: aws.String("vm/" + id + "/overlay/")},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

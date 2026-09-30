@@ -33,9 +33,11 @@ func (s *committedStore) Get(context.Context, string) (state.Object, error) {
 	b, err := json.Marshal(s.head)
 	return state.Object{Body: io.NopCloser(bytes.NewReader(b)), ETag: "committed"}, err
 }
+
 func (s *committedStore) List(context.Context, string) ([]string, error) {
 	return []string{s.old, s.head.Checkpoint.Key}, nil
 }
+
 func (s *committedStore) Delete(_ context.Context, key string) error {
 	if key != s.old {
 		return errors.New("attempted to delete current checkpoint")
@@ -52,14 +54,35 @@ func TestRestartedSidecarCompletesCleanupBeforeStopped(t *testing.T) {
 	key := func(epoch int) string {
 		return fmt.Sprintf("vm/vm-uid/overlay/%020d-%020d-%s.qcow2", epoch, epoch, strings.Repeat("a", 64))
 	}
-	store := &committedStore{head: state.Head{Schema: 1, VMID: "vm-uid", Epoch: 2, State: "Stopped", Checkpoint: &api.Checkpoint{Key: key(2), Generation: 2}}, old: key(1), fail: true}
+	store := &committedStore{
+		head: state.Head{
+			Schema:     1,
+			VMID:       "vm-uid",
+			Epoch:      2,
+			State:      "Stopped",
+			Checkpoint: &api.Checkpoint{Key: key(2), Generation: 2},
+		},
+		old:  key(1),
+		fail: true,
+	}
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
-	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default", UID: "pod-uid", Annotations: map[string]string{controller.Phase: "Checkpointing"}}}
+	pod := &core.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "pod",
+			Namespace:   "default",
+			UID:         "pod-uid",
+			Annotations: map[string]string{controller.Phase: "Checkpointing"},
+		},
+	}
 	vm := &api.VirtualMachine{ObjectMeta: metav1.ObjectMeta{UID: "vm-uid"}}
-	server := &Server{Root: t.TempDir(), State: state.Manager{Store: store}, Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()}
+	server := &Server{
+		Root:   t.TempDir(),
+		State:  state.Manager{Store: store},
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
+	}
 	working := filepath.Join(server.Root, "overlay.qcow2")
-	if err := os.WriteFile(working, []byte("working copy"), 0600); err != nil {
+	if err := os.WriteFile(working, []byte("working copy"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.save(Prepared{Session: state.Session{Head: state.Head{Epoch: 2, State: "Running"}}, PodUID: string(pod.UID), Dir: server.Root}); err != nil {

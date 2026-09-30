@@ -20,7 +20,11 @@ func TestKubernetesOwnershipWithObjectOnlyStore(t *testing.T) {
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
 	objects := newMemory()
-	store := &Kubernetes{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Namespace: "runtime", Objects: objects}
+	store := &Kubernetes{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Namespace: "runtime",
+		Objects:   objects,
+	}
 	m := Manager{Store: store}
 	ctx := context.Background()
 	var winners atomic.Int32
@@ -44,7 +48,7 @@ func TestKubernetesOwnershipWithObjectOnlyStore(t *testing.T) {
 	}
 	s := <-sessions
 	p := filepath.Join(t.TempDir(), "overlay")
-	os.WriteFile(p, []byte("durable bytes"), 0600)
+	os.WriteFile(p, []byte("durable bytes"), 0o600)
 	committed, e := m.Commit(ctx, s, p)
 	if e != nil {
 		t.Fatal(e)
@@ -78,7 +82,13 @@ type pausedUpload struct {
 	resume  chan struct{}
 }
 
-func (s *pausedUpload) Put(ctx context.Context, key string, body io.ReadSeeker, size int64, match string) (Object, error) {
+func (s *pausedUpload) Put(
+	ctx context.Context,
+	key string,
+	body io.ReadSeeker,
+	size int64,
+	match string,
+) (Object, error) {
 	if strings.Contains(key, "/overlay/") {
 		close(s.entered)
 		<-s.resume
@@ -95,7 +105,11 @@ func TestOwnershipChangeDuringUploadCannotPublishStaleCheckpoint(t *testing.T) {
 			if backend == "kubernetes" {
 				scheme := runtime.NewScheme()
 				core.AddToScheme(scheme)
-				store = &Kubernetes{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Namespace: "runtime", Objects: paused}
+				store = &Kubernetes{
+					Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+					Namespace: "runtime",
+					Objects:   paused,
+				}
 			}
 			ctx := context.Background()
 			m := Manager{Store: store}
@@ -104,7 +118,7 @@ func TestOwnershipChangeDuringUploadCannotPublishStaleCheckpoint(t *testing.T) {
 				t.Fatal(e)
 			}
 			path := filepath.Join(t.TempDir(), "overlay")
-			os.WriteFile(path, []byte("stale overlay"), 0600)
+			os.WriteFile(path, []byte("stale overlay"), 0o600)
 			result := make(chan error, 1)
 			go func() { _, e := m.Commit(ctx, first, path); result <- e }()
 			<-paused.entered

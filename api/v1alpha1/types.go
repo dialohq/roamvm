@@ -10,12 +10,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var GroupVersion = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
-var SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
-	metav1.AddToGroupVersion(s, GroupVersion)
-	return nil
-})
+var (
+	GroupVersion  = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
+	SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
+		metav1.AddToGroupVersion(s, GroupVersion)
+		return nil
+	})
+)
 var AddToScheme = SchemeBuilder.AddToScheme
 
 // +kubebuilder:object:root=true

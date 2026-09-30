@@ -6,14 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	dp "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	dp "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
 type Plugin struct {
@@ -24,6 +25,7 @@ type Plugin struct {
 func (p *Plugin) GetDevicePluginOptions(context.Context, *dp.Empty) (*dp.DevicePluginOptions, error) {
 	return &dp.DevicePluginOptions{}, nil
 }
+
 func (p *Plugin) ListAndWatch(_ *dp.Empty, stream dp.DevicePlugin_ListAndWatchServer) error {
 	for {
 		health := dp.Healthy
@@ -47,6 +49,7 @@ func (p *Plugin) ListAndWatch(_ *dp.Empty, stream dp.DevicePlugin_ListAndWatchSe
 		}
 	}
 }
+
 func (p *Plugin) Allocate(_ context.Context, in *dp.AllocateRequest) (*dp.AllocateResponse, error) {
 	out := &dp.AllocateResponse{}
 	for _, req := range in.ContainerRequests {
@@ -64,12 +67,21 @@ func (p *Plugin) Allocate(_ context.Context, in *dp.AllocateRequest) (*dp.Alloca
 	}
 	return out, nil
 }
-func (p *Plugin) PreStartContainer(context.Context, *dp.PreStartContainerRequest) (*dp.PreStartContainerResponse, error) {
+
+func (p *Plugin) PreStartContainer(
+	context.Context,
+	*dp.PreStartContainerRequest,
+) (*dp.PreStartContainerResponse, error) {
 	return &dp.PreStartContainerResponse{}, nil
 }
-func (p *Plugin) GetPreferredAllocation(context.Context, *dp.PreferredAllocationRequest) (*dp.PreferredAllocationResponse, error) {
+
+func (p *Plugin) GetPreferredAllocation(
+	context.Context,
+	*dp.PreferredAllocationRequest,
+) (*dp.PreferredAllocationResponse, error) {
 	return &dp.PreferredAllocationResponse{}, nil
 }
+
 func (p *Plugin) Run(ctx context.Context, dir string) error {
 	socket := filepath.Join(dir, "roamvm-kvm.sock")
 	for ctx.Err() == nil {
@@ -86,9 +98,13 @@ func (p *Plugin) Run(ctx context.Context, dir string) error {
 			current, e := os.Stat(filepath.Join(dir, "kubelet.sock"))
 			if e == nil && (identity == nil || !os.SameFile(current, identity)) {
 				regctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				conn, e := grpc.NewClient("unix://"+filepath.Join(dir, "kubelet.sock"), grpc.WithTransportCredentials(insecure.NewCredentials()))
+				conn, e := grpc.NewClient(
+					"unix://"+filepath.Join(dir, "kubelet.sock"),
+					grpc.WithTransportCredentials(insecure.NewCredentials()),
+				)
 				if e == nil {
-					_, e = dp.NewRegistrationClient(conn).Register(regctx, &dp.RegisterRequest{Version: dp.Version, Endpoint: filepath.Base(socket), ResourceName: "vm.roamvm.io/kvm"})
+					_, e = dp.NewRegistrationClient(conn).
+						Register(regctx, &dp.RegisterRequest{Version: dp.Version, Endpoint: filepath.Base(socket), ResourceName: "vm.roamvm.io/kvm"})
 					conn.Close()
 				}
 				cancel()

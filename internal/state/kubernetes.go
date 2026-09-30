@@ -60,7 +60,13 @@ func (s *Kubernetes) Get(ctx context.Context, key string) (Object, error) {
 	return Object{Body: io.NopCloser(strings.NewReader(data)), ETag: cm.ResourceVersion, Size: int64(len(data))}, nil
 }
 
-func (s *Kubernetes) Put(ctx context.Context, key string, body io.ReadSeeker, size int64, match string) (Object, error) {
+func (s *Kubernetes) Put(
+	ctx context.Context,
+	key string,
+	body io.ReadSeeker,
+	size int64,
+	match string,
+) (Object, error) {
 	name, head := headName(key)
 	if !head {
 		if match != "" {
@@ -78,9 +84,13 @@ func (s *Kubernetes) Put(ctx context.Context, key string, body io.ReadSeeker, si
 	if int64(len(data)) != size {
 		return Object{}, errors.New("state head size mismatch")
 	}
-	cm := &core.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.Namespace,
-		ResourceVersion: match, Labels: map[string]string{"app.kubernetes.io/name": "roamvm-state"}},
-		Data: map[string]string{"head.json": string(data)}}
+	cm := &core.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: s.Namespace,
+			ResourceVersion: match, Labels: map[string]string{"app.kubernetes.io/name": "roamvm-state"},
+		},
+		Data: map[string]string{"head.json": string(data)},
+	}
 	if match == "" {
 		err = s.Client.Create(ctx, cm)
 	} else {

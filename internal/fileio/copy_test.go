@@ -21,7 +21,10 @@ func TestSparseCopyAcrossWritebackBoundary(t *testing.T) {
 	defer f.Close()
 	const hole = 33 << 20
 	tail := []byte("persistent changes")
-	n, err := CopySparse(f, io.MultiReader(io.LimitReader(zeroReader{}, hole), bytes.NewReader(tail), io.LimitReader(zeroReader{}, 4096)))
+	n, err := CopySparse(
+		f,
+		io.MultiReader(io.LimitReader(zeroReader{}, hole), bytes.NewReader(tail), io.LimitReader(zeroReader{}, 4096)),
+	)
 	if err != nil || n != hole+int64(len(tail))+4096 {
 		t.Fatalf("copy: %d %v", n, err)
 	}

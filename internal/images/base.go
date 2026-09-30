@@ -64,7 +64,8 @@ func Open(ctx context.Context, dir string) (Base, error) {
 			return Base{}, err
 		}
 	}
-	output, err := exec.CommandContext(ctx, "qemu-img", "info", "--output=json", "-f", b.Manifest.Format, b.Disk()).Output()
+	output, err := exec.CommandContext(ctx, "qemu-img", "info", "--output=json", "-f", b.Manifest.Format, b.Disk()).
+		Output()
 	if err != nil {
 		return Base{}, fmt.Errorf("inspect base: %w", err)
 	}
@@ -80,6 +81,7 @@ func Open(ctx context.Context, dir string) (Base, error) {
 	}
 	return b, nil
 }
+
 func readBase(dir string) (Base, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {

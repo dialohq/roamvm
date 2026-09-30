@@ -55,7 +55,7 @@ func main() {
 				http.Error(w, err.Error(), 500)
 				return
 			}
-			if err = os.WriteFile(path, []byte("must not be writable"), 0600); !errors.Is(err, syscall.EROFS) {
+			if err = os.WriteFile(path, []byte("must not be writable"), 0o600); !errors.Is(err, syscall.EROFS) {
 				http.Error(w, "configuration disk is not read-only", 500)
 				return
 			}
@@ -82,7 +82,7 @@ func main() {
 				http.Error(w, e.Error(), 500)
 				return
 			}
-			f, e := os.OpenFile("/secondary/marker", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+			f, e := os.OpenFile("/secondary/marker", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 			if e != nil {
 				http.Error(w, e.Error(), 500)
 				return
@@ -111,7 +111,7 @@ func main() {
 				http.Error(w, e.Error(), 500)
 				return
 			}
-			f, e := os.OpenFile("/persistent", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+			f, e := os.OpenFile("/persistent", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 			if e != nil {
 				http.Error(w, e.Error(), 500)
 				return
@@ -138,7 +138,8 @@ func main() {
 		a, _ := net.InterfaceAddrs()
 		data, _ := os.ReadFile("/persistent")
 		hash := sha256.Sum256(data)
-		json.NewEncoder(w).Encode(map[string]any{"hostname": h, "addresses": a, "sha256": hex.EncodeToString(hash[:]), "pid": os.Getpid()})
+		json.NewEncoder(w).
+			Encode(map[string]any{"hostname": h, "addresses": a, "sha256": hex.EncodeToString(hash[:]), "pid": os.Getpid()})
 	})
 	http.HandleFunc("/dns", func(w http.ResponseWriter, r *http.Request) {
 		ips, e := net.LookupHost(r.URL.Query().Get("name"))

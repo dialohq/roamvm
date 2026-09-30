@@ -8,12 +8,16 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
-      with:
-        go-version-file: go.mod
-        cache: true
-    - run: sudo apt-get update && sudo apt-get install -y qemu-utils
-    - run: make test generate
-    - run: git diff --exit-code -- api config/crd
-    - run: docker build -t roamvm:ci .
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: python -m pip install ruff==0.15.14
+      - run: sudo apt-get update && sudo apt-get install -y qemu-utils
+      - run: make fmt-check test generate
+      - run: git diff --exit-code -- api config/crd
+      - run: docker build -t roamvm:ci .

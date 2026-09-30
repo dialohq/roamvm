@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"os"
+
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/dialohq/roamvm/internal/state"
-	"io"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"os"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -72,7 +73,7 @@ func main() {
 			panic(err)
 		}
 		if mode == "corrupt" {
-			if err = os.WriteFile(os.Args[3], body, 0600); err != nil {
+			if err = os.WriteFile(os.Args[3], body, 0o600); err != nil {
 				panic(err)
 			}
 			body = []byte("injected checkpoint corruption")

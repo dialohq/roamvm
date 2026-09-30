@@ -19,22 +19,17 @@ type memoryObject struct {
 	etag string
 }
 type memoryStore struct {
-	mu                 sync.Mutex
-	objects            map[string]memoryObject
-	revision           int
-	failOverlay        bool
-	corruptOverlay     bool
-	loseCommitResponse bool
-	failDelete         bool
-	failList           bool
-	loseDeleteResponse bool
+	failure  string
+	mu       sync.Mutex
+	objects  map[string]memoryObject
+	revision int
 }
 
 func newMemory() *memoryStore { return &memoryStore{objects: map[string]memoryObject{}} }
 func (s *memoryStore) List(ctx context.Context, prefix string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failList {
+	if s.failure == "list" {
 		return nil, errors.New("injected list failure")
 	}
 	var keys []string
@@ -45,18 +40,20 @@ func (s *memoryStore) List(ctx context.Context, prefix string) ([]string, error)
 	}
 	return keys, nil
 }
+
 func (s *memoryStore) Delete(ctx context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failDelete {
+	if s.failure == "delete" {
 		return errors.New("injected delete failure")
 	}
 	delete(s.objects, key)
-	if s.loseDeleteResponse {
+	if s.failure == "lost-delete-response" {
 		return errors.New("response lost after successful delete")
 	}
 	return nil
 }
+
 func (s *memoryStore) Get(ctx context.Context, key string) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -65,15 +62,16 @@ func (s *memoryStore) Get(ctx context.Context, key string) (Object, error) {
 		return Object{}, ErrNotFound
 	}
 	b := append([]byte(nil), v.body...)
-	if s.corruptOverlay && strings.Contains(key, "/overlay/") {
+	if (s.failure == "verification") && strings.Contains(key, "/overlay/") {
 		b = append(b, '!')
 	}
 	return Object{Body: io.NopCloser(bytes.NewReader(b)), ETag: v.etag, Size: int64(len(b))}, nil
 }
+
 func (s *memoryStore) Put(ctx context.Context, key string, r io.ReadSeeker, size int64, match string) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failOverlay && strings.Contains(key, "/overlay/") {
+	if (s.failure == "upload") && strings.Contains(key, "/overlay/") {
 		return Object{}, errors.New("injected upload failure")
 	}
 	old, exists := s.objects[key]
@@ -90,11 +88,13 @@ func (s *memoryStore) Put(ctx context.Context, key string, r io.ReadSeeker, size
 	s.revision++
 	etag := fmt.Sprintf("\"%d\"", s.revision)
 	s.objects[key] = memoryObject{b, etag}
-	if s.loseCommitResponse && strings.Contains(string(b), `"state":"Stopped"`) && strings.Contains(string(b), `"checkpoint"`) {
+	if (s.failure == "lost-response") && strings.Contains(string(b), `"state":"Stopped"`) &&
+		strings.Contains(string(b), `"checkpoint"`) {
 		return Object{}, errors.New("response lost after successful commit")
 	}
 	return Object{ETag: etag, Size: size}, nil
 }
+
 func fixture(t *testing.T) (context.Context, Manager, Session, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -104,11 +104,12 @@ func fixture(t *testing.T) (context.Context, Manager, Session, string) {
 		t.Fatal(e)
 	}
 	file := filepath.Join(t.TempDir(), "overlay")
-	if e = os.WriteFile(file, []byte("persistent project and installed packages"), 0600); e != nil {
+	if e = os.WriteFile(file, []byte("persistent project and installed packages"), 0o600); e != nil {
 		t.Fatal(e)
 	}
 	return ctx, m, s, file
 }
+
 func TestExclusiveOwnership(t *testing.T) {
 	ctx := context.Background()
 	m := Manager{newMemory()}
@@ -131,6 +132,7 @@ func TestExclusiveOwnership(t *testing.T) {
 		t.Fatalf("writers=%d", winners.Load())
 	}
 }
+
 func TestStopRestoreOnAnotherNode(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	committed, e := m.Commit(ctx, s, file)
@@ -160,6 +162,7 @@ func TestStopRestoreOnAnotherNode(t *testing.T) {
 		t.Fatalf("old writer accepted: %v", e)
 	}
 }
+
 func TestAcquisitionRetryAndBasePin(t *testing.T) {
 	ctx, m, s, _ := fixture(t)
 	again, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, s.Head.Owner, s.Head.Node)
@@ -173,9 +176,10 @@ func TestAcquisitionRetryAndBasePin(t *testing.T) {
 		t.Fatal("owner stolen", e)
 	}
 }
+
 func TestUploadFailureNeverAdvancesHead(t *testing.T) {
 	ctx, m, s, file := fixture(t)
-	m.Store.(*memoryStore).failOverlay = true
+	m.Store.(*memoryStore).failure = "upload"
 	if _, e := m.Commit(ctx, s, file); e == nil {
 		t.Fatal("upload unexpectedly succeeded")
 	}
@@ -183,14 +187,15 @@ func TestUploadFailureNeverAdvancesHead(t *testing.T) {
 	if e != nil || now.ETag != s.ETag || now.Head.State != "Running" {
 		t.Fatal("head advanced", e)
 	}
-	m.Store.(*memoryStore).failOverlay = false
+	m.Store.(*memoryStore).failure = ""
 	if _, e = m.Commit(ctx, s, file); e != nil {
 		t.Fatal("retry failed", e)
 	}
 }
+
 func TestCorruptUploadNeverCommits(t *testing.T) {
 	ctx, m, s, file := fixture(t)
-	m.Store.(*memoryStore).corruptOverlay = true
+	m.Store.(*memoryStore).failure = "verification"
 	if _, e := m.Commit(ctx, s, file); e == nil {
 		t.Fatal("corrupt object committed")
 	}
@@ -199,21 +204,23 @@ func TestCorruptUploadNeverCommits(t *testing.T) {
 		t.Fatal("head advanced")
 	}
 }
+
 func TestLostCommitResponse(t *testing.T) {
 	ctx, m, s, file := fixture(t)
-	m.Store.(*memoryStore).loseCommitResponse = true
+	m.Store.(*memoryStore).failure = "lost-response"
 	committed, e := m.Commit(ctx, s, file)
 	if e != nil || committed.Head.State != "Stopped" {
 		t.Fatal("lost response not reconciled", e)
 	}
 }
+
 func TestRestoreCorruptionDoesNotExposeFile(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	committed, e := m.Commit(ctx, s, file)
 	if e != nil {
 		t.Fatal(e)
 	}
-	m.Store.(*memoryStore).corruptOverlay = true
+	m.Store.(*memoryStore).failure = "verification"
 	path := filepath.Join(t.TempDir(), "overlay")
 	if e = m.Restore(ctx, committed, path); e == nil {
 		t.Fatal("corruption not detected")
@@ -225,6 +232,7 @@ func TestRestoreCorruptionDoesNotExposeFile(t *testing.T) {
 		t.Fatal("partial file leaked")
 	}
 }
+
 func TestRecoveryFencesOldEpoch(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	if _, e := m.Recover(ctx, s.Head.VMID, "wrong-pod"); !errors.Is(e, ErrConflict) {
@@ -244,6 +252,7 @@ func TestRecoveryFencesOldEpoch(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
 func TestStopReplacesPreviousCheckpoint(t *testing.T) {
 	ctx, m, s, file := fixture(t)
 	first, e := m.Commit(ctx, s, file)
@@ -255,7 +264,7 @@ func TestStopReplacesPreviousCheckpoint(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = os.WriteFile(file, []byte("next version"), 0600); e != nil {
+	if e = os.WriteFile(file, []byte("next version"), 0o600); e != nil {
 		t.Fatal(e)
 	}
 	final, e := m.Commit(ctx, second, file)
