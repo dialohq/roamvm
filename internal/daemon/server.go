@@ -39,6 +39,7 @@ type Prepared struct {
 	Dir     string
 	Spec    api.VirtualMachineSpec
 	PodUID  string
+	Stopped bool
 }
 type Response struct {
 	Prepared    *Prepared `json:"prepared,omitempty"`
@@ -46,6 +47,7 @@ type Response struct {
 	ResizeError string    `json:"resizeError,omitempty"`
 	Stop        bool      `json:"stop,omitempty"`
 	Error       string    `json:"error,omitempty"`
+	Retry       bool      `json:"retry,omitempty"`
 }
 type Server struct {
 	Client                    client.Client
@@ -155,6 +157,7 @@ func (s *Server) handler(action string) http.HandlerFunc {
 		if err != nil {
 			w.WriteHeader(409)
 			response.Error = err.Error()
+			response.Retry = errors.Is(err, errDiskBusy)
 		}
 		_ = json.NewEncoder(w).Encode(response)
 	}
@@ -210,7 +213,14 @@ func (s *Server) save(p Prepared) error {
 	if err = fileio.SyncClose(f, err); err != nil {
 		return err
 	}
-	return os.Rename(path+".partial", path)
+	if err = os.Rename(path+".partial", path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return fileio.SyncClose(dir, nil)
 }
 
 func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) (*Prepared, error) {
@@ -219,6 +229,9 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 		return nil, errors.New("VM no longer requests a start")
 	}
 	if p, err := s.load(string(pod.UID)); err == nil {
+		if p.Stopped {
+			return nil, errors.New("this runner incarnation already stopped")
+		}
 		if err = s.State.Check(ctx, p.Session); err != nil {
 			return nil, err
 		}
@@ -238,6 +251,9 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 		return nil, err
 	}
 	log.Printf("startup pod=%s stage=base elapsed=%s", pod.Name, time.Since(started))
+	if pod.Annotations[controller.LocalOwnerAnnotation] != "" {
+		return s.resumeLocal(ctx, pod, vm, base, spec)
+	}
 	session, err := s.State.Acquire(ctx, string(vm.UID), vm.Spec.Image, string(pod.UID), s.Node)
 	if err != nil {
 		return nil, err
@@ -263,7 +279,7 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 			return nil, err
 		}
 	}
-	prepared := Prepared{session, base, dir, spec, string(pod.UID)}
+	prepared := Prepared{Session: session, Base: base, Dir: dir, Spec: spec, PodUID: string(pod.UID)}
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
@@ -283,6 +299,13 @@ func bootSpec(vm *api.VirtualMachine, pod *core.Pod) (api.VirtualMachineSpec, er
 }
 
 func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) error {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == "working" && volume.PersistentVolumeClaim != nil {
+			return s.stopLocal(ctx, pod, vm)
+		}
+	}
+	// Legacy ephemeral claims cannot survive their runner. Finish their durable
+	// checkpoint synchronously; the next incarnation uses retained storage.
 	p, err := s.load(string(pod.UID))
 	if err != nil {
 		return err
@@ -303,8 +326,10 @@ func (s *Server) finish(ctx context.Context, pod *core.Pod, vm *api.VirtualMachi
 	if err = s.annotate(ctx, pod, "Checkpointing", "", nil); err != nil {
 		return err
 	}
-	checkpoint, err := disk.Compact(ctx, p.Base, filepath.Join(p.Dir, "overlay.qcow2"))
-	if err != nil {
+	// The VMM has exited. Validate and stream the working file directly to S3;
+	// making a compacted copy here would require a second disk-sized allocation.
+	checkpoint := filepath.Join(p.Dir, "overlay.qcow2")
+	if err = disk.Check(ctx, checkpoint); err != nil {
 		return err
 	}
 	committed, err := s.State.Commit(ctx, p.Session, checkpoint)
@@ -344,7 +369,7 @@ func (s *Server) annotate(ctx context.Context, pod *core.Pod, phase, message str
 		if current.Annotations == nil {
 			current.Annotations = map[string]string{}
 		}
-		for _, key := range []string{controller.DiskSizeAnnotation, controller.ResizeAnnotation} {
+		for _, key := range []string{controller.DiskSizeAnnotation, controller.ResizeAnnotation, controller.LocalStopAnnotation, controller.CheckpointReadyAnnotation} {
 			if value, ok := pod.Annotations[key]; ok {
 				current.Annotations[key] = value
 			}

@@ -2407,6 +2407,25 @@ spec:
                   - type
                   type: object
                 type: array
+              local:
+                description: |-
+                  LocalCheckpoint identifies the retained, node-local working disk containing
+                  the latest safely stopped VM state.
+                properties:
+                  claimName:
+                    type: string
+                  durable:
+                    type: boolean
+                  nodeName:
+                    type: string
+                  owner:
+                    type: string
+                required:
+                - claimName
+                - durable
+                - nodeName
+                - owner
+                type: object
               message:
                 type: string
               nodeName:

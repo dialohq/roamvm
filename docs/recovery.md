@@ -16,12 +16,13 @@ their working disk; `roamvm recover --fenced` instead **discards** uncommitted w
    **original** base image. Use a RoamVM image containing the `checkpoint`
    command. Copy the original runtime's ConfigMap/Secret references and service
    account; never substitute another object store, bucket or state namespace.
-5. Run `roamvm checkpoint` with the original Pod identity. It validates QCOW2,
-   compacts and verifies the upload, commits the checkpoint using the original
-   ownership epoch, then annotates the original Pod as durably stopped.
-6. Wait for the VM and the client stop build to report Stopped. Delete the rescue
-   Pod after successful completion. Start through the normal client; verify
-   project files and agent connectivity before removing the backup.
+5. Run `roamvm checkpoint` with the original Pod identity. For legacy ephemeral
+   claims it validates QCOW2, uploads and verifies the overlay, and commits using
+   the original ownership epoch. For retained VM-owned claims it flushes the
+   local stop; the controller creates a background worker to finish that upload.
+6. Wait for `Stopped`, delete the completed rescue Pod, and wait for
+   `CheckpointReady=True` before removing the backup or maintaining the node.
+   Start through the normal client and verify project files and agent connectivity.
 
 A rescue Pod has this shape (replace every capitalized placeholder):
 
@@ -78,9 +79,10 @@ spec:
         pullPolicy: IfNotPresent
 ```
 
-The original failed Pod remains in place until commit. Its PVC may remain
-Terminating while the rescue Pod mounts it; PVC protection releases it after the
-rescue Pod is deleted. Do not force-remove that protection.
+Legacy failed Pods remain in place until commit. Their PVC may remain Terminating
+while the rescue Pod mounts it; PVC protection releases it after the rescue Pod
+is deleted. VM-owned claims remain available for local restart after completion.
+Do not force-remove PVC protection.
 
 If validation fails, keep the backup and working PVC. Inspect `qemu-img check`
 on a copy with the same backing image. Repair only a copy after understanding the
@@ -113,8 +115,9 @@ already fail permanently can still require the retained-disk procedure above;
 changing the runtime image cannot repair its in-memory state.
 
 Monitor thin-pool data and metadata usage, automatic-extension monitoring, and
-free space in the containing volume group. Allow space for both the working
-overlay and its compacted checkpoint during Stop. Virtual disk capacity is not a
-physical reservation when thin provisioning is enabled. Keep independent
-backups; a checkpoint or snapshot on the same storage is not protection against
+free space in the containing volume group. Allow space for the working overlay
+and filesystem/QCOW2 metadata; Stop streams it to S3 without a second local copy.
+Virtual disk capacity is not a physical reservation when thin provisioning is
+enabled. Keep independent backups; a checkpoint or snapshot on the same storage
+is not protection against
 physical storage loss.

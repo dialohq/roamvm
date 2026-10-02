@@ -7,6 +7,7 @@ import (
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/state"
 	core "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -54,6 +55,12 @@ func Recover(ctx context.Context, c client.Client, m state.Manager, id, owner st
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if pod.Labels[WorkerLabel] == "true" {
+			if err = c.Delete(ctx, pod, client.GracePeriodSeconds(0)); client.IgnoreNotFound(err) != nil {
+				return state.Session{}, err
+			}
+			continue
+		}
 		if string(pod.UID) != owner {
 			return state.Session{}, errors.New("a different runner exists; refusing recovery")
 		}
@@ -94,6 +101,13 @@ func Recover(ctx context.Context, c client.Client, m state.Manager, id, owner st
 		current.Status.PodName = ""
 		current.Status.NodeName = ""
 		current.Status.Checkpoint = head.Head.Checkpoint
+		if current.Status.Local != nil {
+			pvc := &core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: current.Status.Local.ClaimName, Namespace: current.Namespace}}
+			if e := c.Delete(ctx, pvc); client.IgnoreNotFound(e) != nil {
+				return e
+			}
+		}
+		current.Status.Local = nil
 		return c.Status().Update(ctx, current)
 	})
 

@@ -103,13 +103,13 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	pod.Labels["vm.roamvm.io/name"] = vm.Name
 	pod.Annotations["kubectl.kubernetes.io/default-container"] = "runner"
 	root := "/var/lib/roamvm"
-	storage, err := workingSize(r.StorageSize, vm.Spec.RootDiskSize)
-	if err != nil {
-		return err
+	claim := name + "-working"
+	if vm.Status.Local != nil {
+		claim = vm.Status.Local.ClaimName
+		pod.Annotations[LocalOwnerAnnotation] = vm.Status.Local.Owner
 	}
-	var storageClass *string
-	if r.StorageClass != "" {
-		storageClass = &r.StorageClass
+	if err := r.ensureWorkingPVC(ctx, vm, claim); err != nil {
+		return err
 	}
 	pod.Spec = core.PodSpec{
 		ServiceAccountName:            "roamvm-runtime",
@@ -118,7 +118,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		TerminationGracePeriodSeconds: ptr.To(int64(3600)),
 		ImagePullSecrets:              vm.Spec.ImagePullSecrets,
 		NodeSelector:                  vm.Spec.NodeSelector,
-		Affinity:                      vm.Spec.Affinity,
+		Affinity:                      vm.Spec.Affinity.DeepCopy(),
 		Tolerations:                   vm.Spec.Tolerations,
 		TopologySpreadConstraints:     vm.Spec.TopologySpreadConstraints,
 		SecurityContext: &core.PodSecurityContext{
@@ -143,6 +143,24 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			},
 		}},
 	}
+	if vm.Status.Local != nil {
+		if pod.Spec.Affinity == nil {
+			pod.Spec.Affinity = &core.Affinity{}
+		}
+		if pod.Spec.Affinity.NodeAffinity == nil {
+			pod.Spec.Affinity.NodeAffinity = &core.NodeAffinity{}
+		}
+		node := pod.Spec.Affinity.NodeAffinity
+		if node.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			node.RequiredDuringSchedulingIgnoredDuringExecution = &core.NodeSelector{NodeSelectorTerms: []core.NodeSelectorTerm{{}}}
+		}
+		// Intersect every OR term with the cache node, preserving user placement
+		// constraints. The scheduler, not nodeName, still admits the guest.
+		for i := range node.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+			term := &node.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i]
+			term.MatchFields = append(term.MatchFields, core.NodeSelectorRequirement{Key: "metadata.name", Operator: core.NodeSelectorOpIn, Values: []string{vm.Status.Local.NodeName}})
+		}
+	}
 	runner := &pod.Spec.Containers[0]
 	mount := func(name, path string, source core.VolumeSource, readOnly bool) {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: name, VolumeSource: source})
@@ -162,17 +180,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	mount(
 		"working",
 		root,
-		core.VolumeSource{
-			Ephemeral: &core.EphemeralVolumeSource{
-				VolumeClaimTemplate: &core.PersistentVolumeClaimTemplate{Spec: core.PersistentVolumeClaimSpec{
-					StorageClassName: storageClass,
-					AccessModes:      []core.PersistentVolumeAccessMode{core.ReadWriteOnce},
-					Resources: core.VolumeResourceRequirements{
-						Requests: core.ResourceList{core.ResourceStorage: storage},
-					},
-				}},
-			},
-		},
+		core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: claim}},
 		false,
 	)
 	pod.Spec.Volumes = append(

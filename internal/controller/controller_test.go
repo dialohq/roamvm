@@ -48,7 +48,7 @@ func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
 	return &Reconciler{Client: c, Scheme: s, Image: "runner:test"}, vm
 }
 
-func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
+func TestPodUsesSchedulerResourcesAndRetainedRoot(t *testing.T) {
 	r, vm := setup(t)
 	ctx := context.Background()
 	require.NoError(t, r.createPod(ctx, vm))
@@ -72,20 +72,20 @@ func TestPodUsesSchedulerResourcesAndEphemeralRoot(t *testing.T) {
 		if v.HostPath != nil {
 			t.Fatal("hostPath mounted into VM Pod")
 		}
-		if v.PersistentVolumeClaim != nil {
-			t.Fatal("root reused a persistent claim across incarnations")
-		}
 		if v.Name == "working" {
-			working = v.Ephemeral != nil &&
-				v.Ephemeral.VolumeClaimTemplate.Spec.Resources.Requests.Storage().Cmp(resource.MustParse("64Gi")) == 0
+			working = v.PersistentVolumeClaim != nil && v.Ephemeral == nil
 		}
 		if v.Name == "base" {
 			base = v.Image != nil && v.Image.Reference == vm.Spec.Image && v.Image.PullPolicy == core.PullIfNotPresent
 		}
 	}
 	if !working || !base {
-		t.Fatal("missing ephemeral PVC or immutable image volume")
+		t.Fatal("missing retained PVC or immutable image volume")
 	}
+	var pvc core.PersistentVolumeClaim
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: WorkingClaim(&pod)}, &pvc))
+	require.True(t, metav1.IsControlledBy(&pvc, vm))
+	require.EqualValues(t, 64<<30, pvc.Spec.Resources.Requests.Storage().Value())
 	if len(pod.Spec.InitContainers) != 0 || len(pod.Spec.Containers) != 2 || pod.Spec.Containers[1].RestartPolicy == nil ||
 		*pod.Spec.Containers[1].RestartPolicy != core.ContainerRestartPolicyOnFailure {
 		t.Fatal("runtime must survive runner failure and restart independently")

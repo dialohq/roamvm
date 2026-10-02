@@ -16,15 +16,16 @@ func TestResizeWaitsForPVCFilesystem(t *testing.T) {
 	scheme := runtime.NewScheme()
 	core.AddToScheme(scheme)
 	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "default", UID: "pod-id"}}
+	pod.Spec.Volumes = []core.Volume{{Name: "working", VolumeSource: core.VolumeSource{Ephemeral: &core.EphemeralVolumeSource{}}}}
 	vm := &api.VirtualMachine{Spec: api.VirtualMachineSpec{RootDiskSize: "2Gi"}}
 	for _, test := range []struct {
 		name, capacity            string
 		pending, foreign, allowed bool
 	}{
-		{name: "insufficient", capacity: "4Gi"},
-		{name: "node expansion pending", capacity: "5Gi", pending: true},
-		{name: "foreign PVC", capacity: "5Gi", foreign: true},
-		{name: "ready", capacity: "5Gi", allowed: true},
+		{name: "insufficient", capacity: "2Gi"},
+		{name: "node expansion pending", capacity: "3Gi", pending: true},
+		{name: "foreign PVC", capacity: "3Gi", foreign: true},
+		{name: "ready", capacity: "3Gi", allowed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pvc := &core.PersistentVolumeClaim{

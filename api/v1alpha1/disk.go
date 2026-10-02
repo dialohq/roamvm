@@ -22,12 +22,12 @@ func DiskBytes(size string) (int64, error) {
 	return n, nil
 }
 
-// WorkingBytes reserves space for both the live overlay and its compacted
-// checkpoint, plus filesystem/QCOW2 metadata. The immutable base lives elsewhere.
+// WorkingBytes reserves space for the live overlay plus filesystem/QCOW2
+// metadata. Checkpoints stream from that overlay; the immutable base lives elsewhere.
 func WorkingBytes(size string) (int64, error) {
 	n, err := DiskBytes(size)
 	if err != nil || n == 0 {
 		return 0, err
 	}
-	return 2*n + (1 << 30), nil
+	return n + (1 << 30), nil
 }

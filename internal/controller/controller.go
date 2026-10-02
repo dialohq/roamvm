@@ -21,17 +21,21 @@ import (
 )
 
 const (
-	Label                = "vm.roamvm.io/uid"
-	Phase                = "vm.roamvm.io/phase"
-	Stop                 = "vm.roamvm.io/stop"
-	Finalizer            = "vm.roamvm.io/checkpoint"
-	CheckpointAnnotation = "vm.roamvm.io/checkpoint"
-	Message              = "vm.roamvm.io/message"
-	DiskSizeAnnotation   = "vm.roamvm.io/root-disk-size"
-	ResizeAnnotation     = "vm.roamvm.io/resize-error"
-	GenerationAnnotation = "vm.roamvm.io/boot-generation"
-	ExitAnnotation       = "vm.roamvm.io/runner-exit"
-	SpecAnnotation       = "vm.roamvm.io/boot-spec"
+	Label                     = "vm.roamvm.io/uid"
+	Phase                     = "vm.roamvm.io/phase"
+	Stop                      = "vm.roamvm.io/stop"
+	Finalizer                 = "vm.roamvm.io/checkpoint"
+	CheckpointAnnotation      = "vm.roamvm.io/checkpoint"
+	Message                   = "vm.roamvm.io/message"
+	DiskSizeAnnotation        = "vm.roamvm.io/root-disk-size"
+	ResizeAnnotation          = "vm.roamvm.io/resize-error"
+	GenerationAnnotation      = "vm.roamvm.io/boot-generation"
+	ExitAnnotation            = "vm.roamvm.io/runner-exit"
+	SpecAnnotation            = "vm.roamvm.io/boot-spec"
+	LocalStopAnnotation       = "vm.roamvm.io/local-stop"
+	LocalOwnerAnnotation      = "vm.roamvm.io/local-owner"
+	CheckpointReadyAnnotation = "vm.roamvm.io/checkpoint-ready"
+	WorkerLabel               = "vm.roamvm.io/checkpoint-worker"
 )
 
 type Reconciler struct {
@@ -43,7 +47,7 @@ type Reconciler struct {
 }
 
 func (r *Reconciler) Setup(m ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(m).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Complete(r)
+	return ctrl.NewControllerManagedBy(m).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Owns(&core.PersistentVolumeClaim{}).Complete(r)
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -72,13 +76,65 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err := r.List(ctx, &pods, client.InNamespace(vm.Namespace), client.MatchingLabels{Label: string(vm.UID)}); err != nil {
 		return ctrl.Result{}, err
 	}
-	if len(pods.Items) > 1 {
+	var runners, workers []core.Pod
+	for i := range pods.Items {
+		if !metav1.IsControlledBy(&pods.Items[i], &vm) {
+			return r.status(ctx, &vm, "Blocked", "Pod is not owned by this VM", nil)
+		}
+		if pods.Items[i].Labels[WorkerLabel] == "true" {
+			workers = append(workers, pods.Items[i])
+		} else {
+			runners = append(runners, pods.Items[i])
+		}
+	}
+	// Accept completion only from the worker for the currently retained owner.
+	for i := range workers {
+		worker := &workers[i]
+		if vm.Status.Local != nil && worker.Annotations[LocalOwnerAnnotation] == vm.Status.Local.Owner &&
+			WorkingClaim(worker) == vm.Status.Local.ClaimName && worker.Spec.NodeName == vm.Status.Local.NodeName &&
+			worker.Annotations[CheckpointReadyAnnotation] == "true" {
+			var cp api.Checkpoint
+			if err := json.Unmarshal([]byte(worker.Annotations[CheckpointAnnotation]), &cp); err != nil {
+				return ctrl.Result{}, err
+			}
+			if !vm.Status.Local.Durable || vm.Status.Checkpoint == nil || !equality.Semantic.DeepEqual(*vm.Status.Checkpoint, cp) {
+				vm.Status.Local.Durable = true
+				vm.Status.Checkpoint = &cp
+				if err := r.Status().Update(ctx, &vm); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+	}
+	if len(runners) > 1 {
 		return r.status(ctx, &vm, "Blocked", "multiple runner Pods; refusing to select an owner", nil)
 	}
 	stopping := vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil
-	if len(pods.Items) == 0 {
+	for i := range workers {
+		if vm.Status.Local == nil || workers[i].Annotations[LocalOwnerAnnotation] != vm.Status.Local.Owner || vm.Status.Local.Durable {
+			if workers[i].DeletionTimestamp == nil {
+				if err := client.IgnoreNotFound(r.Delete(ctx, &workers[i])); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+		}
+	}
+	if len(runners) == 0 {
+		// An older cached checkpoint must never disguise a vanished active VM.
+		if vm.Status.PodName != "" && vm.Status.Phase != "" && vm.Status.Phase != "Pending" && vm.Status.Phase != "Stopped" {
+			return r.status(ctx, &vm, "RecoveryRequired", "runner vanished; fence its runtime before recovery", nil)
+		}
+		if vm.Status.Local != nil && !vm.Status.Local.Durable {
+			if err := r.createWorker(ctx, &vm); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if stopping {
-			if vm.Status.Phase != "" && vm.Status.Phase != "Stopped" {
+			if vm.Status.Local != nil && !vm.Status.Local.Durable {
+				return r.status(ctx, &vm, "Stopped", vm.Status.Message, nil)
+			}
+			if vm.Status.Local == nil && vm.Status.Phase != "" && vm.Status.Phase != "Stopped" {
 				return r.status(
 					ctx,
 					&vm,
@@ -88,6 +144,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				)
 			}
 			if vm.DeletionTimestamp != nil {
+				for i := range workers {
+					if err := client.IgnoreNotFound(r.Delete(ctx, &workers[i])); err != nil {
+						return ctrl.Result{}, err
+					}
+				}
+				if len(workers) > 0 {
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				if vm.Status.Local != nil {
+					pvc := &core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: vm.Status.Local.ClaimName, Namespace: vm.Namespace}}
+					if err := client.IgnoreNotFound(r.Delete(ctx, pvc)); err != nil {
+						return ctrl.Result{}, err
+					}
+				}
 				before := vm.DeepCopy()
 				controllerutil.RemoveFinalizer(&vm, Finalizer)
 				return ctrl.Result{}, r.Patch(
@@ -97,6 +167,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				)
 			}
 			return r.status(ctx, &vm, "Stopped", vm.Status.Message, nil)
+		}
+		if vm.Status.Local != nil {
+			unavailable, err := r.localNodeUnavailable(ctx, vm.Status.Local.NodeName)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			var pvc core.PersistentVolumeClaim
+			if err := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.Local.ClaimName}, &pvc); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+				unavailable = true
+			} else if pvc.DeletionTimestamp != nil {
+				unavailable = true
+			}
+			if unavailable {
+				if !vm.Status.Local.Durable {
+					return r.status(ctx, &vm, "Pending", "local checkpoint unavailable; waiting for durable checkpoint or explicit recovery", nil)
+				}
+				if err := r.discardLocal(ctx, &vm); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 		}
 		if vm.Status.Phase != "" && vm.Status.Phase != "Stopped" && vm.Status.Phase != "Pending" {
 			return r.status(
@@ -130,17 +224,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	pod := &pods.Items[0]
+	pod := &runners[0]
 	// Never trust a label alone to establish ownership.
 	if !metav1.IsControlledBy(pod, &vm) {
 		return r.status(ctx, &vm, "Blocked", "runner is not owned by this VM", nil)
 	}
+	if !stopping && vm.Status.Local != nil && pod.Spec.NodeName == "" && podUnschedulable(pod) {
+		if !vm.Status.Local.Durable {
+			if err := r.createWorker(ctx, &vm); err != nil {
+				return ctrl.Result{}, err
+			}
+			return r.status(ctx, &vm, "Pending", "local restart is unschedulable; waiting for durable checkpoint", pod)
+		}
+		if err := client.IgnoreNotFound(r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID, ResourceVersion: &pod.ResourceVersion})); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Deletion prevents a scheduler bind. Refetch before removing the
+		// finalizer; never authorize cache deletion from a stale unbound Pod.
+		if err := r.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+			return ctrl.Result{}, err
+		}
+		if _, err := r.releasePod(ctx, pod); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.discardLocal(ctx, &vm); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	// An unassigned Pod cannot have acquired state. Delete with an RV
 	// precondition so a concurrent scheduler binding invalidates this decision.
-	if stopping && pod.Spec.NodeName == "" {
+	if (stopping || pod.DeletionTimestamp != nil) && pod.Spec.NodeName == "" {
 		if pod.DeletionTimestamp == nil {
 			err := r.Delete(ctx, pod, client.Preconditions{UID: &pod.UID, ResourceVersion: &pod.ResourceVersion})
 			return ctrl.Result{RequeueAfter: time.Second}, client.IgnoreNotFound(err)
+		}
+		// Fresh explicit claims no longer have Pod garbage collection. A
+		// cancelled cached restart must keep its previous stopped disk, though.
+		if claim := WorkingClaim(pod); claim != "" && (vm.Status.Local == nil || vm.Status.Local.ClaimName != claim) {
+			var pvc core.PersistentVolumeClaim
+			if err := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: claim}, &pvc); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, err
+				}
+			} else if metav1.IsControlledBy(&pvc, &vm) {
+				if err := client.IgnoreNotFound(r.Delete(ctx, &pvc, client.Preconditions{UID: &pvc.UID, ResourceVersion: &pvc.ResourceVersion})); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 		}
 		if _, err := r.status(ctx, &vm, "Stopped", "Cancelled before scheduling", nil); err != nil {
 			return ctrl.Result{}, err
@@ -148,6 +279,36 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return r.releasePod(ctx, pod)
 	}
 	if pod.Annotations[Phase] == "Stopped" {
+		if owner := pod.Annotations[LocalStopAnnotation]; owner != "" {
+			if owner != string(pod.UID) {
+				return r.status(ctx, &vm, "RecoveryRequired", "local stop owner does not match runner", pod)
+			}
+			if vm.Spec.PowerState != "Stopped" && (pod.Annotations[GenerationAnnotation] == "" || pod.Annotations[GenerationAnnotation] == strconv.FormatInt(vm.Generation, 10)) {
+				before := vm.DeepCopy()
+				vm.Spec.PowerState = "Stopped"
+				return ctrl.Result{}, r.Patch(ctx, &vm, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
+			}
+			local := &api.LocalCheckpoint{ClaimName: WorkingClaim(pod), NodeName: pod.Spec.NodeName, Owner: owner}
+			if vm.Status.Local == nil || vm.Status.Local.Owner != owner {
+				vm.Status.Local = local
+				if err := r.Status().Update(ctx, &vm); err != nil {
+					return ctrl.Result{}, err
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if _, err := r.status(ctx, &vm, "Stopped", pod.Annotations[Message], nil); err != nil {
+				return ctrl.Result{}, err
+			}
+			if pod.Status.Phase != core.PodSucceeded && pod.Status.Phase != core.PodFailed {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if !vm.Status.Local.Durable {
+				if err := r.createWorker(ctx, &vm); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return r.releasePod(ctx, pod)
+		}
 		if pod.Status.Phase != core.PodSucceeded && pod.Status.Phase != core.PodFailed {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
@@ -178,6 +339,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				return ctrl.Result{}, err
 			}
 		}
+	}
+	if pod.Spec.NodeName != "" && len(workers) > 0 {
+		for i := range workers {
+			if workers[i].DeletionTimestamp == nil {
+				if err := client.IgnoreNotFound(r.Delete(ctx, &workers[i])); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	phase := pod.Annotations[Phase]
 	message := pod.Annotations[Message]
@@ -257,10 +428,17 @@ func (r *Reconciler) status(
 	if phase == "Stopped" {
 		stopped = metav1.ConditionTrue
 	}
+	checkpointReady := metav1.ConditionFalse
+	if phase == "Stopped" && vm.Status.Local != nil && vm.Status.Local.Durable {
+		checkpointReady = metav1.ConditionTrue
+	}
+	if phase == "Stopped" && vm.Status.Local == nil && vm.Status.Checkpoint != nil {
+		checkpointReady = metav1.ConditionTrue
+	}
 	for _, condition := range []struct {
 		name   string
 		status metav1.ConditionStatus
-	}{{"Ready", ready}, {"Stopped", stopped}} {
+	}{{"Ready", ready}, {"Stopped", stopped}, {"CheckpointReady", checkpointReady}} {
 		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 			Type: condition.name, Status: condition.status, Reason: phase,
 			Message: message, ObservedGeneration: vm.Generation,

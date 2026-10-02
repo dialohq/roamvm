@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/dialohq/roamvm/internal/controller"
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,11 +21,11 @@ func (s *Server) resizeTarget(ctx context.Context, pod *core.Pod, vm *api.Virtua
 		return 0, ""
 	}
 	var pvc core.PersistentVolumeClaim
-	if err = s.Client.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: pod.Name + "-working"}, &pvc); err != nil {
+	if err = s.Client.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: controller.WorkingClaim(pod)}, &pvc); err != nil {
 		return 0, err.Error()
 	}
-	if !metav1.IsControlledBy(&pvc, pod) {
-		return 0, "working PVC is not owned by runner"
+	if !metav1.IsControlledBy(&pvc, pod) && !metav1.IsControlledBy(&pvc, vm) {
+		return 0, "working PVC is not owned by VM or legacy runner"
 	}
 	capacity := pvc.Status.Capacity[core.ResourceStorage]
 	required, _ := api.WorkingBytes(vm.Spec.RootDiskSize)

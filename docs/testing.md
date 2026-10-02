@@ -5,7 +5,7 @@ Kubernetes cluster, Kustomize for installation, Nix for the guest image, and Go'
 standard test and benchmark runners. It requires a Linux x86-64 host with real
 `/dev/kvm`; VM execution is never mocked.
 
-VM Pods use read-only image volumes and generic ephemeral PVCs from kind's
+VM Pods use read-only image volumes and retained VM-owned PVCs from kind's
 local-path storage class. Production uses OpenEBS thin CSI storage. The device
 plugin runs as a systemd service inside each kind worker, matching its node-level
 installation in production. The small install script only connects those pieces;
@@ -109,7 +109,11 @@ builds the container. KVM tests require the local lab.
   failed/corrupt uploads, lost commit response, cleanup failures and delayed cleanup
   racing with a newer stop, corrupt restore, old-epoch fencing,
   Pod-bound authentication and Kubernetes resource accounting.
-- Actual qemu-img tests: writable overlay compaction/rebase preserves both data
+- Async stop tests: stop without an object store, independently retried worker,
+  cancellation and exclusive disk locking, zero-download local resume, stale
+  worker fencing, durable-only remote fallback and deletion. The local-resume
+  tests use real QCOW2 files and verify data plus explicit zero-overwrites.
+- Actual qemu-img tests: writable overlay validation/rebase preserves both data
   and zero-overwrites, and leaves its base unchanged.
 - Mounted-image validation: artifact symlinks, unexpected files, invalid boot
   manifests, oversized/empty disks and QCOW2 backing references are rejected.
@@ -124,7 +128,7 @@ builds the container. KVM tests require the local lab.
   Every successful stop asserts that exactly the current checkpoint remains in S3.
 - Host filesystem exhaustion: a real KVM guest fills a disposable 64 MiB ext4
   filesystem, pauses with `io-error`/`nospace`, resumes after online expansion,
-  and verifies a 96 MiB payload before and after checkpoint compaction and reboot.
+  and verifies a 96 MiB payload before and after clean shutdown and reboot.
   The test also checks the effective writable file cache mode through QMP. It
   does not emulate thin-pool metadata exhaustion or physical device failure.
 - Worker-container failure: last checkpoint retained, ownership never expires,

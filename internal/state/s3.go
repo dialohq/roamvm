@@ -111,7 +111,9 @@ func (s *S3) Put(ctx context.Context, key string, body io.ReadSeeker, size int64
 	complete := false
 	defer func() {
 		if !complete {
-			cleanup, cancel := context.WithTimeout(context.Background(), 30_000_000_000)
+			// Leave time to exit within the checkpoint worker's five-second
+			// grace period when a local restart cancels its upload.
+			cleanup, cancel := context.WithTimeout(context.Background(), 3_000_000_000)
 			defer cancel()
 			_, _ = s.Client.AbortMultipartUpload(
 				cleanup,
