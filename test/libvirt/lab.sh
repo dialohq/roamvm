@@ -37,6 +37,10 @@ case "${1:-}" in
     done
     for i in 0 1 2; do
       name=${names[$i]}
+      if ! ip link show "rvm-tap$i" >/dev/null 2>&1; then
+        sudo ip tuntap add "rvm-tap$i" mode tap user "$(id -u)"
+        sudo ip link set "rvm-tap$i" master rvm-lab up
+      fi
       if virsh dominfo "$name" >/dev/null 2>&1; then
         test -f "$lab/$name.xml" || { echo "Refusing existing domain $name" >&2; exit 1; }
         if [[ $(virsh domstate "$name") == 'shut off' ]]; then virsh start "$name"; fi
@@ -49,10 +53,6 @@ case "${1:-}" in
         mkfs.ext4 -q -F "$lab/$name.raw.partial"
         qemu-img convert -f raw -O qcow2 -c "$lab/$name.raw.partial" "$lab/$name.qcow2"
         rm "$lab/$name.raw.partial"
-      fi
-      if ! ip link show "rvm-tap$i" >/dev/null 2>&1; then
-        sudo ip tuntap add "rvm-tap$i" mode tap user "$(id -u)"
-        sudo ip link set "rvm-tap$i" master rvm-lab up
       fi
       memory=3072
       if [[ $i == 0 ]]; then memory=2048; fi

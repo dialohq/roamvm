@@ -2,7 +2,10 @@
 set -euo pipefail
 export KUBECONFIG="$PWD/.lab/libvirt/kubeconfig"
 test "$(kubectl config current-context)" = roamvm-libvirt
-# K3s restores its bundled v0.0.36 on restart; pin before waiting for readiness.
+# Take over the already-provisioned addon. Otherwise K3s can race our image pin
+# during startup. A .skip file retains resources but stops manifest reapplication.
+kubectl -n kube-system get deployment/local-path-provisioner >/dev/null
+bash test/libvirt/lab.sh ssh roamvm-libvirt-control-plane 'set -e; skip=/var/lib/rancher/k3s/server/manifests/local-storage.yaml.skip; if ! test -f "$skip"; then touch "$skip"; systemctl restart k3s; fi'
 kubectl -n kube-system set image deployment/local-path-provisioner local-path-provisioner=rancher/local-path-provisioner:v0.0.37
 # Keep cluster services off workers that the failure tests deliberately power off.
 for deployment in coredns local-path-provisioner metrics-server; do

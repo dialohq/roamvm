@@ -66,7 +66,7 @@ lab-down:
 	kind delete cluster --name roamvm-test
 	$(COMPOSE) down
 
-.PHONY: libvirt-up libvirt-install libvirt-fixtures libvirt-down
+.PHONY: libvirt-up libvirt-install libvirt-fixtures libvirt-down libvirt-freeze libvirt-reset libvirt-scenario libvirt-scenarios
 libvirt-up:
 	bash test/libvirt/lab.sh up
 
@@ -81,3 +81,17 @@ libvirt-fixtures: build
 
 libvirt-down:
 	bash test/libvirt/lab.sh down
+
+libvirt-freeze:
+	bash test/libvirt/scenario.sh freeze
+
+libvirt-reset:
+	bash test/libvirt/scenario.sh reset
+
+libvirt-scenario:
+	bash test/libvirt/scenario.sh run "$(SCENARIO)"
+
+libvirt-scenarios:
+	set -e; for scenario in crash lifecycle network cpu resize generations; do \
+		bash test/libvirt/scenario.sh run $$scenario; \
+	done
