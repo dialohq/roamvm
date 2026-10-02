@@ -60,6 +60,49 @@ private subnet `192.168.124.0/24`. Reserve that subnet and the `rvm-lab` bridge
 for this lab. The VMs can read this checkout and the host Nix store. Do not expose
 its unauthenticated registry or test MinIO outside the isolated bridge.
 
+### Run isolated scenarios from a frozen baseline
+
+After installing the lab and publishing the desired fixtures, remove any test
+VMs and freeze the prepared cluster once:
+
+```sh
+make libvirt-freeze
+make libvirt-scenario SCENARIO=lifecycle
+make libvirt-scenario SCENARIO=network
+# Or run every scenario, resetting the entire cluster before each:
+make libvirt-scenarios
+```
+
+Scenarios are `crash`, `lifecycle`, `network`, `cpu`, `resize`, and `generations`.
+The last two require `make libvirt-fixtures` **before freezing**; missing fixtures
+cause an error rather than a silently skipped test. These run the existing Go
+E2E tests, including real node failure and NetworkPolicy enforcement.
+
+The baseline is a **cold disk snapshot**, not suspended RAM. Freezing stops K3s,
+MinIO and the registry, flushes the disks, and stops all three domains. It moves
+their QCOW2 files into `.lab/libvirt/baseline` and marks them read-only; fresh
+copy-on-write overlays avoid another full disk copy. Filesystems may replay their
+journals on boot. Each reset restores all three disks together, including the
+Kubernetes database, object store, registry, kubelet settings and local PVCs.
+Captured domain definitions and NixOS store roots keep the node systems fixed.
+The checkout remains live: each scenario builds/installs the **current RoamVM**
+before testing it against that infrastructure baseline.
+
+`make libvirt-reset` restores and boots the baseline without running a test.
+**Reset discards all changes in the working lab**, including failed-test VMs.
+A scenario leaves its working disks available for debugging until the next
+reset; logs, revision, tracked diff and exit status remain under
+`.lab/libvirt/runs`. The scenario loop stops on failure. Baseline/scenario
+operations are locked against each other; do not run manual lab commands or
+other tests concurrently.
+
+Keep the baseline at its original path: overlays contain absolute backing paths.
+It is local to this checkout/host, including its SSH keys and private network,
+not a portable VM artifact. Freezing refuses to overwrite an existing baseline.
+To change the node OS or fixture set, take the lab down, discard the disposable
+`.lab/libvirt` directory, and prepare a new lab and baseline. Only scripts and
+scenario definitions belong in Git; generated VM disks and run logs do not.
+
 ## Run the kind lab
 
 Install Nix with flakes enabled and a working Docker daemon, then:
