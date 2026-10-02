@@ -2,14 +2,13 @@
 set -euo pipefail
 export KUBECONFIG="$PWD/.lab/libvirt/kubeconfig"
 test "$(kubectl config current-context)" = roamvm-libvirt
+# K3s restores its bundled v0.0.36 on restart; pin before waiting for readiness.
+kubectl -n kube-system set image deployment/local-path-provisioner local-path-provisioner=rancher/local-path-provisioner:v0.0.37
 # Keep cluster services off workers that the failure tests deliberately power off.
 for deployment in coredns local-path-provisioner metrics-server; do
   kubectl -n kube-system patch deployment "$deployment" --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"roamvm-libvirt-control-plane"}}}}}'
   kubectl -n kube-system rollout status deployment/"$deployment" --timeout=180s
 done
-# K3s 1.35.7 bundles v0.0.36; pin the newer provisioner used by this lab.
-kubectl -n kube-system set image deployment/local-path-provisioner local-path-provisioner=rancher/local-path-provisioner:v0.0.37
-kubectl -n kube-system rollout status deployment/local-path-provisioner --timeout=180s
 nix build .#libvirt-runtime --out-link .lab/libvirt/runtime.tar.gz
 nix build .#test-guest --out-link .lab/libvirt/guest.tar.gz
 for node in roamvm-libvirt-control-plane roamvm-libvirt-worker roamvm-libvirt-worker2; do

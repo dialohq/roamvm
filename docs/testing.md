@@ -49,7 +49,8 @@ kubeconfig and fixture references live in `.lab/libvirt`. Inspect a node with
 
 `make libvirt-down` powers off and undefines only these lab domains and removes
 their TAPs/bridge/firewall rules; it retains disks and keys. `make libvirt-up`
-reuses them. For NixOS configuration changes, take the lab down and up again;
+reuses them. Run `make libvirt-install` after each startup to reapply the pinned
+Kubernetes settings. For NixOS configuration changes, take the lab down and up again;
 for runtime changes, run `make build libvirt-install`. Do not run two suites
 against the same lab concurrently.
 
