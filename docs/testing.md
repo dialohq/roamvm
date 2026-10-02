@@ -84,17 +84,32 @@ E2E tests, including real node failure and NetworkPolicy enforcement.
 
 **Warm snapshots save RAM as well as disks.** `libvirt-freeze-warm` verifies the
 running NixOS configurations, builds/installs current RoamVM, restarts the device
-plugins and checks service readiness. It pauses all three nodes before saving
-their memory in parallel, retains read-only disks under `.lab/libvirt/warm`, and
-creates disposable working overlays. Free-page reporting and dropping guest page
-caches reduce the saved memory size; save files are gzip-compressed. Existing
-cold baselines remain unchanged, including any backing files used by warm disks.
+plugins and checks service readiness. It creates a stopped probe VM, waits for
+reconciliation, then deletes it before capture; a process health check alone
+does not prove the controller has acquired leadership. It pauses all nodes before
+saving their memory in parallel, retains read-only disks under `.lab/libvirt/warm`, and
+creates disposable working overlays. Free-page reporting and sparse mapped-RAM
+save files avoid copying unused memory; two parallel channels per node avoid
+serial decompression on restore. Existing cold baselines remain unchanged,
+including any backing files used by warm disks.
+
+Save files default to `.lab/libvirt/warm`. For a RAM-backed baseline, use
+`ROAMVM_WARM_MEMORY_DIR=/dev/shm/roamvm-warm make libvirt-freeze-warm`.
+The warm directory then contains symlinks to those files. Allow several GiB of
+additional host RAM; these files disappear on host reboot. A missing save file
+rejects a warm reset before touching running nodes; use `libvirt-reset-cold` to
+recover. Remove the external memory directory too when refreshing a baseline.
 
 `libvirt-reset` and scenarios prefer the warm baseline when one exists. They
 restore all RAM images paused, then resume the nodes together and check live
-containerd/CNI, Kubernetes API, controller rollout, MinIO and registry readiness.
+containerd/CNI, Kubernetes API, controller, MinIO and registry readiness.
 There is no boot, build, image import or controller restart on this path. The
-snapshot is tied to its host, QEMU/virtiofs configuration, runtime source and
+guest agent sets the restored wall clock from host time and runs the standalone
+CRI client on every node. QEMU's host-clock RTC already advances while saved;
+avoiding a redundant hardware-clock write reduces the readiness overhead.
+The controller check calls its live readiness endpoint through the API proxy,
+not the restored Kubernetes pod status.
+The snapshot is tied to its host, QEMU/virtiofs configuration, runtime source and
 mounted binary/key files. Changes are rejected **before discarding working
 disks**, rather than silently testing stale processes. Host files shared through
 virtiofs are not snapshotted; do not modify them during a capture or restore.
@@ -132,11 +147,14 @@ already-built runtime fell from 79 seconds (one run) to 44 seconds median
 containerd readiness, image smoke tests and controller rollout, but not source
 recompilation or the scenario itself; it is not a guest-VM startup benchmark.
 
-With RAM snapshots, three full resets on that runner took **7.73, 7.74 and
-8.06 seconds**, including the live readiness checks. Recreating the bridge/TAPs
-after `libvirt-down` took 7.21 seconds. A saved-memory page-cache eviction run
-took 9.14 seconds before the concurrent-shutdown optimization. The three
-compressed RAM files occupy about 963 MiB in addition to the disk baseline.
+With gzip RAM snapshots, three full resets on that runner took **7.73, 7.74 and
+8.06 seconds**. Sparse RAM snapshots in `/dev/shm`, with guest-agent readiness
+checks, reduced five consecutive resets to **2.83, 3.06, 3.20, 3.28 and 3.22
+seconds** (3.20-second median). This includes stopping existing domains,
+resetting disks, restoring all three nodes and live readiness checks. It does
+**not** meet a sub-2-second full-reset target. RAM loading alone takes about
+0.8 seconds; that is not the end-to-end result. These are RAM-backed timings,
+not a claim about cold disk reads or the default on-disk memory directory.
 These timings require an already-captured snapshot matching the checkout;
 building code and capturing a new baseline are separate preparation steps.
 

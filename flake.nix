@@ -37,7 +37,7 @@
       config.Env = ["PATH=/bin"];
     };
     devShells.x86_64-linux.default = pkgs.mkShell {
-      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck libvirt virtiofsd openssh iproute2 iptables e2fsprogs minio-client util-linux curl];
+      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck libvirt virtiofsd openssh iproute2 iptables e2fsprogs minio-client util-linux curl jq];
     };
   };
 }
