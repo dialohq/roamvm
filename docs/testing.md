@@ -11,7 +11,55 @@ plugin runs as a systemd service inside each kind worker, matching its node-leve
 installation in production. The small install script only connects those pieces;
 it does not implement a provisioner or test runner.
 
-## Run the lab
+## Run native NixOS nodes under libvirt
+
+`test/libvirt/node.nix` declares three NixOS machines: a K3s control plane with
+registry/MinIO, and two workers running the device plugin as a systemd service.
+`lab.sh` defines their libvirt domains, disks and isolated bridge; Kubernetes runs
+directly on NixOS, not inside kind or Docker. The runtime image is also built with
+Nix and imported into containerd. Dependencies are pinned by `flake.lock`.
+DNS, storage provisioning, metrics and the RoamVM controller stay on the control
+plane so deliberately powering off a worker does not remove cluster services.
+
+Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
+disk space (64 GiB recommended for all fixtures). The domains reserve 8 GiB RAM
+in total, use sparse 16 GiB root disks and share the host Nix store read-only via
+9p. Do not put all three disks in tmpfs: image unpacking competes with guest RAM.
+
+```sh
+nix develop
+make libvirt-up libvirt-install
+source test/libvirt/env
+make test
+make libvirt-fixtures
+export ROAMVM_TEST_RESIZE_IMAGE=$(cat .lab/libvirt/nixos-ref)
+export ROAMVM_TEST_GENERATION_IMAGE=$(cat .lab/libvirt/generation-ref)
+export ROAMVM_TEST_FIRMWARE_IMAGE=$(cat .lab/libvirt/firmware-ref)
+ROAMVM_TEST_NETWORK_POLICY=1 make integration
+```
+
+Omit `libvirt-fixtures` and those three exports for a smaller run; resize and
+generation tests will explicitly skip. The full run needs all three fixtures.
+
+The environment enables the destructive **disposable worker** failure test.
+The CPU test pins the worker's vCPU threads and restores their original affinity.
+Lab configuration lives in `test/libvirt`; generated XML, disks, unique SSH keys,
+kubeconfig and fixture references live in `.lab/libvirt`. Inspect a node with
+`bash test/libvirt/lab.sh ssh roamvm-libvirt-worker systemctl --failed`.
+
+`make libvirt-down` powers off and undefines only these lab domains and removes
+their TAPs/bridge/firewall rules; it retains disks and keys. `make libvirt-up`
+reuses them. For NixOS configuration changes, take the lab down and up again;
+for runtime changes, run `make build libvirt-install`. Do not run two suites
+against the same lab concurrently.
+
+This is a trusted local test fixture, not a production cluster. It uses public
+test credentials, password-disabled root SSH with a generated key, and the
+private subnet `192.168.124.0/24`. Reserve that subnet and the `rvm-lab` bridge
+for this lab. The VMs can read this checkout and the host Nix store. Do not expose
+its unauthenticated registry or test MinIO outside the isolated bridge.
+
+## Run the kind lab
 
 Install Nix with flakes enabled and a working Docker daemon, then:
 
