@@ -24,7 +24,9 @@ plane so deliberately powering off a worker does not remove cluster services.
 Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
 disk space (64 GiB recommended for all fixtures). The domains reserve 8 GiB RAM
 in total, use sparse 16 GiB root disks and share the host Nix store read-only via
-9p. Do not put all three disks in tmpfs: image unpacking competes with guest RAM.
+virtiofs. Do not put all three disks in tmpfs: image unpacking competes with guest
+RAM. Session libvirt needs working `newuidmap`/`newgidmap` helpers and subordinate
+UID/GID ranges. The Nix wrapper includes NixOS's `/run/wrappers/bin` on their PATH.
 
 ```sh
 nix develop
@@ -66,7 +68,9 @@ After installing the lab and publishing the desired fixtures, remove any test
 VMs and freeze the prepared cluster once:
 
 ```sh
-make libvirt-freeze
+make libvirt-freeze              # Optional cold fallback; leaves nodes stopped
+make libvirt-reset-cold
+make libvirt-freeze-warm         # Capture a fully prepared, running cluster
 make libvirt-scenario SCENARIO=lifecycle
 make libvirt-scenario SCENARIO=network
 # Or run every scenario, resetting the entire cluster before each:
@@ -78,15 +82,39 @@ The last two require `make libvirt-fixtures` **before freezing**; missing fixtur
 cause an error rather than a silently skipped test. These run the existing Go
 E2E tests, including real node failure and NetworkPolicy enforcement.
 
-The baseline is a **cold disk snapshot**, not suspended RAM. Freezing stops K3s,
+**Warm snapshots save RAM as well as disks.** `libvirt-freeze-warm` verifies the
+running NixOS configurations, builds/installs current RoamVM, restarts the device
+plugins and checks service readiness. It pauses all three nodes before saving
+their memory in parallel, retains read-only disks under `.lab/libvirt/warm`, and
+creates disposable working overlays. Free-page reporting and dropping guest page
+caches reduce the saved memory size; save files are gzip-compressed. Existing
+cold baselines remain unchanged, including any backing files used by warm disks.
+
+`libvirt-reset` and scenarios prefer the warm baseline when one exists. They
+restore all RAM images paused, then resume the nodes together and check live
+containerd/CNI, Kubernetes API, controller rollout, MinIO and registry readiness.
+There is no boot, build, image import or controller restart on this path. The
+snapshot is tied to its host, QEMU/virtiofs configuration, runtime source and
+mounted binary/key files. Changes are rejected **before discarding working
+disks**, rather than silently testing stale processes. Host files shared through
+virtiofs are not snapshotted; do not modify them during a capture or restore.
+
+Use `make libvirt-reset-cold` to bypass a warm snapshot. To refresh it after code
+changes, restore the cold baseline first, take the lab down, remove only
+`.lab/libvirt/warm`, then run `make libvirt-up libvirt-freeze-warm`. Never remove a
+baseline while working disks still reference it. Without a cold baseline,
+recreate the disposable lab instead. Existing 9p lab domains must be recreated
+with `make libvirt-down libvirt-up` before capturing RAM.
+
+`libvirt-freeze` creates a **cold disk snapshot**. It stops K3s,
 MinIO and the registry, flushes the disks, and stops all three domains. It moves
 their QCOW2 files into `.lab/libvirt/baseline` and marks them read-only; fresh
 copy-on-write overlays avoid another full disk copy. Filesystems may replay their
 journals on boot. Each reset restores all three disks together, including the
 Kubernetes database, object store, registry, kubelet settings and local PVCs.
 Captured domain definitions and NixOS store roots keep the node systems fixed.
-The checkout remains live: each scenario builds/installs the **current RoamVM**
-before testing it against that infrastructure baseline.
+With a cold baseline, each scenario builds/installs the **current RoamVM** before
+testing it against that infrastructure baseline.
 
 Freeze after `make build libvirt-install` and fixture publication have completed,
 so the baseline already contains unpacked runtime images and the pinned K3s
@@ -104,11 +132,15 @@ already-built runtime fell from 79 seconds (one run) to 44 seconds median
 containerd readiness, image smoke tests and controller rollout, but not source
 recompilation or the scenario itself; it is not a guest-VM startup benchmark.
 
-Saving a fully booted RAM snapshot is not supported by this lab's current 9p
-mounts: QEMU rejects migration/save while the Nix store and checkout are mounted.
-A later disk freeze preserves completed setup but does not eliminate cold boot.
+With RAM snapshots, three full resets on that runner took **7.73, 7.74 and
+8.06 seconds**, including the live readiness checks. Recreating the bridge/TAPs
+after `libvirt-down` took 7.21 seconds. A saved-memory page-cache eviction run
+took 9.14 seconds before the concurrent-shutdown optimization. The three
+compressed RAM files occupy about 963 MiB in addition to the disk baseline.
+These timings require an already-captured snapshot matching the checkout;
+building code and capturing a new baseline are separate preparation steps.
 
-`make libvirt-reset` restores and boots the baseline without running a test.
+`make libvirt-reset` restores the preferred baseline without running a test.
 **Reset discards all changes in the working lab**, including failed-test VMs.
 A scenario leaves its working disks available for debugging until the next
 reset; logs, revision, tracked diff and exit status remain under

@@ -7,7 +7,29 @@ lab="$root/.lab/libvirt"
 names=(roamvm-libvirt-control-plane roamvm-libvirt-worker roamvm-libvirt-worker2)
 ips=(192.168.124.10 192.168.124.11 192.168.124.12)
 ssh_options=(-i "$lab/id_ed25519" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$lab/known_hosts" -o ConnectTimeout=5)
+setup_network() {
+  # Shared by cold boots and RAM restores; no builds or guest startup here.
+  if ! ip link show rvm-lab >/dev/null 2>&1; then
+    sudo ip link add rvm-lab type bridge
+    sudo ip addr add 192.168.124.1/24 dev rvm-lab
+    sudo ip link set rvm-lab up
+  fi
+  sudo sysctl -w net.ipv4.ip_forward=1
+  sudo iptables -t nat -C POSTROUTING -s 192.168.124.0/24 ! -d 192.168.124.0/24 -j MASQUERADE 2>/dev/null ||
+    sudo iptables -t nat -A POSTROUTING -s 192.168.124.0/24 ! -d 192.168.124.0/24 -j MASQUERADE
+  for direction in -i -o; do
+    sudo iptables -C FORWARD "$direction" rvm-lab -j ACCEPT 2>/dev/null ||
+      sudo iptables -I FORWARD "$direction" rvm-lab -j ACCEPT
+  done
+  for i in 0 1 2; do
+    if ! ip link show "rvm-tap$i" >/dev/null 2>&1; then
+      sudo ip tuntap add "rvm-tap$i" mode tap user "$(id -u)"
+      sudo ip link set "rvm-tap$i" master rvm-lab up
+    fi
+  done
+}
 case "${1:-}" in
+  network) setup_network ;;
   ssh)
     for i in 0 1 2; do
       if [[ "$2" == "${names[$i]}" ]]; then
@@ -21,26 +43,9 @@ case "${1:-}" in
     mkdir -p "$lab"
     if [[ ! -f "$lab/id_ed25519" ]]; then ssh-keygen -q -t ed25519 -N '' -f "$lab/id_ed25519"; fi
     make build
-    # A private bridge and pre-created TAPs let unprivileged session libvirt
-    # own the VMs without a privileged libvirt daemon or bridge helper.
-    if ! ip link show rvm-lab >/dev/null 2>&1; then
-      sudo ip link add rvm-lab type bridge
-      sudo ip addr add 192.168.124.1/24 dev rvm-lab
-      sudo ip link set rvm-lab up
-    fi
-    sudo sysctl -w net.ipv4.ip_forward=1
-    sudo iptables -t nat -C POSTROUTING -s 192.168.124.0/24 ! -d 192.168.124.0/24 -j MASQUERADE 2>/dev/null ||
-      sudo iptables -t nat -A POSTROUTING -s 192.168.124.0/24 ! -d 192.168.124.0/24 -j MASQUERADE
-    for direction in -i -o; do
-      sudo iptables -C FORWARD "$direction" rvm-lab -j ACCEPT 2>/dev/null ||
-        sudo iptables -I FORWARD "$direction" rvm-lab -j ACCEPT
-    done
+    setup_network
     for i in 0 1 2; do
       name=${names[$i]}
-      if ! ip link show "rvm-tap$i" >/dev/null 2>&1; then
-        sudo ip tuntap add "rvm-tap$i" mode tap user "$(id -u)"
-        sudo ip link set "rvm-tap$i" master rvm-lab up
-      fi
       if virsh dominfo "$name" >/dev/null 2>&1; then
         test -f "$lab/$name.xml" || { echo "Refusing existing domain $name" >&2; exit 1; }
         if [[ $(virsh domstate "$name") == 'shut off' ]]; then virsh start "$name"; fi
@@ -60,6 +65,7 @@ case "${1:-}" in
 <domain type='kvm'>
   <name>$name</name>
   <memory unit='MiB'>$memory</memory><vcpu>4</vcpu>
+  <memoryBacking><source type='memfd'/><access mode='shared'/></memoryBacking>
   <cpu mode='host-passthrough'/>
   <os><type arch='x86_64'>hvm</type>
     <kernel>$system/kernel</kernel><initrd>$system/initrd</initrd>
@@ -69,9 +75,10 @@ case "${1:-}" in
   <devices>
     <emulator>$(command -v qemu-system-x86_64)</emulator>
     <disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none' discard='unmap'/><source file='$lab/$name.qcow2'/><target dev='vda' bus='virtio'/></disk>
-    <filesystem type='mount' accessmode='passthrough'><source dir='/nix/store'/><target dir='nix-store'/><readonly/></filesystem>
-    <filesystem type='mount' accessmode='passthrough'><source dir='$root'/><target dir='lab'/><readonly/></filesystem>
+    <filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><binary path='$(command -v virtiofsd)'/><source dir='/nix/store'/><target dir='nix-store'/><readonly/></filesystem>
+    <filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><binary path='$(command -v virtiofsd)'/><source dir='$root'/><target dir='lab'/><readonly/></filesystem>
     <interface type='ethernet'><target dev='rvm-tap$i' managed='no'/><model type='virtio'/></interface>
+    <memballoon model='virtio' freePageReporting='on'/>
     <serial type='file'><source path='$lab/$name.console'/><target port='0'/></serial>
   </devices>
 </domain>
@@ -103,5 +110,5 @@ XML
     for direction in -i -o; do sudo iptables -D FORWARD "$direction" rvm-lab -j ACCEPT; done
     echo "Stopped lab; disks and SSH keys retained in $lab"
     ;;
-  *) echo "Usage: $0 up|down|ssh NODE COMMAND..." >&2; exit 1 ;;
+  *) echo "Usage: $0 up|down|network|ssh NODE COMMAND..." >&2; exit 1 ;;
 esac

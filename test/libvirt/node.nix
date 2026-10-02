@@ -31,6 +31,16 @@ in {
       };
     };
   };
+  # qemu-vm.nix generates 9p mounts; the custom libvirt domains use migratable
+  # virtiofs devices so a prepared cluster can be saved with its RAM intact.
+  virtualisation.fileSystems."/nix/.ro-store" = {
+    fsType = lib.mkForce "virtiofs";
+    options = lib.mkForce ["ro"];
+  };
+  virtualisation.fileSystems."/lab" = {
+    fsType = lib.mkForce "virtiofs";
+    options = lib.mkForce ["ro"];
+  };
   boot.kernelParams = ["console=ttyS0" "net.ifnames=0"];
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
   networking = {
@@ -52,7 +62,7 @@ in {
       PermitRootLogin = "prohibit-password";
       PasswordAuthentication = false;
       AuthorizedKeysFile = "/lab/.lab/libvirt/id_ed25519.pub";
-      # This test-only key is owned by the unprivileged host user over 9p.
+      # This test-only key is owned by the unprivileged host user on the share.
       StrictModes = false;
     };
   };
