@@ -75,10 +75,11 @@ case "${1:-}" in
   <devices>
     <emulator>$(command -v qemu-system-x86_64)</emulator>
     <disk type='file' device='disk'><driver name='qemu' type='qcow2' cache='none' discard='unmap'/><source file='$lab/$name.qcow2'/><target dev='vda' bus='virtio'/></disk>
-    <filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><binary path='$(command -v virtiofsd)'/><source dir='/nix/store'/><target dir='nix-store'/><readonly/></filesystem>
+    <filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><binary path='$(command -v virtiofsd)'><cache mode='always'/></binary><source dir='/nix/store'/><target dir='nix-store'/><readonly/></filesystem>
     <filesystem type='mount' accessmode='passthrough'><driver type='virtiofs'/><binary path='$(command -v virtiofsd)'/><source dir='$root'/><target dir='lab'/><readonly/></filesystem>
     <interface type='ethernet'><target dev='rvm-tap$i' managed='no'/><model type='virtio'/></interface>
     <memballoon model='virtio' freePageReporting='on'/>
+    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>
     <serial type='file'><source path='$lab/$name.console'/><target port='0'/></serial>
   </devices>
 </domain>
@@ -88,12 +89,12 @@ XML
     done
     for i in 0 1 2; do
       for attempt in $(seq 1 90); do
-        if ssh "${ssh_options[@]}" "root@${ips[$i]}" true; then break; fi
+        if ssh "${ssh_options[@]}" "root@${ips[$i]}" true </dev/null; then break; fi
         if [[ $attempt == 90 ]]; then exit 1; fi
         sleep 2
       done
     done
-    ssh "${ssh_options[@]}" root@192.168.124.10 cat /etc/rancher/k3s/k3s.yaml |
+    ssh "${ssh_options[@]}" root@192.168.124.10 cat /etc/rancher/k3s/k3s.yaml </dev/null |
       sed -e 's/127.0.0.1/192.168.124.10/g' -e 's/default/roamvm-libvirt/g' > "$lab/kubeconfig"
     chmod 600 "$lab/kubeconfig"
     kubectl --kubeconfig "$lab/kubeconfig" wait nodes --all --for=condition=Ready --timeout=180s
