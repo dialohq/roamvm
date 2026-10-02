@@ -88,6 +88,26 @@ Captured domain definitions and NixOS store roots keep the node systems fixed.
 The checkout remains live: each scenario builds/installs the **current RoamVM**
 before testing it against that infrastructure baseline.
 
+Freeze after `make build libvirt-install` and fixture publication have completed,
+so the baseline already contains unpacked runtime images and the pinned K3s
+configuration. Installation caches the image manifest digest by immutable Nix
+archive path under `.lab/libvirt/runtime-digests`, outside the resettable disks.
+On every node it checks the actual digest, content completeness and unpacked
+state before skipping an import, and still smoke-tests the runtime. Missing or
+different images are imported; node checks/imports run concurrently. A new
+archive requires one import to establish its digest. These caches do not skip
+building the current source or restarting the controller.
+
+On the 6-vCPU nested-KVM runner, reset-to-installed time with an unchanged,
+already-built runtime fell from 79 seconds (one run) to 44 seconds median
+(39, 44, 45 seconds across three resets). This includes cold boot, live
+containerd readiness, image smoke tests and controller rollout, but not source
+recompilation or the scenario itself; it is not a guest-VM startup benchmark.
+
+Saving a fully booted RAM snapshot is not supported by this lab's current 9p
+mounts: QEMU rejects migration/save while the Nix store and checkout are mounted.
+A later disk freeze preserves completed setup but does not eliminate cold boot.
+
 `make libvirt-reset` restores and boots the baseline without running a test.
 **Reset discards all changes in the working lab**, including failed-test VMs.
 A scenario leaves its working disks available for debugging until the next
