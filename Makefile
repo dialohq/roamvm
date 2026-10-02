@@ -66,7 +66,7 @@ lab-down:
 	kind delete cluster --name roamvm-test
 	$(COMPOSE) down
 
-.PHONY: libvirt-up libvirt-install libvirt-fixtures libvirt-down libvirt-freeze libvirt-reset libvirt-scenario libvirt-scenarios
+.PHONY: libvirt-up libvirt-install libvirt-fixtures libvirt-down libvirt-freeze libvirt-freeze-warm libvirt-reset libvirt-reset-cold libvirt-scenario libvirt-scenarios
 libvirt-up:
 	bash test/libvirt/lab.sh up
 
@@ -85,8 +85,14 @@ libvirt-down:
 libvirt-freeze:
 	bash test/libvirt/scenario.sh freeze
 
+libvirt-freeze-warm:
+	bash test/libvirt/scenario.sh freeze-warm
+
 libvirt-reset:
 	bash test/libvirt/scenario.sh reset
+
+libvirt-reset-cold:
+	bash test/libvirt/scenario.sh reset-cold
 
 libvirt-scenario:
 	bash test/libvirt/scenario.sh run "$(SCENARIO)"

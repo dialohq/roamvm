@@ -7,6 +7,11 @@
       # Isolated compatibility fixture; never used by the runtime or deployment.
       config.permittedInsecurePackages = ["minio-2025-10-15T17-29-55Z"];
     };
+    # Session libvirt may have started without NixOS's setuid helpers on PATH.
+    virtiofsd = pkgs.writeShellScriptBin "virtiofsd" ''
+      export PATH=/run/wrappers/bin:$PATH
+      exec ${pkgs.virtiofsd}/bin/virtiofsd "$@"
+    '';
   in {
     nixosModules.online-grow = import ./nix/online-grow.nix;
     nixosConfigurations = builtins.listToAttrs (map (name: {
@@ -32,7 +37,7 @@
       config.Env = ["PATH=/bin"];
     };
     devShells.x86_64-linux.default = pkgs.mkShell {
-      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck libvirt openssh iproute2 iptables e2fsprogs minio-client util-linux];
+      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck libvirt virtiofsd openssh iproute2 iptables e2fsprogs minio-client util-linux curl];
     };
   };
 }
