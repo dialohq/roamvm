@@ -3,8 +3,8 @@
 This branch is the [QEMU / online resizing spike](QEMU-SPIKE.md).
 
 A Kubernetes VM runtime for development machines. The root disk follows compute:
-OCI stores the immutable base, S3 stores stopped-VM changes, and a temporary PVC
-holds the working copy. No persistent root claim or storage replication is needed.
+OCI stores the immutable base, S3 stores verified checkpoints, and a retained
+node-local PVC holds the working copy and enables fast same-node restarts.
 
 This is an experimental implementation with real KVM integration tests, not a
 production-qualified replacement for KubeVirt. It is independent of Coder.
@@ -17,13 +17,15 @@ VirtualMachine → controller → runner Pod → kube-scheduler
                                   │
                          QEMU/KVM inside Pod
                                   │
-                    graceful shutdown → S3 commit
+                    graceful shutdown → Stopped
+                                  │
+                     background worker → S3 commit
 ```
 
 The hypervisor runs **inside the runner container's cgroup and network namespace**.
-The daemon prepares and commits storage; it does not put the VMM outside Kubernetes
-resource accounting. A fresh working PVC follows each new Pod's placement;
-the VM's previous node never constrains its next start.
+The daemon prepares storage; it does not put the VMM outside Kubernetes resource
+accounting. A small independent Pod uploads stopped disks. Restarts first try the
+cached node; other placement waits for the latest verified checkpoint.
 
 ## Start and stop
 
@@ -48,20 +50,27 @@ A local runner or hypervisor crash is checkpointed after Kubernetes confirms the
 runner has terminated. The VM stops instead of rebooting in a loop; its next start
 restores the crash-consistent disk. A filesystem may replay its journal, and
 unflushed application data is not guaranteed. If the disk cannot be validated or
-uploaded, it stays retained with `RecoveryRequired`; there is no fallback to an
+uploaded, it stays retained with `CheckpointReady=False`; there is no fallback to an
 older checkpoint. See [recovery](docs/recovery.md) for existing failed Pods.
 
 A stopped VM retains the entire changed root disk, including packages, project
 files and machine credentials. RAM and running processes are not retained.
 
-For a planned move, stop and wait for `Stopped`, change placement constraints or
+`Stopped` means the guest has exited and the local disk has been flushed. Upload,
+verification and cleanup run independently; `CheckpointReady=True` means the
+latest stopped state is verified in S3. Until then, losing the node can lose the
+latest changes. A same-node restart cancels an unfinished upload before making
+the disk writable and defers backup to the next stop. It never downloads the
+cached disk. Ownership metadata must still be available (S3 or Kubernetes).
+
+For a planned move, stop and wait for `CheckpointReady`, change placement constraints or
 cordon the old node, and start again. The default scheduler selects the destination.
 Use Services for stable identity; the Pod IP can change. A normal `kubectl delete
 rvm` also waits for a checkpoint, retaining the latest stopped state for recovery.
 
 Each successful stop replaces the previous checkpoint. The runtime uploads and
 verifies a temporary replacement, commits it as current, then deletes superseded
-checkpoints before reporting `Stopped`. There is no stop-history or rollback
+checkpoints before reporting `CheckpointReady`. There is no stop-history or rollback
 catalogue. Old and new objects coexist only while replacement/cleanup is pending.
 
 ## Install
@@ -70,14 +79,17 @@ Requirements: Linux x86-64 KVM nodes, `/dev/kvm`, `/dev/net/tun`, Kubernetes 1.3
 with image-volume support (tested with containerd 2.2), an IPv4 CNI with interface
 `eth0`, and a local storage class using `WaitForFirstConsumer` and `Delete`.
 Set the controller's `WORKING_STORAGE_CLASS` and `WORKING_STORAGE_SIZE` (64Gi by
-default). Size it for the working overlay plus a compact checkpoint; the base is
-separate. Each runner Pod gets a fresh generic ephemeral PVC on its scheduled
-node. Pod deletion removes the claim after checkpoint commit. The PVC is working
-storage, not the VM's durable identity; a restart can use another node.
+default). This is a minimum: with `rootDiskSize` set, the reservation is at least
+one disk capacity plus 1 GiB for filesystem/QCOW2 metadata. Checkpoints stream
+directly from the stopped overlay to S3 without a second local copy; the base is
+separate. The working PVC belongs to the VM and survives runner deletion. A local
+restart reuses it; durable remote fallback allocates a fresh claim and removes
+the old cache. VM deletion waits for durability before releasing retained storage.
 
 The runtime uses per-container `OnFailure` restart policy (the
 `ContainerRestartRules` feature, enabled by default in Kubernetes 1.35+). It stays
-alive after the runner exits to checkpoint the disk.
+alive after the runner exits to record the local stop. A separate `checkpoint-worker`
+Pod retries uploads independently and releases guest CPU/RAM reservations.
 
 The immutable base uses a read-only Kubernetes `image` volume. Kubelet/containerd
 handle pulling, authentication, caching and garbage collection. The runtime socket
@@ -113,7 +125,7 @@ and its `RUNNER_IMAGE` value with the same published digest.
 
 Create a dedicated S3 bucket. With the default `STATE_BACKEND=s3`, the store must implement strongly consistent reads,
 conditional `PutObject`, and conditional `CompleteMultipartUpload` with `If-Match`
-and `If-None-Match`. The daemon probes basic conditional semantics on startup;
+and `If-None-Match`. Checkpoint workers probe basic conditional semantics on startup;
 `TEST_S3_ENDPOINT=... TEST_S3_BUCKET=... go test ./internal/state -run TestS3 -count=1`
 also checks multipart behavior against your backend.
 
@@ -121,7 +133,7 @@ For object stores without conditional writes (including Garage 2.3.0), set
 `STATE_BACKEND=kubernetes`. Ownership and the current checkpoint pointer then
 use a retained ConfigMap in `STATE_NAMESPACE` (default `roamvm-system`); only
 immutable disk objects go to S3. Back up these ConfigMaps along with the bucket.
-The daemon verifies object upload/readback at startup. Configure every daemon
+Checkpoint workers verify object upload/readback at startup. Configure every daemon
 and recovery command with the same backend; changing it requires an offline
 metadata migration, not an environment-variable rollout.
 
@@ -152,7 +164,10 @@ private and enable your usual encryption/access controls; overlays contain the
 VM's private files. S3 bucket versioning is supported but not required: checkpoint
 keys are unique during replacement, and head replacement uses ETag compare-and-swap.
 Bucket policies must permit cleanup; otherwise the Pod stays `Checkpointing`
-and retries. The next successful stop also removes history from older releases.
+and retries for legacy ephemeral runners. Retained-disk workers retry with
+`CheckpointReady=False` while the VM remains stopped. The next successful upload
+also removes history from older releases. Configure S3 lifecycle cleanup for
+abandoned multipart uploads in case a worker is forcibly killed during cancellation.
 
 The controller and daemon are trusted cluster components. VM creation is comparable
 to Pod creation: it can reference namespace-local Secrets and PVCs. Do not grant
@@ -292,7 +307,9 @@ outlives VM deletion; deleting that final recovery copy is an operator decision.
 Never delete the current checkpoint or a base used by
 a running VM. Do not apply age-only S3 expiration to the entire overlay prefix.
 
-Stopping costs guest shutdown plus compaction, upload and verification of the
-**entire current overlay**, not only changes since the previous stop. Each generation
-is independently usable against its pinned base. Running-node failure can lose
+Stopping waits for guest shutdown and local flush, not S3. Background checkpointing
+validates, uploads and verifies the **entire current overlay**, not only changes
+since the previous stop. Each generation
+is independently usable against its pinned base. The overlay is not compacted,
+so unused QCOW2 space can increase upload size. Running-node failure can lose
 all changes since the last committed stop, as intended by this model.

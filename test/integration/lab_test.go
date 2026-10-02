@@ -21,6 +21,7 @@ import (
 	core "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -337,6 +338,10 @@ func (l *lab) stop(name string) state.Head {
 	previous := l.vm(name).Status.PodName
 	l.power(name, "Stopped")
 	v := l.phase(name, "Stopped")
+	l.wait(name+" checkpoint durable", func() (bool, error) {
+		v = l.vm(name)
+		return apimeta.IsStatusConditionTrue(v.Status.Conditions, "CheckpointReady"), nil
+	})
 	h := l.head(v)
 	equal(l.t, "durable stopped state", h.State, "Stopped")
 	equal(l.t, "released owner", h.Owner, "")
@@ -349,8 +354,11 @@ func (l *lab) stop(name string) state.Head {
 	equal(l.t, "only current checkpoint retained", keys, []string{h.Checkpoint.Key})
 	if previous != "" {
 		l.gone(&core.Pod{ObjectMeta: meta(previous)})
-		l.gone(&core.PersistentVolumeClaim{ObjectMeta: meta(previous + "-working")})
 	}
+	if v.Status.Local == nil || !v.Status.Local.Durable {
+		l.t.Fatal("missing retained local checkpoint")
+	}
+	l.get(&core.PersistentVolumeClaim{ObjectMeta: meta(v.Status.Local.ClaimName)})
 	return h
 }
 

@@ -126,6 +126,15 @@ type Checkpoint struct {
 	Size       int64  `json:"size"`
 	VersionID  string `json:"versionID,omitempty"`
 }
+
+// LocalCheckpoint identifies the retained, node-local working disk containing
+// the latest safely stopped VM state.
+type LocalCheckpoint struct {
+	ClaimName string `json:"claimName"`
+	NodeName  string `json:"nodeName"`
+	Owner     string `json:"owner"`
+	Durable   bool   `json:"durable"`
+}
 type VirtualMachineStatus struct {
 	RootDiskSize       int64              `json:"rootDiskSize,omitempty"`
 	Phase              string             `json:"phase,omitempty"`
@@ -133,6 +142,7 @@ type VirtualMachineStatus struct {
 	PodName            string             `json:"podName,omitempty"`
 	NodeName           string             `json:"nodeName,omitempty"`
 	Checkpoint         *Checkpoint        `json:"checkpoint,omitempty"`
+	Local              *LocalCheckpoint   `json:"local,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	core "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -32,12 +33,12 @@ func TestLifecycle(t *testing.T) {
 		if vol.HostPath != nil {
 			t.Fatal("VM Pod uses hostPath")
 		}
-		working = working || vol.Name == "working" && vol.Ephemeral != nil
+		working = working || vol.Name == "working" && vol.PersistentVolumeClaim != nil
 	}
-	equal(t, "ephemeral working PVC", working, true)
+	equal(t, "retained working PVC", working, true)
 	pvc := &core.PersistentVolumeClaim{ObjectMeta: meta(pod.Name + "-working")}
 	l.get(pvc)
-	equal(t, "working PVC owner", pvc.OwnerReferences[0].UID, pod.UID)
+	equal(t, "working PVC owner", pvc.OwnerReferences[0].UID, v.UID)
 	equal(t, "CPU request", pod.Spec.Containers[0].Resources.Requests.Cpu().String(), "250m")
 	dns := l.request(v.Name, "/dns?name=kubernetes.default.svc.cluster.local", nil)
 	if len(dns) < 5 {
@@ -48,9 +49,6 @@ func TestLifecycle(t *testing.T) {
 	must(t, err)
 	equal(t, "guest write", l.request(v.Name, "/data", payload), payload)
 	first := l.stop(v.Name)
-	if first.Checkpoint.Size >= 8<<20 {
-		t.Fatalf("checkpoint not compact: %d bytes", first.Checkpoint.Size)
-	}
 	oldNode := v.Status.NodeName
 	l.cordon(oldNode, true)
 	t.Cleanup(func() { l.cordon(oldNode, false) })
@@ -90,20 +88,17 @@ func TestLifecycle(t *testing.T) {
 		}
 	})
 	l.power(v.Name, "Stopped")
-	l.phase(v.Name, "Checkpointing")
+	l.phase(v.Name, "Stopped")
 	// Observe the outage across several reconciliation/heartbeat intervals.
 	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
 	<-timer.C
-	equal(t, "outage does not report Stopped", l.vm(v.Name).Status.Phase, "Checkpointing")
-	var pods core.PodList
-	must(
-		t,
-		l.List(l.ctx, &pods, client.InNamespace("default"), client.MatchingLabels{"vm.roamvm.io/uid": string(v.UID)}),
-	)
-	if len(pods.Items) != 1 {
-		t.Fatalf("working Pod lost during outage: %d", len(pods.Items))
+	stopped := l.vm(v.Name)
+	equal(t, "outage does not block guest stop", stopped.Status.Phase, "Stopped")
+	if stopped.Status.Local == nil || apimeta.IsStatusConditionTrue(stopped.Status.Conditions, "CheckpointReady") {
+		t.Fatal("outage must retain local state without claiming remote durability")
 	}
+	l.get(&core.PersistentVolumeClaim{ObjectMeta: meta(stopped.Status.Local.ClaimName)})
 	l.run(nil, "docker", "unpause", container)
 	paused = false
 	committed := l.stop(v.Name)
@@ -173,12 +168,17 @@ func TestLifecycle(t *testing.T) {
  done
  exit 1`)
 	must(t, err)
-	l.phase(v.Name, "Stopped")
+	l.stop(v.Name)
 	equal(t, "VMM crash checkpoints working bytes", l.head(v).Checkpoint.Generation, durable.Checkpoint.Generation+1)
 	equal(t, "VMM crash releases owner", l.head(v).Owner, "")
 	l.start(v.Name)
 	equal(t, "crash recovery", l.request(v.Name, "/data", nil), payload)
 	durable = l.stop(v.Name)
+	// Force the remote restore path; a healthy local cache deliberately does
+	// not read the S3 object at all.
+	cacheNode := l.vm(v.Name).Status.Local.NodeName
+	l.cordon(cacheNode, true)
+	t.Cleanup(func() { l.cordon(cacheNode, false) })
 	object, err := l.store.Get(l.ctx, durable.Checkpoint.Key)
 	must(t, err)
 	original, err := io.ReadAll(object.Body)

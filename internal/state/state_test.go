@@ -94,6 +94,10 @@ func (s *memoryStore) Put(ctx context.Context, key string, r io.ReadSeeker, size
 		strings.Contains(string(b), `"checkpoint"`) {
 		return Object{}, errors.New("response lost after successful commit")
 	}
+	if s.failure == "lost-resume-response" && strings.Contains(string(b), `"state":"Running"`) &&
+		strings.Contains(string(b), `"owner":"pod-2"`) {
+		return Object{}, errors.New("response lost after successful resume")
+	}
 	return Object{ETag: etag, Size: size}, nil
 }
 
@@ -255,4 +259,127 @@ func TestStopReplacesPreviousCheckpoint(t *testing.T) {
 	if _, e = m.Store.Get(ctx, original.Key); !errors.Is(e, ErrNotFound) {
 		t.Fatal("previous stop retained", e)
 	}
+}
+
+func TestResumeLocalPendingAndCompletedUpload(t *testing.T) {
+	t.Run("pending upload transfers ownership", func(t *testing.T) {
+		ctx, m, stopped, _ := fixture(t)
+		resumed, err := m.ResumeLocal(ctx, stopped, "pod-2", "node-a")
+		require.NoError(t, err)
+		require.Equal(t, stopped.Head.Epoch+1, resumed.Head.Epoch)
+		require.Equal(t, "pod-2", resumed.Head.Owner)
+		require.Nil(t, resumed.Head.Checkpoint)
+	})
+
+	t.Run("completed upload preserves latest checkpoint", func(t *testing.T) {
+		ctx, m, stopped, file := fixture(t)
+		committed, err := m.Commit(ctx, stopped, file)
+		require.NoError(t, err)
+		resumed, err := m.ResumeLocal(ctx, stopped, "pod-2", "node-a")
+		require.NoError(t, err)
+		require.Equal(t, committed.Head.Checkpoint, resumed.Head.Checkpoint)
+		require.Equal(t, stopped.Head.Epoch+1, resumed.Head.Epoch)
+	})
+}
+
+func TestResumeLocalRejectsMismatchedProof(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Session)
+		owner  string
+		node   string
+	}{
+		{"node", func(*Session) {}, "pod-2", "node-b"},
+		{"base", func(s *Session) { s.Head.Base = "other" }, "pod-2", "node-a"},
+		{"old owner", func(s *Session) { s.Head.Owner = "other" }, "pod-2", "node-a"},
+		{"epoch", func(s *Session) { s.Head.Epoch++ }, "pod-2", "node-a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, m, stopped, _ := fixture(t)
+			tt.mutate(&stopped)
+			_, err := m.ResumeLocal(ctx, stopped, tt.owner, tt.node)
+			require.Error(t, err)
+			now, readErr := m.Read(ctx, "vm-1")
+			require.NoError(t, readErr)
+			require.Equal(t, "pod-1", now.Head.Owner)
+		})
+	}
+}
+
+func TestResumeLocalRecoveryInvalidatesProof(t *testing.T) {
+	ctx, m, stopped, _ := fixture(t)
+	_, err := m.Recover(ctx, stopped.Head.VMID, stopped.Head.Owner)
+	require.NoError(t, err)
+	_, err = m.ResumeLocal(ctx, stopped, "pod-2", "node-a")
+	require.ErrorIs(t, err, ErrConflict)
+}
+
+func TestResumeLocalDuplicateAndLostResponse(t *testing.T) {
+	ctx, m, stopped, _ := fixture(t)
+	m.Store.(*memoryStore).failure = "lost-resume-response"
+	first, err := m.ResumeLocal(ctx, stopped, "pod-2", "node-a")
+	require.NoError(t, err)
+	second, err := m.ResumeLocal(ctx, stopped, "pod-2", "node-a")
+	require.NoError(t, err)
+	require.Equal(t, first.ETag, second.ETag)
+	_, err = m.ResumeLocal(ctx, stopped, "pod-3", "node-a")
+	require.Error(t, err)
+}
+
+type blockedCommitStore struct {
+	*memoryStore
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (s *blockedCommitStore) Put(ctx context.Context, key string, r io.ReadSeeker, size int64, match string) (Object, error) {
+	if key == HeadKey("vm-1") {
+		pos, _ := r.Seek(0, io.SeekCurrent)
+		body, _ := io.ReadAll(r)
+		_, _ = r.Seek(pos, io.SeekStart)
+		if strings.Contains(string(body), `"state":"Stopped"`) && strings.Contains(string(body), `"checkpoint"`) {
+			close(s.reached)
+			select {
+			case <-ctx.Done():
+				return Object{}, ctx.Err()
+			case <-s.release:
+			}
+		}
+	}
+	return s.memoryStore.Put(ctx, key, r, size, match)
+}
+
+func TestResumeLocalFencesCommitAlreadyUploading(t *testing.T) {
+	ctx, base, stopped, file := fixture(t)
+	store := &blockedCommitStore{memoryStore: base.Store.(*memoryStore), reached: make(chan struct{}), release: make(chan struct{})}
+	m := Manager{Store: store}
+	result := make(chan error, 1)
+	go func() { _, err := m.Commit(ctx, stopped, file); result <- err }()
+	<-store.reached
+	resumed, err := m.ResumeLocal(ctx, stopped, "pod-2", "node-a")
+	require.NoError(t, err)
+	close(store.release)
+	require.ErrorIs(t, <-result, ErrConflict)
+	now, err := m.Read(ctx, stopped.Head.VMID)
+	require.NoError(t, err)
+	require.Equal(t, resumed.ETag, now.ETag)
+	require.Nil(t, now.Head.Checkpoint, "stale upload published its checkpoint")
+}
+
+func TestResumeLocalCompetingOwners(t *testing.T) {
+	ctx, m, stopped, _ := fixture(t)
+	var winners atomic.Int32
+	var wg sync.WaitGroup
+	for _, owner := range []string{"pod-2", "pod-3"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := m.ResumeLocal(ctx, stopped, owner, "node-a"); err == nil {
+				winners.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	require.EqualValues(t, 1, winners.Load())
 }

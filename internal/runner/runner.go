@@ -91,9 +91,9 @@ func Run() error {
 			break
 		}
 		var transportError *url.Error
-		if (!errors.As(err, &transportError) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) ||
+		if (!response.Retry && !errors.As(err, &transportError) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) ||
 			ctx.Err() != nil ||
-			time.Now().After(deadline) {
+			(!response.Retry && time.Now().After(deadline)) {
 			break
 		}
 		select {
@@ -266,10 +266,10 @@ func finish(c *Client) error {
 		if err == nil {
 			return nil
 		}
-		fmt.Fprintln(os.Stderr, "checkpoint remains uncommitted:", err)
+		fmt.Fprintln(os.Stderr, "local stop handoff incomplete:", err)
 		c.status("Checkpointing", err.Error())
-		// Keep the Pod and its local disk until the durable commit succeeds. Kubelet
-		// termination/node loss may interrupt us, but must never report Stopped.
+		// Retain the Pod until the stopped disk is handed off safely. Retained-PVC
+		// runners return before upload; legacy ephemeral runners still commit here.
 		time.Sleep(3 * time.Second)
 	}
 }

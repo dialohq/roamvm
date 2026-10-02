@@ -121,6 +121,67 @@ func (m Manager) Acquire(ctx context.Context, id, base, owner, node string) (Ses
 	return m.write(ctx, s.Head, s.ETag)
 }
 
+// ResumeLocal transfers a stopped disk to a new local runtime without waiting
+// for its background checkpoint upload. The caller must hold the disk's
+// exclusive runner.lock and must have proved that stopped was persisted locally
+// after the VMM exited while stopped.Head.Owner still held the durable lease.
+// This method does not establish either fact and never fences by elapsed time.
+func (m Manager) ResumeLocal(ctx context.Context, stopped Session, owner, node string) (Session, error) {
+	if stopped.Head.VMID == "" || stopped.Head.Base == "" || owner == "" || node == "" ||
+		stopped.Head.Node == "" || node != stopped.Head.Node {
+		return Session{}, errors.New("invalid local resume identity")
+	}
+
+	current, err := m.Read(ctx, stopped.Head.VMID)
+	if err != nil {
+		return Session{}, err
+	}
+	if current.Head.Base != stopped.Head.Base {
+		return Session{}, errors.New("base digest does not match durable state")
+	}
+	// Reconcile only the exact transition requested by this call. In
+	// particular, a later recovery or acquisition is never mistaken for it.
+	if current.Head.Epoch == stopped.Head.Epoch+1 && current.Head.State == "Running" &&
+		current.Head.Owner == owner && current.Head.Node == node {
+		return current, nil
+	}
+	if current.Head.Epoch != stopped.Head.Epoch {
+		return Session{}, ErrConflict
+	}
+
+	switch current.Head.State {
+	case "Running":
+		if stopped.Head.Owner == "" || current.Head.Owner != stopped.Head.Owner ||
+			current.Head.Node != stopped.Head.Node {
+			return Session{}, ErrOwned
+		}
+	case "Stopped":
+		if current.Head.Owner != "" || current.Head.Node != "" || current.Head.Checkpoint == nil {
+			return Session{}, errors.New("invalid durable stopped state")
+		}
+		// Commit already verified this object. Local resume uses the retained
+		// disk, not the remote object; do not download it again here.
+	default:
+		return Session{}, errors.New("durable state is neither running nor stopped")
+	}
+
+	next := current.Head
+	next.Epoch++
+	next.State = "Running"
+	next.Owner = owner
+	next.Node = node
+	out, err := m.write(ctx, next, current.ETag)
+	if err != nil {
+		after, readErr := m.Read(ctx, stopped.Head.VMID)
+		if readErr == nil && after.Head.Base == stopped.Head.Base &&
+			after.Head.Epoch == stopped.Head.Epoch+1 && after.Head.State == "Running" &&
+			after.Head.Owner == owner && after.Head.Node == node {
+			return after, nil
+		}
+	}
+	return out, err
+}
+
 func (m Manager) Check(ctx context.Context, s Session) error {
 	now, err := m.Read(ctx, s.Head.VMID)
 	if err != nil {
@@ -162,6 +223,18 @@ func (m Manager) Restore(ctx context.Context, s Session, path string) error {
 	return os.Rename(path+".partial", path)
 }
 
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
+}
+
 // Commit is only called after the VMM has exited and the overlay has been
 // checked. The immutable object is read back before the pointer is advanced.
 // A lost response is safe to retry: the key includes epoch and content hash.
@@ -175,7 +248,7 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 	}
 	defer f.Close()
 	h := sha256.New()
-	size, err := io.Copy(h, f)
+	size, err := io.Copy(h, contextReader{ctx, f})
 	if err != nil {
 		return Session{}, err
 	}

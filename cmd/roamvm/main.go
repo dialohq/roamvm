@@ -59,7 +59,7 @@ func kubeClient() (client.Client, error) {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: roamvm controller|daemon|checkpoint|runner|device-plugin|start|stop|image-push|state|recover")
+		return errors.New("usage: roamvm controller|daemon|checkpoint|checkpoint-worker|runner|device-plugin|start|stop|image-push|state|recover")
 	}
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctx := ctrl.SetupSignalHandler()
@@ -96,7 +96,7 @@ func run() error {
 		_ = m.AddHealthzCheck("healthz", healthz.Ping)
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
-	case "daemon", "checkpoint":
+	case "daemon", "checkpoint", "checkpoint-worker":
 		c, err := kubeClient()
 		if err != nil {
 			return err
@@ -123,15 +123,22 @@ func run() error {
 		if server.Node == "" || server.PodUID == "" || server.VMUID == "" || server.Pod.Name == "" || server.Pod.Namespace == "" || store.Bucket == "" {
 			return errors.New("NODE_NAME, POD_UID, VM_UID, POD_NAME, POD_NAMESPACE and S3_BUCKET are required")
 		}
-		if kubernetes, ok := backend.(*state.Kubernetes); ok {
-			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			err = kubernetes.CheckObjects(probeCtx, "runtime-probes/"+rand.Text())
-			cancel()
-		} else {
-			err = store.CheckSemantics(ctx)
+		// Local stop and same-node resume do not need the object data path.
+		// Validate it in the independent upload process instead of blocking boot.
+		if os.Args[1] != "daemon" {
+			if kubernetes, ok := backend.(*state.Kubernetes); ok {
+				probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				err = kubernetes.CheckObjects(probeCtx, "runtime-probes/"+rand.Text())
+				cancel()
+			} else {
+				err = store.CheckSemantics(ctx)
+			}
+			if err != nil {
+				return fmt.Errorf("unsafe or unavailable object store: %w", err)
+			}
 		}
-		if err != nil {
-			return fmt.Errorf("unsafe or unavailable object store: %w", err)
+		if os.Args[1] == "checkpoint-worker" {
+			return server.CheckpointLocal(ctx)
 		}
 		if os.Args[1] == "checkpoint" {
 			return server.CheckpointTerminatedRunner(ctx)

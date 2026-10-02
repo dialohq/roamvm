@@ -54,11 +54,10 @@ func testOverlayPortability(t *testing.T, format string) {
 	if e != nil {
 		t.Fatalf("write: %v %s", e, out)
 	}
-	cp, e := Compact(ctx, base, overlay)
-	require.NoError(t, e)
+	require.NoError(t, Check(ctx, overlay))
 	other := images.Base{Dir: b, Manifest: base.Manifest}
 	require.NoError(t, os.WriteFile(other.Disk(), baseData, 0o444))
-	data, e := os.ReadFile(cp)
+	data, e := os.ReadFile(overlay)
 	require.NoError(t, e)
 	moved := filepath.Join(b, "overlay.qcow2")
 	require.NoError(t, os.WriteFile(moved, data, 0o600))

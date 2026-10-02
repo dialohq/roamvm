@@ -51,8 +51,8 @@ func TestLocalCrashRecovery(t *testing.T) {
 			}
 			stopped := l.phase(v.Name, "Stopped")
 			equal(t, "no automatic boot loop", stopped.Spec.PowerState, "Stopped")
-			if stopped.Status.Checkpoint == nil {
-				t.Fatal("crashed disk was not checkpointed")
+			if stopped.Status.Local == nil {
+				t.Fatal("crashed disk was not retained locally")
 			}
 			if stopped.Status.Message == "" {
 				t.Fatal("crash reason lost")
