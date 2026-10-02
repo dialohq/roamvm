@@ -32,16 +32,17 @@ func TestOversubscription(t *testing.T) {
 	if capacity <= 2 {
 		t.Fatal("test requires more than two host CPUs")
 	}
-	config := l.run(nil, "docker", "exec", nodeName, "cat", "/var/lib/kubelet/config.yaml")
+	config := l.nodeExec(nil, nodeName, "cat", "/var/lib/kubelet/config.yaml")
 	if strings.Contains(string(config), "kubeReserved:") {
 		t.Fatal("use an unmodified kind worker")
 	}
-	originalSet := strings.TrimSpace(
-		string(l.run(nil, "docker", "inspect", nodeName, "--format", "{{.HostConfig.CpusetCpus}}")),
-	)
+	originalSet := ""
+	if !l.libvirt() {
+		originalSet = strings.TrimSpace(string(l.run(nil, "docker", "inspect", nodeName, "--format", "{{.HostConfig.CpusetCpus}}")))
+	}
 	effective, err := cpuset.Parse(
 		strings.TrimSpace(
-			string(l.run(nil, "docker", "exec", nodeName, "cat", "/sys/fs/cgroup/cpuset.cpus.effective")),
+			string(l.nodeExec(nil, nodeName, "cat", "/sys/fs/cgroup/cpuset.cpus.effective")),
 		),
 	)
 	must(t, err)
@@ -51,8 +52,12 @@ func TestOversubscription(t *testing.T) {
 	}
 	cpus = cpus[:2]
 	writeConfig := func(data []byte) {
-		l.run(data, "docker", "exec", "-i", nodeName, "sh", "-c", "cat > /var/lib/kubelet/config.yaml")
-		l.run(nil, "docker", "exec", nodeName, "systemctl", "restart", "kubelet")
+		l.nodeExec(data, nodeName, "sh", "-c", "cat > /var/lib/kubelet/config.yaml")
+		service := "kubelet"
+		if l.libvirt() {
+			service = "k3s"
+		}
+		l.nodeExec(nil, nodeName, "systemctl", "restart", service)
 	}
 	allocatable := func(expected int64) {
 		l.wait(
@@ -60,17 +65,25 @@ func TestOversubscription(t *testing.T) {
 			func() (bool, error) { l.get(node); return node.Status.Allocatable.Cpu().Value() == expected, nil },
 		)
 	}
+	restoreCPUs := func() { l.run(nil, "docker", "update", "--cpuset-cpus", originalSet, nodeName) }
+	if l.libvirt() {
+		l.pinLibvirtCPUs(nodeName)
+		restoreCPUs = func() {}
+	}
 	// Register before fixture cleanup so Pods stop while the constrained node is still running.
 	t.Cleanup(func() {
 		writeConfig(config)
-		l.run(nil, "docker", "update", "--cpuset-cpus", originalSet, nodeName)
+		restoreCPUs()
 		allocatable(capacity)
 	})
-	l.run(nil, "docker", "update", "--cpuset-cpus", cpuset.New(cpus...).String(), nodeName)
+	if !l.libvirt() {
+		l.run(nil, "docker", "update", "--cpuset-cpus", cpuset.New(cpus...).String(), nodeName)
+	}
 	writeConfig(
 		append(
 			slices.Clone(config),
-			[]byte(fmt.Sprintf("\nkubeReserved:\n  cpu: %q\n", strconv.FormatInt(capacity-2, 10)))...),
+			[]byte(fmt.Sprintf("\nkubeReserved:\n  cpu: %q\n", strconv.FormatInt(capacity-2, 10)))...,
+		),
 	)
 	allocatable(2)
 	l.networkClient()
@@ -104,6 +117,11 @@ func TestOversubscription(t *testing.T) {
 		return strings.TrimSpace(string(data)), e
 	}
 	read := func(name, file string) string { data, e := cgroup(name, file); must(t, e); return data }
+	runnerCPUs := cpus
+	if l.libvirt() {
+		// Host pinning limits physical execution, not the node's visible vCPUs.
+		runnerCPUs = effective.List()
+	}
 	for _, name := range names {
 		v := l.ready(name)
 		podNames[name] = v.Status.PodName
@@ -114,7 +132,7 @@ func TestOversubscription(t *testing.T) {
 		equal(t, "CPU request", p.Spec.Containers[0].Resources.Requests.Cpu().String(), "500m")
 		actual, e := cpuset.Parse(read(name, "cpuset.cpus.effective"))
 		must(t, e)
-		equal(t, "physical CPU threads", actual.List(), cpus)
+		equal(t, "runner CPU affinity", actual.List(), runnerCPUs)
 		equal(t, "four-CPU ceiling", strings.Fields(read(name, "cpu.max")), []string{"400000", "100000"})
 		equal(t, "guest writes", string(l.request(name, "/data", []byte(name))), name)
 	}
@@ -183,7 +201,10 @@ func TestOversubscription(t *testing.T) {
 	l.create(pending)
 	l.phase(pending.Name, "Pending")
 	l.wait("scheduler rejects excessive CPU request", func() (bool, error) {
-		p := l.pod(l.vm(pending.Name).Status.PodName)
+		p := &core.Pod{ObjectMeta: meta(l.vm(pending.Name).Status.PodName)}
+		if err := l.Get(l.ctx, client.ObjectKeyFromObject(p), p); err != nil {
+			return false, err
+		}
 		for _, c := range p.Status.Conditions {
 			if c.Reason == "Unschedulable" && strings.Contains(c.Message, "Insufficient cpu") {
 				return true, nil

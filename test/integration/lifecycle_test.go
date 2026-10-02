@@ -76,15 +76,11 @@ func TestLifecycle(t *testing.T) {
 	equal(t, "sidecar restart preserves bytes", l.request(v.Name, "/data", nil), payload)
 	equal(t, "VMM did not restart", l.pod(pod.Name).Status.ContainerStatuses[0].RestartCount, int32(0))
 
-	container := os.Getenv("ROAMVM_TEST_S3_CONTAINER")
-	if container == "" {
-		t.Fatal("set ROAMVM_TEST_S3_CONTAINER to this lab's object-store container")
-	}
-	l.run(nil, "docker", "pause", container)
+	l.pauseStore(true)
 	paused := true
 	t.Cleanup(func() {
 		if paused {
-			l.run(nil, "docker", "unpause", container)
+			l.pauseStore(false)
 		}
 	})
 	l.power(v.Name, "Stopped")
@@ -99,7 +95,7 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal("outage must retain local state without claiming remote durability")
 	}
 	l.get(&core.PersistentVolumeClaim{ObjectMeta: meta(stopped.Status.Local.ClaimName)})
-	l.run(nil, "docker", "unpause", container)
+	l.pauseStore(false)
 	paused = false
 	committed := l.stop(v.Name)
 	equal(t, "retry commits once", committed.Checkpoint.Generation, first.Checkpoint.Generation+1)
@@ -125,7 +121,7 @@ func TestLifecycle(t *testing.T) {
 		nodeStopped := true
 		restore := func() {
 			if nodeStopped {
-				l.run(nil, "docker", "start", node)
+				l.powerNode(node, true)
 				l.wait("worker Ready", func() (bool, error) {
 					n := &core.Node{}
 					err := l.Get(l.ctx, client.ObjectKey{Name: node}, n)
@@ -144,7 +140,7 @@ func TestLifecycle(t *testing.T) {
 			}
 		}
 		t.Cleanup(restore)
-		l.run(nil, "docker", "stop", "--time", "0", node)
+		l.powerNode(node, false)
 		equal(t, "node death retains checkpoint", l.head(v).Checkpoint, durable.Checkpoint)
 		equal(t, "node death retains owner", l.head(v).Owner, owner)
 		l.recover(v, owner)
@@ -164,7 +160,7 @@ func TestLifecycle(t *testing.T) {
 	_, err = l.exec(v.Status.PodName, "runner", nil, "/bin/sh", "-ec", `
  for process in /proc/[0-9]*; do
    read -r name < "$process/comm" || continue
-   case "$name" in qemu-system-*) kill -KILL "${process##*/}"; exit 0;; esac
+   case "$name" in qemu-system-*|.qemu-system-*) kill -KILL "${process##*/}"; exit 0;; esac
  done
  exit 1`)
 	must(t, err)

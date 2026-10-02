@@ -39,7 +39,7 @@ func TestLocalCrashRecovery(t *testing.T) {
 				expectedMax = "2147483648"
 			}
 			equal(t, "runner memory limit", strings.TrimSpace(string(memoryMax)), expectedMax)
-			command := `for p in /proc/[0-9]*; do read -r name < "$p/comm" || continue; case "$name" in qemu-system-*) kill -KILL "${p##*/}"; exit 0;; esac; done; exit 1`
+			command := `for p in /proc/[0-9]*; do read -r name < "$p/comm" || continue; case "$name" in qemu-system-*|.qemu-system-*) kill -KILL "${p##*/}"; exit 0;; esac; done; exit 1`
 
 			if failure == "oom" {
 				command = `awk 'BEGIN { s="xxxxxxxxxxxxxxxx"; for(i=0;i<16;i++) s=s s; for(i=0;i<4096;i++) a[i]=s i }'`
@@ -81,11 +81,15 @@ func (l *lab) killContainer(pod *core.Pod, name string) {
 				PID int `json:"pid"`
 			} `json:"info"`
 		}
-		must(l.t, json.Unmarshal(l.run(nil, "docker", "exec", pod.Spec.NodeName, "crictl", "inspect", id), &container))
+		args := []string{"crictl", "inspect", id}
+		if l.libvirt() {
+			args = append([]string{"k3s"}, args...)
+		}
+		must(l.t, json.Unmarshal(l.nodeExec(nil, pod.Spec.NodeName, args...), &container))
 		if container.Info.PID <= 1 {
 			l.t.Fatal("invalid container PID", container.Info.PID)
 		}
-		l.run(nil, "docker", "exec", pod.Spec.NodeName, "kill", "-KILL", strconv.Itoa(container.Info.PID))
+		l.nodeExec(nil, pod.Spec.NodeName, "kill", "-KILL", strconv.Itoa(container.Info.PID))
 		return
 	}
 	l.t.Fatal("container not found", name)

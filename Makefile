@@ -65,3 +65,19 @@ benchmark:
 lab-down:
 	kind delete cluster --name roamvm-test
 	$(COMPOSE) down
+
+.PHONY: libvirt-up libvirt-install libvirt-fixtures libvirt-down
+libvirt-up:
+	bash test/libvirt/lab.sh up
+
+libvirt-install: build
+	bash test/libvirt/install.sh
+
+libvirt-fixtures: build
+	set -e; for fixture in nixos generation firmware; do \
+		nix build .#test-$$fixture-guest --out-link .lab/libvirt/$$fixture.tar.gz; \
+		bin/roamvm image-push --plain-http --tag 192.168.124.10:5000/$$fixture:local --tar .lab/libvirt/$$fixture.tar.gz > .lab/libvirt/$$fixture-ref; \
+	done
+
+libvirt-down:
+	bash test/libvirt/lab.sh down
