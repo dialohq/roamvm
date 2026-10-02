@@ -11,6 +11,7 @@ import (
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,7 +46,15 @@ func (r *Reconciler) Setup(m ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(m).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Complete(r)
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
+	defer func() {
+		if apierrors.IsConflict(err) {
+			// Recompute from fresh state rather than retrying a stale lifecycle decision.
+			result, err = ctrl.Result{RequeueAfter: time.Second}, nil
+		} else if err != nil {
+			result = ctrl.Result{}
+		}
+	}()
 	var vm api.VirtualMachine
 	if err := r.Get(ctx, req.NamespacedName, &vm); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -185,6 +194,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) releasePod(ctx context.Context, pod *core.Pod) (ctrl.Result, error) {
 	controllerutil.RemoveFinalizer(pod, Finalizer)
 	if err := r.Update(ctx, pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	if pod.DeletionTimestamp == nil {
