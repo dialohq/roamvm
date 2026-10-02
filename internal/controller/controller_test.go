@@ -3,17 +3,22 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
@@ -277,6 +282,75 @@ func TestMissingRunnerNeverReportsDurableStop(t *testing.T) {
 	if current.Status.Phase != "RecoveryRequired" {
 		t.Fatal(current.Status.Phase)
 	}
+}
+
+func TestStatusConflictReconcilesNewIntent(t *testing.T) {
+	r, vm := setup(t)
+	ctx := context.Background()
+	vm.Spec.PowerState = "Stopped"
+	require.NoError(t, r.Update(ctx, vm))
+	base := r.Client
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			var current api.VirtualMachine
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(vm), &current))
+			current.Spec.PowerState = "Running"
+			require.NoError(t, c.Update(ctx, &current))
+			return c.SubResource(subresource).Update(ctx, obj, opts...)
+		},
+	})
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}
+	result, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.Equal(t, time.Second, result.RequeueAfter)
+	require.NoError(t, base.Get(ctx, req.NamespacedName, vm))
+	require.Empty(t, vm.Status.Phase, "stale stop must not be committed")
+	r.Client = base
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, req.NamespacedName, vm))
+	require.Equal(t, "Running", vm.Spec.PowerState)
+	require.Equal(t, "Pending", vm.Status.Phase)
+	var pods core.PodList
+	require.NoError(t, r.List(ctx, &pods))
+	require.Len(t, pods.Items, 1)
+}
+
+func TestStatusFailureReturnsOnlyError(t *testing.T) {
+	r, vm := setup(t)
+	ctx := context.Background()
+	vm.Spec.PowerState = "Stopped"
+	require.NoError(t, r.Update(ctx, vm))
+	failure := errors.New("status unavailable")
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+			return failure
+		},
+	})
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)})
+	require.ErrorIs(t, err, failure)
+	require.Equal(t, ctrl.Result{}, result)
+}
+
+func TestReleasePodAlreadyGone(t *testing.T) {
+	r, _ := setup(t)
+	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gone", Namespace: "default", Finalizers: []string{Finalizer}}}
+	result, err := r.releasePod(context.Background(), pod)
+	require.NoError(t, err)
+	require.Equal(t, time.Second, result.RequeueAfter)
+}
+
+func TestReleasePodPreservesOtherErrors(t *testing.T) {
+	r, _ := setup(t)
+	failure := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "runner", errors.New("denied"))
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+			return failure
+		},
+	})
+	result, err := r.releasePod(context.Background(), &core.Pod{})
+	require.ErrorIs(t, err, failure)
+	require.Equal(t, ctrl.Result{}, result)
 }
 
 func TestGuestCannotProjectRuntimeCredentials(t *testing.T) {
