@@ -73,14 +73,23 @@ in {
       "${control}:5000":
         endpoint: ["http://${control}:5000"]
   '';
-  # Writable solely so the CPU oversubscription test can change and restore it.
-  systemd.tmpfiles.rules = [
-    "d /var/lib/kubelet 0755 root root -"
-    "C /var/lib/kubelet/config.yaml 0644 root root - ${pkgs.writeText "kubelet-lab.yaml" ''
+  # Reapply at boot, but keep writable so the CPU oversubscription test can
+  # change and restore it without changing the declarative node definition.
+  environment.etc."roamvm/kubelet.yaml" = {
+    mode = "0644";
+    text = ''
       apiVersion: kubelet.config.k8s.io/v1beta1
       kind: KubeletConfiguration
+      # Publish recovered device capacity promptly, without increasing the
+      # API reporting rate when node status is unchanged.
+      nodeStatusUpdateFrequency: 1s
+      nodeStatusReportFrequency: 5m
       allowedUnsafeSysctls: [net.ipv4.ip_forward, net.ipv4.conf.all.route_localnet]
-    ''}"
+    '';
+  };
+  systemd.tmpfiles.rules = [
+    "d /var/lib/kubelet 0755 root root -"
+    "L+ /var/lib/kubelet/config.yaml - - - - /etc/roamvm/kubelet.yaml"
   ];
   services.k3s = {
     enable = true;
