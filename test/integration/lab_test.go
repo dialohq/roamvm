@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -274,6 +275,48 @@ func podReady(p *core.Pod) bool {
 	return false
 }
 
+// Exec stream writers can outlive StreamWithContext when it is cancelled.
+// Return a copy so callers never share storage with those writers.
+type execOutput struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *execOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *execOutput) snapshot() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.data.Bytes())
+}
+
+func TestExecOutput(t *testing.T) {
+	var out execOutput
+	_, err := out.Write([]byte("prefix:"))
+	must(t, err)
+	first := out.snapshot()
+	first[0] = 'X'
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			_, _ = out.Write([]byte("ab"))
+		}
+	}()
+	for range 1000 {
+		snapshot := string(out.snapshot())
+		if !strings.HasPrefix(snapshot, "prefix:") || strings.TrimPrefix(snapshot, "prefix:") != strings.Repeat("ab", (len(snapshot)-7)/2) {
+			t.Fatalf("corrupt output snapshot: %q", snapshot)
+		}
+	}
+	<-done
+	equal(t, "complete exec output", string(out.snapshot()), "prefix:"+strings.Repeat("ab", 1000))
+}
+
 func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte, error) {
 	req := l.kube.CoreV1().
 		RESTClient().
@@ -287,7 +330,7 @@ func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	var out, stderr bytes.Buffer
+	var out, stderr execOutput
 	ctx, cancel := context.WithTimeout(l.ctx, 45*time.Second)
 	defer cancel()
 	options := remotecommand.StreamOptions{Stdout: &out, Stderr: &stderr}
@@ -296,9 +339,9 @@ func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte,
 	}
 	err = executor.StreamWithContext(ctx, options)
 	if err != nil {
-		return out.Bytes(), fmt.Errorf("exec %s/%s: %w: %s", pod, container, err, stderr.String())
+		return out.snapshot(), fmt.Errorf("exec %s/%s: %w: %s", pod, container, err, stderr.snapshot())
 	}
-	return out.Bytes(), nil
+	return out.snapshot(), nil
 }
 
 func (l *lab) http(name, path string, body []byte, options ...string) ([]byte, error) {
