@@ -121,15 +121,19 @@ func TestLifecycle(t *testing.T) {
 		nodeStopped := true
 		restore := func() {
 			if nodeStopped {
+				restartedAt := time.Now()
 				l.powerNode(node, true)
-				l.wait("worker Ready", func() (bool, error) {
+				l.wait("worker Ready with fresh KVM capacity", func() (bool, error) {
 					n := &core.Node{}
 					err := l.Get(l.ctx, client.ObjectKey{Name: node}, n)
 					if err != nil {
 						return false, err
 					}
+					// Ready/allocatable can survive a powered-off worker in the API.
+					// Require a new kubelet status update with healthy device slots.
+					kvm := n.Status.Allocatable["vm.roamvm.io/kvm"]
 					for _, c := range n.Status.Conditions {
-						if c.Type == core.NodeReady && c.Status == core.ConditionTrue {
+						if c.Type == core.NodeReady && c.Status == core.ConditionTrue && c.LastHeartbeatTime.After(restartedAt) && kvm.Sign() > 0 {
 							return true, nil
 						}
 					}
@@ -201,7 +205,8 @@ func TestLifecycle(t *testing.T) {
 		GetLogs(v.Status.PodName, &core.PodLogOptions{Container: "runner"}).
 		DoRaw(l.ctx)
 	must(t, err)
-	if !strings.Contains(string(log), "integrity mismatch") || strings.Contains(string(log), "Linux version") {
+	// Quiet test kernels can suppress the banner; the runner's spawn marker cannot.
+	if !strings.Contains(string(log), "integrity mismatch") || strings.Contains(string(log), "startup stage=hypervisor") || strings.Contains(string(log), "Linux version") {
 		t.Fatalf("corruption was not rejected before boot: %s", log)
 	}
 	owner := l.head(v).Owner

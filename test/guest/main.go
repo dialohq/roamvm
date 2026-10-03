@@ -68,6 +68,44 @@ func main() {
 		}
 		w.Write(out)
 	})
+	http.HandleFunc("/growth", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var err error
+		switch r.URL.Query().Get("action") {
+		case "hold":
+			// Disable the periodic fallback so it cannot conceal a lost event.
+			err = exec.CommandContext(r.Context(), "/run/current-system/sw/bin/systemctl", "stop", "roamvm-grow-root.timer").Run()
+			if err == nil {
+				err = os.WriteFile("/run/hold-growth", nil, 0o600)
+			}
+			if err == nil {
+				err = exec.CommandContext(r.Context(), "/run/current-system/sw/bin/systemctl", "start", "--no-block", "roamvm-grow-root.service").Run()
+			}
+		case "release":
+			// Force delivery while ExecStartPost is held, independently of the
+			// original kernel event's timing, and wait for the udev rule to run.
+			err = exec.CommandContext(r.Context(), "/run/current-system/sw/bin/udevadm", "trigger", "--action=change", "/sys/class/block/vda").Run()
+			if err == nil {
+				err = exec.CommandContext(r.Context(), "/run/current-system/sw/bin/udevadm", "settle", "--timeout=10").Run()
+			}
+			if err == nil {
+				err = os.Remove("/run/hold-growth")
+			}
+		case "check":
+			err = exec.CommandContext(r.Context(), "/run/current-system/sw/bin/systemctl", "is-active", "--quiet", "roamvm-grow-root.path").Run()
+		default:
+			http.Error(w, "invalid growth action", 400)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.WriteHeader(204)
+	})
 	http.HandleFunc("/storage", func(w http.ResponseWriter, r *http.Request) {
 		var stat syscall.Statfs_t
 		if err := syscall.Statfs("/", &stat); err != nil {
@@ -89,7 +127,10 @@ func main() {
 			}
 			f.Close()
 		}
-		json.NewEncoder(w).Encode(map[string]any{"bootID": string(boot), "pid": os.Getpid(), "uptime": time.Since(started).Seconds(), "filesystemBytes": stat.Blocks * uint64(stat.Bsize), "diskSectors": string(sectors), "growthSize": growthSize, "growthHash": growthHash})
+		_, held := os.Stat("/run/growth-held")
+		passes, _ := os.ReadFile("/run/growth-passes")
+		growthPasses, _ := strconv.Atoi(strings.TrimSpace(string(passes)))
+		json.NewEncoder(w).Encode(map[string]any{"bootID": string(boot), "pid": os.Getpid(), "uptime": time.Since(started).Seconds(), "filesystemBytes": stat.Blocks * uint64(stat.Bsize), "diskSectors": string(sectors), "growthSize": growthSize, "growthHash": growthHash, "growthHeld": held == nil, "growthPasses": growthPasses})
 	})
 	http.HandleFunc("/fill", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
