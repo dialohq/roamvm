@@ -13,11 +13,15 @@ it does not implement a provisioner or test runner.
 
 ## Run native NixOS nodes under libvirt
 
-`test/libvirt/node.nix` declares three NixOS machines: a K3s control plane with
-registry/MinIO, and two workers running the device plugin as a systemd service.
-`lab.sh` defines their libvirt domains, disks and isolated bridge; Kubernetes runs
-directly on NixOS, not inside kind or Docker. The runtime image is also built with
-Nix and imported into containerd. Dependencies are pinned by `flake.lock`.
+`test/libvirt/config.nix` is one lab definition, parameterized by an instance slot:
+a K3s control plane with registry/MinIO, two workers, and the scenario selections.
+Nix builds the node systems and runtime; Terranix generates the Terraform JSON.
+OpenTofu (the Terraform-compatible CLI pinned in the dev shell) owns domain
+definitions and a NAT network through `dmacvicar/libvirt` 0.9.9. The harness owns
+working disk contents, snapshot capture/restore and the existing Go test runs.
+It never undefines or recreates domains during reset. Dependencies are pinned by
+`flake.lock` and `test/libvirt/terraform.lock.hcl`. No handwritten domain XML or
+host TAP/iptables setup is needed. Kubernetes runs directly on NixOS.
 DNS, storage provisioning and the RoamVM controller stay on the control
 plane so deliberately powering off a worker does not remove cluster services.
 The lab omits metrics-server (the scenarios read CPU cgroup counters directly)
@@ -32,8 +36,13 @@ disk space (64 GiB recommended for all fixtures). Each of the three domains has
 2 GiB RAM and four vCPUs, totaling 6 GiB assigned RAM (previously 8 GiB).
 They use sparse 16 GiB root disks and share the host Nix store read-only via
 virtiofs. Do not put all three disks in tmpfs: image unpacking competes with guest
-RAM. Session libvirt needs working `newuidmap`/`newgidmap` helpers and subordinate
-UID/GID ranges. The Nix wrapper includes NixOS's `/run/wrappers/bin` on their PATH.
+RAM. Provisioning requires an accessible system libvirt connection, including
+its network driver, and a QEMU user that can access the lab directory. On a
+dedicated NixOS host import `(import ./test/libvirt/host.nix {labUser = "coder";})`
+into the host configuration, substituting your user. This enables libvirt and
+runs QEMU as that unprivileged user without changing disk ownership. Host changes
+are an administrator step, not a hidden side effect of `make libvirt-up`.
+Virtiofs also needs working user-namespace helpers/subordinate UID/GID ranges.
 
 Leave several GiB free beyond the frozen baseline for migration and generation
 tests, which hold images on both workers. A full host filesystem makes libvirt
@@ -60,17 +69,49 @@ Lab configuration lives in `test/libvirt`; generated XML, disks, unique SSH keys
 kubeconfig and fixture references live in `.lab/libvirt`. Inspect a node with
 `bash test/libvirt/lab.sh ssh roamvm-libvirt-worker systemctl --failed`.
 
-`make libvirt-down` powers off and undefines only these lab domains and removes
-their TAPs/bridge/firewall rules; it retains disks and keys. `make libvirt-up`
-reuses them. Run `make libvirt-install` after each startup to reapply the pinned
-Kubernetes settings. For NixOS configuration changes, take the lab down and up again;
-for runtime changes, run `make build libvirt-install`. Do not run two suites
-against the same lab concurrently.
+`make libvirt-plan` builds the declaration and shows the Terraform plan (exit 2
+means changes). `make libvirt-up` applies it and boots the nodes. `make
+libvirt-down` only powers them off; `make libvirt-destroy` removes Terraform-owned
+domains and networking, retaining disks and baselines. Keep the Terraform state
+under the instance directory until destruction completes. Do not delete state to
+work around a failed apply. `up` refuses to take over untracked domain/network names.
+
+All mutating entry points take the same per-instance lock. Terraform intentionally
+does not manage running/stopped state, so test power cycles and snapshot restores
+do not need an apply. Run `make libvirt-down` before applying infrastructure
+changes: replacing a network does not reconnect already-running guest TAPs.
+Definition changes invalidate existing baselines; prepare new baselines after
+applying infrastructure or node-system changes. Runtime
+changes are node-system changes too: the device plugin runs an immutable Nix
+binary, not a shared mutable `bin/roamvm` from the checkout.
+
+### Run multiple instances of the same lab
+
+`ROAMVM_LAB_SLOT` selects an instance (0 by default, 0–99 supported). Slot 0 uses
+`.lab/libvirt`; other slots use `.lab/libvirt-N`. Domain names, subnets, bridges,
+MACs, Terraform state, SSH keys, snapshots, kubeconfig and locks are slot-specific.
+All instances share one libvirt daemon; libvirt allocates their VM sockets.
+Select a free slot across all checkouts on the host. The fixed three-node topology
+and test code are reused; there are no per-scenario lab definitions.
+
+```sh
+# Prepare once per instance (repeat for slot 2).
+ROAMVM_LAB_SLOT=1 make libvirt-up libvirt-install libvirt-fixtures libvirt-freeze-warm
+# Independent workers may run concurrently; each restores its own baseline.
+ROAMVM_LAB_SLOT=1 make libvirt-scenario SCENARIO=lifecycle &
+ROAMVM_LAB_SLOT=2 make libvirt-scenario SCENARIO=network &
+wait
+```
+
+Sequential scenarios reuse an instance; destructive scenarios must not share a
+running cluster concurrently. Budget 6 GiB assigned node RAM per instance, plus
+host overhead, persistent snapshots and disk headroom. Prepared bundles retain
+their slot identity and can be moved to another host using that same slot.
 
 This is a trusted local test fixture, not a production cluster. It uses public
 test credentials, password-disabled root SSH with a generated key, and the
-private subnet `192.168.124.0/24`. Reserve that subnet and the `rvm-lab` bridge
-for this lab. The VMs can read this checkout and the host Nix store. Do not expose
+private subnet `192.168.(124 + slot).0/24`. Reserve that subnet and the `rvm-labN`
+bridge for the instance. VMs can read their lab directory and the host Nix store. Do not expose
 its unauthenticated registry or test MinIO outside the isolated bridge.
 
 ### Run isolated scenarios from a frozen baseline
@@ -94,7 +135,7 @@ cause an error rather than a silently skipped test. These run the existing Go
 E2E tests, including real node failure and NetworkPolicy enforcement.
 
 **Warm snapshots save RAM as well as disks.** `libvirt-freeze-warm` verifies the
-running NixOS configurations, builds/installs current RoamVM, restarts the device
+running NixOS configurations against the current declaration, installs RoamVM, restarts the device
 plugins, and pulls/unpacks the small guest shared by most scenarios on both
 workers before checking service readiness. Its image transfer is paid at capture,
 rather than on the first VM start after every reset. The large optional NixOS
@@ -144,8 +185,9 @@ changes, restore the cold baseline first, take the lab down, remove only
 `.lab/libvirt/warm`, then run `make libvirt-up libvirt-install libvirt-fixtures
 libvirt-freeze-warm` (omit `libvirt-fixtures` when not using optional fixtures).
 Never remove a baseline while working disks still reference it. Without a cold
-baseline, recreate the disposable lab instead. Existing 9p lab domains must be recreated
-with `make libvirt-down libvirt-up` before capturing RAM.
+baseline, recreate the disposable lab instead. Old session-libvirt/XML-managed
+labs are not adopted automatically: stop/remove those domains with the old
+harness before provisioning this version. Their old RAM snapshots cannot be reused.
 
 Cold startup waits for all three named nodes to exist and become Ready, and
 installation waits for the storage/DNS deployments to be created. Waiting for
@@ -158,10 +200,10 @@ copy-on-write overlays avoid another full disk copy. Filesystems may replay thei
 journals on boot. Each reset restores all three disks together, including the
 Kubernetes database, object store, registry, kubelet settings and local PVCs.
 Captured domain definitions and NixOS store roots keep the node systems fixed.
-With a cold baseline, each scenario builds/installs the **current RoamVM** before
-testing it against that infrastructure baseline.
+Cold resets reinstall the runtime. A baseline's node-system definitions must
+still match the Terraform-owned domains; reset never rolls infrastructure back.
 
-Freeze after `make build libvirt-install` and fixture publication have completed,
+Freeze after `make libvirt-up libvirt-install` and fixture publication have completed,
 so the baseline already contains unpacked runtime images and the pinned K3s
 configuration. Installation caches the image manifest digest by immutable Nix
 archive path under `.lab/libvirt/runtime-digests`, outside the resettable disks.
@@ -321,28 +363,29 @@ checkout with the same `flake.lock`, enter `nix develop`, then:
 
 ```sh
 make libvirt-import BUNDLE=/path/to/prepared-lab
-make libvirt-reset-cold          # Boot and install the current checkout's runtime
+make libvirt-up libvirt-install  # Terraform creates new identities and boots the disks
 make libvirt-freeze-warm         # Capture a host-local RAM baseline once
 make libvirt-scenario SCENARIO=network
 ```
 
 Import checks SHA-256 hashes, disk structure, absence of external backing files
-and the Nix pin before creating the lab. It refuses an existing `.lab/libvirt`
+and the Nix pin before creating the lab. Use the producer's `ROAMVM_LAB_SLOT`.
+It refuses an existing instance directory
 or any lab domain already defined on that host. It imports/roots the bundled OS
-closures and generates new domain definitions for the destination checkout and
-host tools. The first boot generates a new client SSH key and reads kubeconfig
+closures; the first Terraform apply generates domain definitions for the new
+host and checks that the declared node systems match the bundled systems.
+The first boot generates a new client SSH key and reads kubeconfig
 from the cluster. No source-host paths, client keys or RAM files are required.
 The source revision and tracked diff are included for provenance; cold setup
-rebuilds and installs the receiving checkout's runtime rather than testing stale
-source. Normal Go/Nix dependency caches are still needed to avoid rebuilds and
+requires matching node systems rather than silently testing stale source.
+Normal Go/Nix dependency caches are still needed to avoid rebuilds and
 downloads; the bundle is not a fully offline development environment.
 
 Only accept bundles from trusted producers. They contain executable VM disks,
 cluster certificates, host SSH keys and private cluster state. Checksums detect
 corruption, not malicious producers; the local Nix cache is unsigned, so import
 uses `--no-check-sigs` while Nix still checks content hashes. Do not publish these
-bundles publicly or run copies on a shared bridged network. Each host still
-reserves the lab subnet, domain names and TAPs for one lab at a time.
+bundles publicly. Each concurrent instance reserves its own subnet and domain names.
 
 The first cold boot/install and local RAM capture are preparation costs, **not
 the approximately two-second reset**. Subsequent local scenarios use the same

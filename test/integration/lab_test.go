@@ -69,7 +69,9 @@ func newLab(t testing.TB) *lab {
 	switch raw.CurrentContext {
 	case "kind-roamvm-test", "kind-roamvm", "kind-roamvm-cilium", "kind-roamvm-crash-test", "roamvm-libvirt":
 	default:
-		t.Fatalf("refusing context %q; use the disposable kind lab", raw.CurrentContext)
+		if raw.CurrentContext != os.Getenv("ROAMVM_TEST_CONTEXT") || !strings.HasPrefix(raw.CurrentContext, "roamvm-libvirt-") {
+			t.Fatalf("refusing context %q; use a disposable lab", raw.CurrentContext)
+		}
 	}
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, &clientcmd.ConfigOverrides{}).
 		ClientConfig()

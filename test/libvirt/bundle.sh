@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Portable prepared disks; RAM snapshots must be captured on the receiving host.
 set -euo pipefail
-export LIBVIRT_DEFAULT_URI=qemu:///session
-umask 077
-root=$(git rev-parse --show-toplevel)
+source "$(dirname "$0")/common.sh"
+lock_lab
 test "$PWD" = "$root" || { echo 'Run from the repository root' >&2; exit 1; }
-lab="$root/.lab/libvirt"
-names=(roamvm-libvirt-control-plane roamvm-libvirt-worker roamvm-libvirt-worker2)
 operation=${1:-}
 test -n "${2:-}" || { echo "Usage: $0 export|import BUNDLE_DIRECTORY" >&2; exit 1; }
 bundle=$(realpath -m "$2")
@@ -15,15 +12,15 @@ trap 'if [[ -n "$stage" ]]; then rm -rf -- "$stage"; fi' EXIT
 
 case "$operation" in
   export)
+    load_lab
     test ! -e "$bundle" || { echo 'Bundle destination already exists' >&2; exit 1; }
-    exec 9> "$lab/scenario.lock"
-    flock -n 9 || { echo 'Another baseline/scenario operation is running' >&2; exit 1; }
     baseline="$lab/baseline"
     if [[ -f "$lab/warm/ready" ]]; then baseline="$lab/warm"; fi
     test -f "$baseline/ready" || { echo 'Freeze a baseline before exporting' >&2; exit 1; }
     mkdir -p "$(dirname "$bundle")"
     stage=$(mktemp -d "$bundle.partial.XXXXXX")
-    echo roamvm-libvirt-disks-v1 > "$stage/format"
+    echo roamvm-libvirt-disks-v2 > "$stage/format"
+    printf '%s\n' "$ROAMVM_LAB_SLOT" > "$stage/slot"
     git rev-parse HEAD > "$stage/revision"
     git diff HEAD > "$stage/worktree.patch"
     cp flake.lock "$stage/flake.lock"
@@ -59,6 +56,9 @@ case "$operation" in
     ;;
   import)
     test ! -e "$lab" || { echo 'Refusing to replace an existing lab' >&2; exit 1; }
+    configuration=$(nix eval --json --file test/libvirt/config.nix --arg slot "$ROAMVM_LAB_SLOT")
+    export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-$(jq -r .uri <<< "$configuration")}"
+    mapfile -t names < <(jq -r '.nodes | keys[]' <<< "$configuration")
     # Do not take over another checkout's domains on this host.
     domains=$(virsh list --all --name)
     for name in "${names[@]}"; do
@@ -73,7 +73,8 @@ case "$operation" in
       find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum |
         cmp SHA256SUMS -
     )
-    test "$(cat "$bundle/format")" = roamvm-libvirt-disks-v1
+    test "$(cat "$bundle/format")" = roamvm-libvirt-disks-v2
+    test "$(cat "$bundle/slot")" = "$ROAMVM_LAB_SLOT" || { echo 'Import using the same lab slot as the producer' >&2; exit 1; }
     cmp flake.lock "$bundle/flake.lock" || { echo 'Use the flake.lock from the bundle producer' >&2; exit 1; }
     systems=()
     for name in "${names[@]}"; do
@@ -91,26 +92,25 @@ case "$operation" in
     mkdir -p "$root/.lab"
     stage=$(mktemp -d "$root/.lab/import.XXXXXX")
     mkdir "$stage/baseline"
-    for i in 0 1 2; do
+    for i in "${!names[@]}"; do
       name=${names[$i]}
       cp --reflink=auto --sparse=always "$bundle/$name.qcow2" "$stage/baseline/"
       chmod a-w "$stage/baseline/$name.qcow2"
       nix-store --add-root "$stage/baseline/$name-system" --realise "${systems[$i]}" >/dev/null
-      # Regenerate host paths and devices, never reuse source domain UUIDs,
-      # MACs, CPU state, sockets, SSH keys or virtiofs inode handles.
-      bash test/libvirt/lab.sh xml "$name" "${systems[$i]}" > "$stage/baseline/$name.xml"
-      cp "$stage/baseline/$name.xml" "$stage/"
     done
     cp "$bundle/"*-ref "$stage/baseline/"
+    # The first Terraform apply binds these disks to new domain identities.
+    # Never import source Terraform state, RAM, sockets or host-specific XML.
+    touch "$stage/baseline/imported"
     touch "$stage/baseline/ready"
     sync -f "$stage"
     mv -T "$stage" "$lab"
     stage=""
-    for i in 0 1 2; do
+    for i in "${!names[@]}"; do
       nix-store --add-root "$lab/baseline/${names[$i]}-system" --realise "${systems[$i]}" >/dev/null
     done
     sync -f "$lab"
-    echo 'Imported. Run make libvirt-reset-cold, then make libvirt-freeze-warm for fast local resets.'
+    echo 'Imported. Run make libvirt-up libvirt-install, then make libvirt-freeze-warm for fast local resets.'
     ;;
   *) echo "Usage: $0 export|import BUNDLE_DIRECTORY" >&2; exit 1 ;;
 esac
