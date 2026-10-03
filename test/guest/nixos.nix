@@ -15,7 +15,7 @@
         nixpkgs.flake.setFlakeRegistry = false;
         boot.loader.grub.enable = false;
         boot.initrd.availableKernelModules = ["virtio_pci" "virtio_blk" "virtio_net" "ext4"];
-        boot.kernelParams = ["console=ttyS0" "net.ifnames=0"];
+        boot.kernelParams = ["console=ttyS0,115200" "quiet" "net.ifnames=0"];
         fileSystems."/" = {
           device = "/dev/disk/by-label/nixos";
           fsType = "ext4";
@@ -58,6 +58,6 @@ in
     qemu-img compare -f raw -F qcow2 ${disk}/nixos.img disk/root.qcow2
     ln -s ${guest.config.system.build.kernel}/bzImage disk/vmlinux
     ln -s ${guest.config.system.build.initialRamdisk}/initrd disk/initrd
-    echo '{"format":"qcow2","cmdline":"init=${guest.config.system.build.toplevel}/init console=ttyS0 net.ifnames=0"}' > disk/manifest.json
+    echo '{"format":"qcow2","cmdline":"init=${guest.config.system.build.toplevel}/init console=ttyS0,115200 quiet net.ifnames=0"}' > disk/manifest.json
     tar -chzf $out disk
   ''

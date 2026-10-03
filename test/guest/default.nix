@@ -61,6 +61,8 @@ in
     qemu-img compare -f raw -F qcow2 root.raw disk/root.qcow2
     cp ${initrd}/initrd disk/initrd
     cp ${kernel}/bzImage disk/vmlinux
-    echo '{"format":"qcow2","cmdline":"console=ttyS0 root=/dev/vda rw panic=1 net.ifnames=0"}' > disk/manifest.json
+    # Keep errors on the console, without serializing every boot message through the
+    # nested emulated UART. The full kernel log remains in the guest ring buffer.
+    echo '{"format":"qcow2","cmdline":"console=ttyS0,115200 quiet root=/dev/vda rw panic=1 net.ifnames=0"}' > disk/manifest.json
     tar -czf $out disk
   ''

@@ -24,7 +24,7 @@
           boot.loader.timeout = 0;
           boot.initrd.systemd.enable = true;
           boot.initrd.availableKernelModules = ["virtio_pci" "virtio_blk" "virtio_net" "ext4"];
-          boot.kernelParams = ["console=ttyS0" "net.ifnames=0" "generation=${generation}"];
+          boot.kernelParams = ["console=ttyS0,115200" "quiet" "net.ifnames=0" "generation=${generation}"];
           fileSystems."/" = {
             device = "/dev/disk/by-label/nixos";
             fsType = "ext4";
@@ -84,7 +84,7 @@ in
     ''}
     echo '${builtins.toJSON ({format = "qcow2";}
       // pkgs.lib.optionalAttrs (!diskBoot) {
-        cmdline = "init=${initial.config.system.build.toplevel}/init console=ttyS0 net.ifnames=0 generation=initial";
+        cmdline = "init=${initial.config.system.build.toplevel}/init console=ttyS0,115200 quiet net.ifnames=0 generation=initial";
       })}' > disk/manifest.json
     tar -chzf $out disk
   ''

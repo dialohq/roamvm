@@ -210,6 +210,39 @@ the lab down, discard the disposable `.lab/libvirt` directory, and prepare a new
 lab and baseline. Only scripts and scenario definitions belong in Git; generated
 VM disks and run logs do not.
 
+### Scenario execution time
+
+The test images use `console=ttyS0,115200 quiet` for direct-kernel and GRUB boots,
+including switched and rolled-back generations. This avoids sending verbose
+boot output through the nested emulated UART; errors remain on the console and
+the full kernel log remains in the guest ring buffer. Production guest images
+and runtime defaults are unchanged. Readiness-only HTTP connections time out
+after one second and retry under the existing 180-second readiness deadline;
+ordinary requests, including the 10-second CPU loads, retain their old timeout.
+Waits lasting at least one second are logged by the test helper.
+
+All six race-enabled scenarios passed serially on the same 6-vCPU runner:
+
+| Scenario | Previous recorded run | Optimized run |
+| --- | ---: | ---: |
+| Crash recovery | 2m52s | 2m25s |
+| Lifecycle | 4m11s | 3m17s |
+| Networking | 1m20s | 1m07s |
+| CPU oversubscription | 5m45s | 4m41s |
+| Disk resize | 5m36s | 3m00s |
+| NixOS generations | 6m32s | 6m07s |
+| Total Go package execution | 26m17s | 20m37s |
+
+The full `make libvirt-scenarios` command took **20m57s**, including resets and
+Go invocation overhead, but excluding fixture builds, transfers and baseline
+capture. Package execution fell about 22% versus the previous recorded run.
+A fresh generation-only before/after comparison took 7m03s and 6m02s (14% less).
+These are individual runs, not latency guarantees: image caches, provisioning
+and the guest resize retry timer contribute variation, particularly to resize.
+No scenarios, assertions, durability checks or CPU-load durations were removed.
+Rebuild/publish the fixtures and recapture the baseline to adopt these settings;
+an older frozen baseline still references the old guest image digests.
+
 ### Transfer a prepared lab to another checkout or host
 
 The **disk baseline is portable; the RAM baseline is host-local**. Export flattens
