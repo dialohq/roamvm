@@ -59,12 +59,10 @@ case "${1:-}" in
         qemu-img convert -f raw -O qcow2 -c "$lab/$name.raw.partial" "$lab/$name.qcow2"
         rm "$lab/$name.raw.partial"
       fi
-      memory=3072
-      if [[ $i == 0 ]]; then memory=2048; fi
       cat > "$lab/$name.xml" <<XML
 <domain type='kvm'>
   <name>$name</name>
-  <memory unit='MiB'>$memory</memory><vcpu>4</vcpu>
+  <memory unit='MiB'>2048</memory><vcpu>4</vcpu>
   <memoryBacking><source type='memfd'/><access mode='shared'/></memoryBacking>
   <cpu mode='host-passthrough'/>
   <os><type arch='x86_64'>hvm</type>

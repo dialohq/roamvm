@@ -96,8 +96,11 @@ in {
       else "https://192.168.124.10:6443";
     extraFlags =
       ["--node-ip=${ip}" "--kubelet-arg=config=/var/lib/kubelet/config.yaml"]
-      ++ lib.optionals server ["--disable=traefik" "--disable=servicelb" "--tls-san=192.168.124.10"];
+      ++ lib.optionals server ["--disable=traefik" "--disable=servicelb" "--disable=metrics-server" "--tls-san=192.168.124.10"];
   };
+  # This small test cluster favors lower resident memory over GC throughput.
+  # This is a heap-growth target, not a hard memory cap or memory overcommit.
+  systemd.services.k3s.environment.GOGC = "50";
   systemd.services.roamvm-device-plugin = lib.mkIf (!server) {
     wantedBy = ["multi-user.target"];
     after = ["k3s.service"];
