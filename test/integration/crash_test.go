@@ -21,7 +21,9 @@ func TestLocalCrashRecovery(t *testing.T) {
 			l.storage()
 			v := l.spec("crash")
 			if failure == "oom" {
-				v.Spec.Resources.Limits = core.ResourceList{core.ResourceMemory: resource.MustParse("2Gi")}
+				// Exceed the 512 MiB guest plus required hypervisor overhead,
+				// but leave room for node services on a 2 GiB lab worker.
+				v.Spec.Resources.Limits = core.ResourceList{core.ResourceMemory: resource.MustParse("1280Mi")}
 			}
 			l.create(v)
 			l.service(v, core.ServiceTypeClusterIP)
@@ -36,9 +38,13 @@ func TestLocalCrashRecovery(t *testing.T) {
 			must(t, err)
 			expectedMax := "max"
 			if failure == "oom" {
-				expectedMax = "2147483648"
+				expectedMax = "1342177280"
 			}
 			equal(t, "runner memory limit", strings.TrimSpace(string(memoryMax)), expectedMax)
+			globalOOMs := 0
+			if failure == "oom" && l.libvirt() {
+				globalOOMs = strings.Count(string(l.nodeExec(nil, pod.Spec.NodeName, "dmesg")), "global_oom")
+			}
 			command := `for p in /proc/[0-9]*; do read -r name < "$p/comm" || continue; case "$name" in qemu-system-*|.qemu-system-*) kill -KILL "${p##*/}"; exit 0;; esac; done; exit 1`
 
 			if failure == "oom" {
@@ -59,6 +65,9 @@ func TestLocalCrashRecovery(t *testing.T) {
 			}
 			if failure == "oom" && !bytes.Contains([]byte(stopped.Status.Message), []byte("OOMKilled")) {
 				t.Fatal(stopped.Status.Message)
+			}
+			if failure == "oom" && l.libvirt() {
+				equal(t, "container OOM must not exhaust the node", strings.Count(string(l.nodeExec(nil, pod.Spec.NodeName, "dmesg")), "global_oom"), globalOOMs)
 			}
 			l.gone(pod)
 			l.start(v.Name)
