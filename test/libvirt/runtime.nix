@@ -18,7 +18,7 @@ in
     passthru = {inherit runtime;};
     contents = pkgs.buildEnv {
       name = "roamvm-runtime-root";
-      paths = with pkgs; [runtime (lib.lowPrio busybox) cacert curl iproute2 iptables dnsmasq qemu_kvm cdrkit];
+      paths = with pkgs; [runtime (lib.lowPrio busybox) cacert curl iproute2 iptables dnsmasq qemu_test cdrkit];
       pathsToLink = ["/bin" "/etc"];
     };
     extraCommands = ''

@@ -16,6 +16,8 @@ it does not implement a provisioner or test runner.
 `test/libvirt/config.nix` is one lab definition, parameterized by an instance slot:
 a K3s control plane with registry/MinIO, two workers, and the scenario selections.
 Nix builds the node systems and runtime; Terranix generates the Terraform JSON.
+The runtime image uses Nixpkgs' headless `qemu_test` build, retaining KVM, virtio,
+QCOW2 and firmware boot without loading GUI/audio libraries for every guest.
 OpenTofu (the Terraform-compatible CLI pinned in the dev shell) owns domain
 definitions and a NAT network through `dmacvicar/libvirt` 0.9.9. The harness owns
 working disk contents, snapshot capture/restore and the existing Go test runs.
