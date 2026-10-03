@@ -88,6 +88,13 @@ libvirt-freeze:
 libvirt-freeze-warm:
 	bash test/libvirt/scenario.sh freeze-warm
 
+.PHONY: libvirt-export libvirt-import
+libvirt-export:
+	bash test/libvirt/bundle.sh export "$(BUNDLE)"
+
+libvirt-import:
+	bash test/libvirt/bundle.sh import "$(BUNDLE)"
+
 libvirt-reset:
 	bash test/libvirt/scenario.sh reset
 

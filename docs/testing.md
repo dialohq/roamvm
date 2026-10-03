@@ -203,12 +203,73 @@ reset; logs, revision, tracked diff and exit status remain under
 operations are locked against each other; do not run manual lab commands or
 other tests concurrently.
 
-Keep the baseline at its original path: overlays contain absolute backing paths.
-It is local to this checkout/host, including its SSH keys and private network,
-not a portable VM artifact. Freezing refuses to overwrite an existing baseline.
-To change the node OS or fixture set, take the lab down, discard the disposable
-`.lab/libvirt` directory, and prepare a new lab and baseline. Only scripts and
-scenario definitions belong in Git; generated VM disks and run logs do not.
+Keep an installed baseline at its original path: overlays contain absolute
+backing paths. Use the export/import workflow below to move it. Freezing refuses
+to overwrite an existing baseline. To change the node OS or fixture set, take
+the lab down, discard the disposable `.lab/libvirt` directory, and prepare a new
+lab and baseline. Only scripts and scenario definitions belong in Git; generated
+VM disks and run logs do not.
+
+### Transfer a prepared lab to another checkout or host
+
+The **disk baseline is portable; the RAM baseline is host-local**. Export flattens
+and compresses the frozen QCOW2 backing chains into three self-contained disks,
+and includes the node NixOS closures as a relocatable Nix binary cache. Registry
+fixtures, containerd images, Kubernetes state and MinIO objects are already on
+those disks. Export prefers the warm baseline's frozen disks when available;
+it does not copy running working disks or change the running lab. Disks from a
+warm snapshot recover as after a power loss on their first cold boot. Legacy
+9p baselines must be recreated with the current virtiofs configuration first.
+
+On the producing host, inside `nix develop`:
+
+```sh
+make libvirt-export BUNDLE=/path/to/prepared-lab
+# Copy this whole directory, or archive it for your trusted artifact cache:
+tar -C /path/to -cf prepared-lab.tar prepared-lab
+```
+
+On a receiving Linux x86-64 host with the prerequisites above, use a fresh
+checkout with the same `flake.lock`, enter `nix develop`, then:
+
+```sh
+make libvirt-import BUNDLE=/path/to/prepared-lab
+make libvirt-reset-cold          # Boot and install the current checkout's runtime
+make libvirt-freeze-warm         # Capture a host-local RAM baseline once
+make libvirt-scenario SCENARIO=network
+```
+
+Import checks SHA-256 hashes, disk structure, absence of external backing files
+and the Nix pin before creating the lab. It refuses an existing `.lab/libvirt`
+or any lab domain already defined on that host. It imports/roots the bundled OS
+closures and generates new domain definitions for the destination checkout and
+host tools. The first boot generates a new client SSH key and reads kubeconfig
+from the cluster. No source-host paths, client keys or RAM files are required.
+The source revision and tracked diff are included for provenance; cold setup
+rebuilds and installs the receiving checkout's runtime rather than testing stale
+source. Normal Go/Nix dependency caches are still needed to avoid rebuilds and
+downloads; the bundle is not a fully offline development environment.
+
+Only accept bundles from trusted producers. They contain executable VM disks,
+cluster certificates, host SSH keys and private cluster state. Checksums detect
+corruption, not malicious producers; the local Nix cache is unsigned, so import
+uses `--no-check-sigs` while Nix still checks content hashes. Do not publish these
+bundles publicly or run copies on a shared bridged network. Each host still
+reserves the lab subnet, domain names and TAPs for one lab at a time.
+
+The first cold boot/install and local RAM capture are preparation costs, **not
+the approximately two-second reset**. Subsequent local scenarios use the same
+fast RAM-restore path. RAM files themselves cannot safely be moved across hosts:
+they contain host-passthrough CPU state and live virtiofs references to host files.
+
+The portability round trip was tested in a fresh checkout at a different path
+on the same runner: all three flattened disks compared identical to their backing
+chains, and the bundled cache contained all 668 OS-closure paths. Import took
+18.2 seconds with those paths already in the host store; cold boot/install took
+67.9 seconds and local RAM capture 45.6 seconds. The Kubernetes scenario then
+passed after RAM restore, including NetworkPolicy deny/allow enforcement.
+The full bundle with optional fixtures occupied about 6.3 GiB. These are not
+cross-hardware or empty-Nix-store timings; a second physical host was not tested.
 
 ## Run the kind lab
 
