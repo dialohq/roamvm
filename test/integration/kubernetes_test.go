@@ -33,11 +33,11 @@ func TestKubernetes(t *testing.T) {
 	l.power(pending.Name, "Stopped")
 	l.phase(pending.Name, "Stopped")
 	var pods core.PodList
-	must(
-		t,
-		l.List(l.ctx, &pods, client.InNamespace("default"), client.MatchingLabels{"vm.roamvm.io/name": pending.Name}),
-	)
-	equal(t, "unscheduled VM cancelled without a Pod", len(pods.Items), 0)
+	// Stopped is published before the controller releases the Pod finalizer.
+	l.wait("unscheduled VM Pod deleted", func() (bool, error) {
+		err := l.List(l.ctx, &pods, client.InNamespace("default"), client.MatchingLabels{"vm.roamvm.io/name": pending.Name})
+		return len(pods.Items) == 0, err
+	})
 	l.storage()
 	_, err := l.state.Read(l.ctx, string(pending.UID))
 	if !errors.Is(err, state.ErrNotFound) {
@@ -138,7 +138,8 @@ func TestKubernetes(t *testing.T) {
 			l.ctx,
 			&api.VirtualMachine{ObjectMeta: meta(name)},
 			client.RawPatch(types.ApplyPatchType, encoded),
-			options...)
+			options...,
+		)
 	}
 	must(t, apply(false))
 	t.Cleanup(func() {

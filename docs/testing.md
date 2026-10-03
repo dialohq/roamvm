@@ -89,16 +89,19 @@ reconciliation, then deletes it before capture; a process health check alone
 does not prove the controller has acquired leadership. It pauses all nodes before
 saving their memory in parallel, retains read-only disks under `.lab/libvirt/warm`, and
 creates disposable working overlays. Free-page reporting and sparse mapped-RAM
-save files avoid copying unused memory; two parallel channels per node avoid
-serial decompression on restore. Existing cold baselines remain unchanged,
+save files avoid copying unused memory; four parallel restore channels per node
+avoid serial decompression. Existing cold baselines remain unchanged,
 including any backing files used by warm disks.
 
-Save files default to `.lab/libvirt/warm`. For a RAM-backed baseline, use
-`ROAMVM_WARM_MEMORY_DIR=/dev/shm/roamvm-warm make libvirt-freeze-warm`.
-The warm directory then contains symlinks to those files. Allow several GiB of
-additional host RAM; these files disappear on host reboot. A missing save file
-rejects a warm reset before touching running nodes; use `libvirt-reset-cold` to
-recover. Remove the external memory directory too when refreshing a baseline.
+RAM images are stored on persistent disk under `.lab/libvirt/warm`, alongside
+the captured disks and metadata. Capture flushes the filesystem before publishing
+the ready marker. Allow several GiB of disk space for the sparse RAM files.
+Tmpfs/ramfs-backed images are rejected before touching running nodes; the former
+`ROAMVM_WARM_MEMORY_DIR` option is no longer supported. A missing image also
+rejects reset; use `libvirt-reset-cold` to recover or recapture the baseline.
+The host page cache may accelerate repeated restores, but it is not the source
+of truth: snapshots survive a host reboot with no recapture required, provided
+the pinned host configuration and shared files remain unchanged.
 
 `libvirt-reset` and scenarios prefer the warm baseline when one exists. They
 restore all RAM images paused, then resume the nodes together and check live
@@ -148,15 +151,25 @@ containerd readiness, image smoke tests and controller rollout, but not source
 recompilation or the scenario itself; it is not a guest-VM startup benchmark.
 
 With gzip RAM snapshots, three full resets on that runner took **7.73, 7.74 and
-8.06 seconds**. Sparse RAM snapshots in `/dev/shm`, with guest-agent readiness
-checks, reduced five consecutive resets to **2.83, 3.06, 3.20, 3.28 and 3.22
-seconds** (3.20-second median). This includes stopping existing domains,
-resetting disks, restoring all three nodes and live readiness checks. It does
-**not** meet a sub-2-second full-reset target. RAM loading alone takes about
-0.8 seconds; that is not the end-to-end result. These are RAM-backed timings,
-not a claim about cold disk reads or the default on-disk memory directory.
-These timings require an already-captured snapshot matching the checkout;
-building code and capturing a new baseline are separate preparation steps.
+8.06 seconds**. Persistent sparse RAM snapshots on ext4, with cached reads,
+took **1.985, 1.985, 2.026, 1.973 and 1.970 seconds** (1.985-second median).
+This includes stopping running domains, resetting disks, restoring all three
+nodes, full source/binary fingerprint verification, clock correction and live
+readiness checks. Node teardown/reset/restore operations overlap, but every
+restored node remains paused until all restores succeed. Independent service
+probes run concurrently after the guest clocks and CRI checks complete.
+
+Evicting the saved-memory files with `POSIX_FADV_DONTNEED` before each reset
+produced **2.251, 2.368 and 2.287 seconds**. `/proc/diskstats` recorded about
+**3.44 GB read from vda per reset**. This tests reads beyond the runner's page
+cache, not eviction of the underlying hypervisor/storage caches. The three
+save files occupy about 3.3 GiB on disk. These results meet sub-2 seconds on
+the cached median, not every run or disk-cold reads. CPU/process startup and
+readiness overhead still exist; this is not an I/O-only latency claim.
+The earlier `/dev/shm` results are superseded by these persistent measurements.
+All timings require an already-captured snapshot matching the checkout;
+building code and capturing/flushing a new baseline are separate preparation
+steps. They measure lab reset, not startup of a guest VM inside the lab.
 
 `make libvirt-reset` restores the preferred baseline without running a test.
 **Reset discards all changes in the working lab**, including failed-test VMs.
