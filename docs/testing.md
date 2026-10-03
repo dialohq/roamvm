@@ -33,9 +33,7 @@ that recovery did not rely on a node-wide OOM kill.
 
 Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
 disk space (64 GiB recommended for all fixtures). Each domain has 2 GiB RAM,
-totaling 6 GiB. The control plane and first worker have four vCPUs; worker2 has
-two, matching the CPU-oversubscription fixture without restarting K3s to change
-its advertised budget. The test still pins that worker to two host CPUs and
+totaling 6 GiB, and four vCPUs. The CPU test pins a worker to two host CPUs and
 runs two four-vCPU guests, including explicit quota and checkpoint checks.
 Expose vCPUs as cores in one socket, not separate sockets. On AMD hosts without
 an exposed invariant TSC, multiple sockets make Linux mark TSC unsynchronized.

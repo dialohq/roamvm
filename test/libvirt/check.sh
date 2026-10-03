@@ -25,8 +25,6 @@ done
 jq -es '
   .[0] as $a | .[1] as $b |
   $a.slot == 0 and $b.slot == 1 and
-  $a.nodes[$a.cluster + "-worker2"].cpus == 2 and
-  $b.nodes[$b.cluster + "-worker2"].cpus == 2 and
   $a.network.gateway == "192.168.124.1" and $b.network.gateway == "192.168.125.1" and
   $a.network.name != $b.network.name and $a.network.bridge != $b.network.bridge and
   ([($a.nodes | keys[]) as $n | $b.nodes | has($n)] | any | not) and

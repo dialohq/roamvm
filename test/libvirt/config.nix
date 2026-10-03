@@ -44,9 +44,7 @@ in {
       ip = "${subnet}.12";
       mac = "52:54:00:72:${macSlot}:12";
       memory = 2048;
-      # Match the oversubscription fixture instead of restarting K3s and
-      # oversubscribing the lab node's own vCPUs before booting test guests.
-      cpus = 2;
+      cpus = 4;
     };
   };
   scenarios = {

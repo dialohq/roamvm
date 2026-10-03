@@ -29,8 +29,8 @@ func TestOversubscription(t *testing.T) {
 	node := &core.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 	l.get(node)
 	capacity := node.Status.Capacity.Cpu().Value()
-	if capacity < 2 {
-		t.Fatal("test requires at least two host CPUs")
+	if capacity <= 2 {
+		t.Fatal("test requires more than two host CPUs")
 	}
 	config := l.nodeExec(nil, nodeName, "cat", "/var/lib/kubelet/config.yaml")
 	if strings.Contains(string(config), "kubeReserved:") {
@@ -91,23 +91,19 @@ func TestOversubscription(t *testing.T) {
 	}
 	// Register before fixture cleanup so Pods stop while the constrained node is still running.
 	t.Cleanup(func() {
-		if capacity > 2 {
-			writeConfig(config)
-		}
+		writeConfig(config)
 		restoreCPUs()
 		allocatable(capacity)
 	})
 	if !l.libvirt() {
 		l.run(nil, "docker", "update", "--cpuset-cpus", cpuset.New(cpus...).String(), nodeName)
 	}
-	if capacity > 2 {
-		writeConfig(
-			append(
-				slices.Clone(config),
-				[]byte(fmt.Sprintf("\nkubeReserved:\n  cpu: %q\n", strconv.FormatInt(capacity-2, 10)))...,
-			),
-		)
-	}
+	writeConfig(
+		append(
+			slices.Clone(config),
+			[]byte(fmt.Sprintf("\nkubeReserved:\n  cpu: %q\n", strconv.FormatInt(capacity-2, 10)))...,
+		),
+	)
 	allocatable(2)
 	l.networkClient()
 	names := []string{}

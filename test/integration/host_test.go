@@ -92,8 +92,8 @@ func (l *lab) pinLibvirtCPUs(node string) {
 		}
 		pins = append(pins, [2]string{fields[0], fields[1]})
 	}
-	if len(pins) < 2 {
-		l.t.Fatal("expected at least two libvirt vCPUs")
+	if len(pins) < 3 {
+		l.t.Fatal("expected more than two libvirt vCPUs")
 	}
 	// Restore even if changing one of the later vCPU affinities fails.
 	l.t.Cleanup(func() {
