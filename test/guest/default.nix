@@ -21,10 +21,29 @@
       depmod -b $out ${kernel.modDirVersion}
     '';
   busybox = pkgs.pkgsStatic.busybox.overrideAttrs (old: {
-    # Replace only the final console delay, not the TERM/KILL grace or syncs.
-    # Keep the original delay for consoles that cannot report drain completion.
+    # Keep shutdown actions, syncs and the full TERM grace for live processes,
+    # but stop waiting once PID 1 has reaped every child (including orphans).
     postPatch = ''
       ${old.postPatch or ""}
+      replacement=$(cat <<'WAIT'
+      sync();
+      {
+        unsigned long long deadline = monotonic_ms() + 1000;
+        do {
+          pid_t pid = safe_waitpid(-1, NULL, WNOHANG | __WALL);
+          if (pid < 0 && errno == ECHILD)
+            break;
+          if (pid <= 0)
+            usleep(10000);
+        } while (monotonic_ms() < deadline);
+      }
+
+      kill(-1, SIGKILL);
+      WAIT
+      )
+      substituteInPlace init/init.c --replace-fail \
+        $'sync();\n\tsleep1();\n\n\tkill(-1, SIGKILL);' "$replacement"
+      # Fall back to the original console delay if draining is unsupported.
       substituteInPlace init/init.c --replace-fail \
         $'/* Allow time for last message to reach serial console, etc */\n\tsleep1();' \
         $'/* Drain the final console message before reboot. */\n\tif (tcdrain(STDERR_FILENO) != 0)\n\t\tsleep1();'

@@ -13,6 +13,18 @@ for slot in 0 1; do
   tofu -chdir="$work/tf-$slot" init -backend=false -input=false -lockfile=readonly
   tofu -chdir="$work/tf-$slot" validate
   kubectl kustomize "$work/config-$slot" >/dev/null
+  jq -e --slurpfile layout "$work/config-$slot/manifest.json" '
+    .items as $volumes |
+    ($volumes | length) == 16 and
+    ([$volumes[] | [.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0], .spec.hostPath.path]] | unique | length) == 16 and
+    all($volumes[];
+      .metadata.annotations["pv.kubernetes.io/provisioned-by"] == "rancher.io/local-path" and
+      .spec.persistentVolumeReclaimPolicy == "Delete" and .spec.storageClassName == "local-path" and
+      .spec.hostPath.type == "DirectoryOrCreate" and (.spec | has("claimRef") | not) and
+      (.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0] |
+        .key == "kubernetes.io/hostname" and .operator == "In" and (.values | length) == 1 and
+        ($layout[0].nodes[.values[0]].role == "agent")))
+  ' "$work/config-$slot/warm-volumes.json" >/dev/null
   jq -e '.resource.libvirt_domain | length == 3 and all(.[]; has("running") | not)' "$work/config-$slot/main.tf.json" >/dev/null
   jq -e '.resource.libvirt_domain | all(.[]; .cpu.topology.sockets == 1 and .cpu.topology.threads == 1 and .cpu.topology.cores == .vcpu)' "$work/config-$slot/main.tf.json" >/dev/null
   jq -e '.resource.libvirt_network.lab.bridge | .stp == "off" and .delay == "0"' "$work/config-$slot/main.tf.json" >/dev/null
@@ -22,6 +34,7 @@ for slot in 0 1; do
   tofu -chdir="$work/tf-$slot" providers schema -json |
     jq -e '.provider_schemas[].resource_schemas.libvirt_domain.block.attributes.os.nested_type.attributes.cmdline.type == "string"' >/dev/null
 done
+jq -es '[.[].items[].metadata.name] | length == (unique | length)' "$work/config-0/warm-volumes.json" "$work/config-1/warm-volumes.json" >/dev/null
 jq -es '
   .[0] as $a | .[1] as $b |
   $a.slot == 0 and $b.slot == 1 and

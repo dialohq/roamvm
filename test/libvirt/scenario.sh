@@ -81,7 +81,7 @@ fingerprint() {
   # A RAM snapshot contains running binaries and mounted host files. Never
   # silently replay it against a different runtime, configuration or key.
   {
-    git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/guest test/libvirt/scenario.sh test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/common.sh test/libvirt/config.nix test/libvirt/terraform.nix test/libvirt/terraform.lock.hcl test/libvirt/kustomization.nix |
+    git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/guest test/libvirt/scenario.sh test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/common.sh test/libvirt/config.nix test/libvirt/terraform.nix test/libvirt/terraform.lock.hcl test/libvirt/kustomization.nix test/libvirt/volumes.nix |
       sort -z | xargs -0 sha256sum
     # OpenSSL uses hardware SHA acceleration for the large runtime binary;
     # still hash the entire content on every reset, not just file metadata.

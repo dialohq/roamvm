@@ -97,7 +97,7 @@ func TestDiskFullRecovery(t *testing.T) {
 				return strings.Contains(string(data), marker)
 			}, 45*time.Second, 100*time.Millisecond, "waiting for %s", marker)
 		}
-		wait("# ")
+		wait("Please press Enter to activate this console.")
 		_, err = io.WriteString(stdin, "\n")
 		require.NoError(t, err)
 		wait("# ")

@@ -149,6 +149,12 @@ every reset; a registry mirror alone would not eliminate unpacking. Large option
 fixtures stay in the registry until their scenarios pull them: preloading all of
 them added roughly 6 GiB of worker image caches to the baseline. PVC creation and
 guest boot still happen normally inside each scenario.
+The declaration also supplies eight empty, node-affine local-path volumes per
+worker. These avoid launching a provisioning Pod for each new VM. Consumed
+volumes use the provisioner's normal deletion path and are never rebound with
+old guest data; exhaustion falls back to dynamic provisioning. Reset restores
+the empty capacity along with the cluster. This caches test storage preparation,
+not guest boot, checkpoint upload, restore, or PVC binding.
 Before capture it creates a stopped probe VM, waits for reconciliation, and
 deletes it; a process health check alone does not prove the controller has
 acquired leadership. It pauses all nodes before

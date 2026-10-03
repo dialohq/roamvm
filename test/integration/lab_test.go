@@ -37,6 +37,8 @@ import (
 	"k8s.io/client-go/transport/spdy"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 type lab struct {
@@ -48,6 +50,7 @@ type lab struct {
 	cluster, image, probe string
 	store                 *state.S3
 	state                 state.Manager
+	created               []client.Object
 }
 
 func must(t testing.TB, err error) {
@@ -165,14 +168,49 @@ func (l *lab) get(obj client.Object) {
 func (l *lab) create(obj client.Object) {
 	l.t.Helper()
 	must(l.t, l.Create(l.ctx, obj))
+	l.created = append(l.created, obj)
+	if len(l.created) > 1 {
+		return
+	}
+	// Register at the first fixture, preserving earlier host-restoration cleanup.
+	// Kubernetes can tear down independent resources together; do not serialize
+	// their termination waits. PVC protection still fences in-use volumes.
 	l.t.Cleanup(func() {
 		if l.t.Failed() {
-			l.t.Logf("retained %T %s for debugging", obj, obj.GetName())
+			for _, obj := range l.created {
+				l.t.Logf("retained %T %s for debugging", obj, obj.GetName())
+			}
 			return
 		}
-		must(l.t, client.IgnoreNotFound(l.Delete(l.ctx, obj)))
-		l.gone(obj)
+		for _, obj := range l.created {
+			must(l.t, client.IgnoreNotFound(l.Delete(l.ctx, obj)))
+		}
+		for _, obj := range l.created {
+			l.gone(obj)
+		}
 	})
+}
+
+func TestFixtureCleanup(t *testing.T) {
+	var operations []string
+	c := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			operations = append(operations, "delete "+obj.GetName())
+			return c.Delete(ctx, obj, opts...)
+		},
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			operations = append(operations, "wait "+key.Name)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	t.Run("fixtures", func(t *testing.T) {
+		t.Cleanup(func() { operations = append(operations, "restore host") })
+		l := &lab{t: t, ctx: t.Context(), Client: c}
+		l.create(&core.Pod{ObjectMeta: meta("probe")})
+		l.create(&core.Pod{ObjectMeta: meta("runner")})
+	})
+	equal(t, "submit every deletion before waiting or restoring host", operations,
+		[]string{"delete probe", "delete runner", "wait probe", "wait runner", "restore host"})
 }
 
 func (l *lab) gone(obj client.Object) {

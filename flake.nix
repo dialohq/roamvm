@@ -44,17 +44,19 @@
       config =
         pkgs.runCommand "roamvm-lab-config-${toString slot}" {
           kustomization = builtins.toJSON (import ./test/libvirt/kustomization.nix {inherit layout;});
+          volumes = builtins.toJSON (import ./test/libvirt/volumes.nix {inherit layout;});
           manifest = builtins.toJSON (layout
             // {
               inherit systems;
               binary = "${runtime.runtime}/bin/roamvm";
             });
-          passAsFile = ["kustomization" "manifest"];
+          passAsFile = ["kustomization" "manifest" "volumes"];
         } ''
           mkdir -p "$out"
           cp ${terraform} "$out/main.tf.json"
           cp "$kustomizationPath" "$out/kustomization.yaml"
           cp "$manifestPath" "$out/manifest.json"
+          cp "$volumesPath" "$out/warm-volumes.json"
           cp -r ${./config} "$out/config"
         '';
     };

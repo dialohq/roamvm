@@ -95,7 +95,7 @@ func (l *lab) killContainer(pod *core.Pod, name string) {
 		}
 		args := []string{"crictl", "inspect", id}
 		if l.libvirt() {
-			args = append([]string{"k3s"}, args...)
+			args = []string{"crictl", "--config", "/dev/null", "--runtime-endpoint", "unix:///run/k3s/containerd/containerd.sock", "inspect", id}
 		}
 		must(l.t, json.Unmarshal(l.nodeExec(nil, pod.Spec.NodeName, args...), &container))
 		if container.Info.PID <= 1 {

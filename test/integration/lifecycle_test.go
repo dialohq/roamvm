@@ -60,56 +60,6 @@ func TestLifecycle(t *testing.T) {
 	l.cordon(oldNode, false)
 	t.Log("scheduler moved VM after cordoning; all bytes preserved")
 
-	pod = l.pod(v.Status.PodName)
-	restarts := pod.Status.ContainerStatuses[1].RestartCount
-	l.killContainer(pod, "runtime")
-	l.wait("runtime sidecar restart", func() (bool, error) {
-		p := l.pod(pod.Name)
-		s := p.Status.ContainerStatuses
-		return len(s) > 1 && s[1].RestartCount > restarts && s[1].State.Running != nil, nil
-	})
-	l.wait("runtime socket serves after restart", func() (bool, error) {
-		_, err := l.exec(pod.Name, "runtime", nil, "curl", "--silent", "--max-time", "1", "--unix-socket", "/run/roamvm/runtime.sock", "http://runtime/", "-o", "/dev/null")
-		return err == nil, err
-	})
-	l.ready(v.Name)
-	equal(t, "sidecar restart preserves bytes", l.request(v.Name, "/data", nil), payload)
-	equal(t, "VMM did not restart", l.pod(pod.Name).Status.ContainerStatuses[0].RestartCount, int32(0))
-
-	l.pauseStore(true)
-	paused := true
-	t.Cleanup(func() {
-		if paused {
-			l.pauseStore(false)
-		}
-	})
-	l.power(v.Name, "Stopped")
-	l.phase(v.Name, "Stopped")
-	// Observe the outage across several reconciliation/heartbeat intervals.
-	timer := time.NewTimer(3 * time.Second)
-	defer timer.Stop()
-	<-timer.C
-	stopped := l.vm(v.Name)
-	equal(t, "outage does not block guest stop", stopped.Status.Phase, "Stopped")
-	if stopped.Status.Local == nil || apimeta.IsStatusConditionTrue(stopped.Status.Conditions, "CheckpointReady") {
-		t.Fatal("outage must retain local state without claiming remote durability")
-	}
-	l.get(&core.PersistentVolumeClaim{ObjectMeta: meta(stopped.Status.Local.ClaimName)})
-	l.pauseStore(false)
-	paused = false
-	committed := l.stop(v.Name)
-	equal(t, "retry commits once", committed.Checkpoint.Generation, first.Checkpoint.Generation+1)
-	l.start(v.Name)
-	equal(t, "interrupted upload preserved bytes", l.request(v.Name, "/data", nil), payload)
-	for range 3 {
-		payload = append(payload, byte(len(payload)%251))
-		equal(t, "cycle write", l.request(v.Name, "/data", payload), payload)
-		l.stop(v.Name)
-		l.start(v.Name)
-		equal(t, "cycle restore", l.request(v.Name, "/data", nil), payload)
-	}
-	t.Log("sidecar restart, object-store outage and three checkpoint cycles passed")
-
 	var restoreWorker func()
 	if os.Getenv("ROAMVM_TEST_NODE_FAILURE") == "1" {
 		v = l.vm(v.Name)
@@ -166,8 +116,58 @@ func TestLifecycle(t *testing.T) {
 		t.Log("worker failure disabled; set ROAMVM_TEST_NODE_FAILURE=1 to exercise it")
 	}
 
+	// The fenced worker reboots while these independent checks use the survivor.
+	pod = l.pod(v.Status.PodName)
+	restarts := pod.Status.ContainerStatuses[1].RestartCount
+	l.killContainer(pod, "runtime")
+	l.wait("runtime sidecar restart", func() (bool, error) {
+		p := l.pod(pod.Name)
+		s := p.Status.ContainerStatuses
+		return len(s) > 1 && s[1].RestartCount > restarts && s[1].State.Running != nil, nil
+	})
+	l.wait("runtime socket serves after restart", func() (bool, error) {
+		_, err := l.exec(pod.Name, "runtime", nil, "curl", "--silent", "--max-time", "1", "--unix-socket", "/run/roamvm/runtime.sock", "http://runtime/", "-o", "/dev/null")
+		return err == nil, err
+	})
+	l.ready(v.Name)
+	equal(t, "sidecar restart preserves bytes", l.request(v.Name, "/data", nil), payload)
+	equal(t, "VMM did not restart", l.pod(pod.Name).Status.ContainerStatuses[0].RestartCount, int32(0))
+
+	// Advance the payload at the checkpoint boundaries already exercised below.
+	// Reusing identical bytes would let a stale generation pass restore checks.
+	payload = append(payload, byte(len(payload)%251))
+	equal(t, "outage checkpoint write", l.request(v.Name, "/data", payload), payload)
+	l.pauseStore(true)
+	paused := true
+	t.Cleanup(func() {
+		if paused {
+			l.pauseStore(false)
+		}
+	})
+	l.power(v.Name, "Stopped")
+	l.phase(v.Name, "Stopped")
+	// Observe the outage across several reconciliation/heartbeat intervals.
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	<-timer.C
+	stopped := l.vm(v.Name)
+	equal(t, "outage does not block guest stop", stopped.Status.Phase, "Stopped")
+	if stopped.Status.Local == nil || apimeta.IsStatusConditionTrue(stopped.Status.Conditions, "CheckpointReady") {
+		t.Fatal("outage must retain local state without claiming remote durability")
+	}
+	l.get(&core.PersistentVolumeClaim{ObjectMeta: meta(stopped.Status.Local.ClaimName)})
+	l.pauseStore(false)
+	paused = false
+	committed := l.stop(v.Name)
+	equal(t, "retry commits once", committed.Checkpoint.Generation, first.Checkpoint.Generation+1)
+	l.start(v.Name)
+	equal(t, "interrupted upload preserved bytes", l.request(v.Name, "/data", nil), payload)
+	t.Log("sidecar restart and object-store outage passed")
+
 	v = l.vm(v.Name)
 	durable := l.head(v)
+	payload = append(payload, byte(len(payload)%251))
+	equal(t, "crash checkpoint write", l.request(v.Name, "/data", payload), payload)
 	_, err = l.exec(v.Status.PodName, "runner", nil, "/bin/sh", "-ec", `
  for process in /proc/[0-9]*; do
    read -r name < "$process/comm" || continue
@@ -180,7 +180,10 @@ func TestLifecycle(t *testing.T) {
 	equal(t, "VMM crash releases owner", l.head(v).Owner, "")
 	l.start(v.Name)
 	equal(t, "crash recovery", l.request(v.Name, "/data", nil), payload)
+	payload = append(payload, byte(len(payload)%251))
+	equal(t, "repair checkpoint write", l.request(v.Name, "/data", payload), payload)
 	durable = l.stop(v.Name)
+	equal(t, "successive checkpoints advance once each", durable.Checkpoint.Generation, first.Checkpoint.Generation+3)
 	// The rebooted worker is not needed for the preceding local crash checks.
 	// Keep it cordoned while those run, then require fresh health before the
 	// cross-node restore below. Cleanup also waits if an earlier assertion fails.

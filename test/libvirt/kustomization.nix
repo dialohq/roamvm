@@ -1,7 +1,7 @@
 {layout}: {
   apiVersion = "kustomize.config.k8s.io/v1beta1";
   kind = "Kustomization";
-  resources = ["config"];
+  resources = ["config" "warm-volumes.json"];
   images = [
     {
       name = "roamvm";
