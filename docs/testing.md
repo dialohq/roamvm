@@ -18,15 +18,24 @@ registry/MinIO, and two workers running the device plugin as a systemd service.
 `lab.sh` defines their libvirt domains, disks and isolated bridge; Kubernetes runs
 directly on NixOS, not inside kind or Docker. The runtime image is also built with
 Nix and imported into containerd. Dependencies are pinned by `flake.lock`.
-DNS, storage provisioning, metrics and the RoamVM controller stay on the control
+DNS, storage provisioning and the RoamVM controller stay on the control
 plane so deliberately powering off a worker does not remove cluster services.
+The lab omits metrics-server (the scenarios read CPU cgroup counters directly)
+and runs K3s with `GOGC=50` to favor lower resident memory over GC throughput.
+Guest memory reservations and hypervisor overhead remain unchanged; this does
+not enable memory overcommit.
 
 Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
-disk space (64 GiB recommended for all fixtures). The domains reserve 8 GiB RAM
-in total, use sparse 16 GiB root disks and share the host Nix store read-only via
+disk space (64 GiB recommended for all fixtures). Each of the three domains has
+2 GiB RAM and four vCPUs, totaling 6 GiB assigned RAM (previously 8 GiB).
+They use sparse 16 GiB root disks and share the host Nix store read-only via
 virtiofs. Do not put all three disks in tmpfs: image unpacking competes with guest
 RAM. Session libvirt needs working `newuidmap`/`newgidmap` helpers and subordinate
 UID/GID ranges. The Nix wrapper includes NixOS's `/run/wrappers/bin` on their PATH.
+
+Leave several GiB free beyond the frozen baseline for migration and generation
+tests, which hold images on both workers. A full host filesystem makes libvirt
+pause nodes with `I/O error`; that is distinct from guest memory exhaustion.
 
 ```sh
 nix develop
@@ -159,8 +168,10 @@ With gzip RAM snapshots, three full resets on that runner took **7.73, 7.74 and
 8.06 seconds**. Persistent sparse RAM snapshots on ext4 initially reached a
 1.985-second cached median. Reclaiming preparation caches/free pages before
 capture reduced allocated RAM-image storage from **3.44 GB to 2.44 GB (29%)**
-and cached full resets to **1.806, 1.804, 1.812, 1.920 and 1.789 seconds**
-(1.806-second median).
+and cached full resets to a 1.806-second median. Reducing the workers to 2 GiB,
+omitting metrics-server and lowering K3s's heap-growth target reduced the saved
+images further to **2.16 GB** (another 11.5%). Cached full resets then took
+**1.700, 1.809, 1.600, 1.733 and 1.550 seconds** (1.700-second median).
 This includes stopping running domains, resetting disks, restoring all three
 nodes, full source/binary fingerprint verification, clock correction and live
 readiness checks. Node teardown/reset/restore operations overlap, but every
@@ -168,10 +179,10 @@ restored node remains paused until all restores succeed. Independent service
 probes run concurrently after the guest clocks and CRI checks complete.
 
 Evicting the saved-memory files with `POSIX_FADV_DONTNEED` before each reset
-produced **2.171, 2.140 and 2.182 seconds**. `/proc/diskstats` recorded about
-**2.45 GB read from vda per reset**. This tests reads beyond the runner's page
+produced **2.097, 2.000 and 2.001 seconds**. `/proc/diskstats` recorded about
+**2.16 GB read from vda per reset**. This tests reads beyond the runner's page
 cache, not eviction of the underlying hypervisor/storage caches. The three
-save files occupy about 2.27 GiB on disk; their logical lengths still reflect
+save files occupy about 2.01 GiB on disk; their logical lengths still reflect
 the nodes' configured RAM. Preserve holes when copying them, for example with
 `cp --sparse=always`. The cold QCOW2 backing files are not included in these
 RAM-image sizes. These results meet sub-2 seconds in the five cached runs,
