@@ -119,10 +119,13 @@ func TestLifecycle(t *testing.T) {
 		l.request(v.Name, "/data", []byte("uncommitted changes may be discarded"))
 		l.cordon(node, true)
 		nodeStopped := true
+		var restartedAt time.Time
 		restore := func() {
 			if nodeStopped {
-				restartedAt := time.Now()
-				l.powerNode(node, true)
+				if restartedAt.IsZero() {
+					restartedAt = time.Now()
+					l.powerNode(node, true)
+				}
 				l.wait("worker Ready with fresh KVM capacity", func() (bool, error) {
 					n := &core.Node{}
 					err := l.Get(l.ctx, client.ObjectKey{Name: node}, n)
@@ -148,6 +151,10 @@ func TestLifecycle(t *testing.T) {
 		equal(t, "node death retains checkpoint", l.head(v).Checkpoint, durable.Checkpoint)
 		equal(t, "node death retains owner", l.head(v).Owner, owner)
 		l.recover(v, owner)
+		// Recovery has revoked the old owner and deleted its Pod. Reboot the
+		// still-cordoned worker while the guest starts on the other node.
+		restartedAt = time.Now()
+		l.powerNode(node, true)
 		v = l.start(v.Name)
 		if v.Status.NodeName == node {
 			t.Fatal("recovery reused fenced node")
