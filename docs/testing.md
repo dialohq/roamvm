@@ -88,10 +88,15 @@ plugins and checks service readiness. It creates a stopped probe VM, waits for
 reconciliation, then deletes it before capture; a process health check alone
 does not prove the controller has acquired leadership. It pauses all nodes before
 saving their memory in parallel, retains read-only disks under `.lab/libvirt/warm`, and
-creates disposable working overlays. Free-page reporting and sparse mapped-RAM
-save files avoid copying unused memory; four parallel restore channels per node
-avoid serial decompression. Existing cold baselines remain unchanged,
-including any backing files used by warm disks.
+creates disposable working overlays. Before capture it flushes/reclaims file
+caches, compacts guest memory, and briefly lowers the free-page reporting
+threshold so fragmented free blocks can be omitted too. It restores the normal
+threshold and warms the live readiness path before saving. File-cache reclaim is
+best-effort, does not swap anonymous memory, and does not kill services to meet
+a size target. The five-second reporting wait is capture-only, never a reset
+delay. Sparse mapped-RAM files and four parallel restore channels per node
+avoid serial decompression. Existing cold disk baselines and fixtures remain
+unchanged, including any backing files used by warm disks.
 
 RAM images are stored on persistent disk under `.lab/libvirt/warm`, alongside
 the captured disks and metadata. Capture flushes the filesystem before publishing
@@ -151,8 +156,11 @@ containerd readiness, image smoke tests and controller rollout, but not source
 recompilation or the scenario itself; it is not a guest-VM startup benchmark.
 
 With gzip RAM snapshots, three full resets on that runner took **7.73, 7.74 and
-8.06 seconds**. Persistent sparse RAM snapshots on ext4, with cached reads,
-took **1.985, 1.985, 2.026, 1.973 and 1.970 seconds** (1.985-second median).
+8.06 seconds**. Persistent sparse RAM snapshots on ext4 initially reached a
+1.985-second cached median. Reclaiming preparation caches/free pages before
+capture reduced allocated RAM-image storage from **3.44 GB to 2.44 GB (29%)**
+and cached full resets to **1.806, 1.804, 1.812, 1.920 and 1.789 seconds**
+(1.806-second median).
 This includes stopping running domains, resetting disks, restoring all three
 nodes, full source/binary fingerprint verification, clock correction and live
 readiness checks. Node teardown/reset/restore operations overlap, but every
@@ -160,11 +168,14 @@ restored node remains paused until all restores succeed. Independent service
 probes run concurrently after the guest clocks and CRI checks complete.
 
 Evicting the saved-memory files with `POSIX_FADV_DONTNEED` before each reset
-produced **2.251, 2.368 and 2.287 seconds**. `/proc/diskstats` recorded about
-**3.44 GB read from vda per reset**. This tests reads beyond the runner's page
+produced **2.171, 2.140 and 2.182 seconds**. `/proc/diskstats` recorded about
+**2.45 GB read from vda per reset**. This tests reads beyond the runner's page
 cache, not eviction of the underlying hypervisor/storage caches. The three
-save files occupy about 3.3 GiB on disk. These results meet sub-2 seconds on
-the cached median, not every run or disk-cold reads. CPU/process startup and
+save files occupy about 2.27 GiB on disk; their logical lengths still reflect
+the nodes' configured RAM. Preserve holes when copying them, for example with
+`cp --sparse=always`. The cold QCOW2 backing files are not included in these
+RAM-image sizes. These results meet sub-2 seconds in the five cached runs,
+not disk-cold reads or a latency guarantee. CPU/process startup and
 readiness overhead still exist; this is not an I/O-only latency claim.
 The earlier `/dev/shm` results are superseded by these persistent measurements.
 All timings require an already-captured snapshot matching the checkout;
