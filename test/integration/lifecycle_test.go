@@ -110,6 +110,7 @@ func TestLifecycle(t *testing.T) {
 	}
 	t.Log("sidecar restart, object-store outage and three checkpoint cycles passed")
 
+	var restoreWorker func()
 	if os.Getenv("ROAMVM_TEST_NODE_FAILURE") == "1" {
 		v = l.vm(v.Name)
 		node := v.Status.NodeName
@@ -120,7 +121,7 @@ func TestLifecycle(t *testing.T) {
 		l.cordon(node, true)
 		nodeStopped := true
 		var restartedAt time.Time
-		restore := func() {
+		restoreWorker = func() {
 			if nodeStopped {
 				if restartedAt.IsZero() {
 					restartedAt = time.Now()
@@ -146,7 +147,7 @@ func TestLifecycle(t *testing.T) {
 				nodeStopped = false
 			}
 		}
-		t.Cleanup(restore)
+		t.Cleanup(restoreWorker)
 		l.powerNode(node, false)
 		equal(t, "node death retains checkpoint", l.head(v).Checkpoint, durable.Checkpoint)
 		equal(t, "node death retains owner", l.head(v).Owner, owner)
@@ -160,7 +161,6 @@ func TestLifecycle(t *testing.T) {
 			t.Fatal("recovery reused fenced node")
 		}
 		equal(t, "node recovery uses last durable bytes", l.request(v.Name, "/data", nil), payload)
-		restore()
 		t.Log("worker death and explicit fenced recovery passed")
 	} else {
 		t.Log("worker failure disabled; set ROAMVM_TEST_NODE_FAILURE=1 to exercise it")
@@ -181,6 +181,12 @@ func TestLifecycle(t *testing.T) {
 	l.start(v.Name)
 	equal(t, "crash recovery", l.request(v.Name, "/data", nil), payload)
 	durable = l.stop(v.Name)
+	// The rebooted worker is not needed for the preceding local crash checks.
+	// Keep it cordoned while those run, then require fresh health before the
+	// cross-node restore below. Cleanup also waits if an earlier assertion fails.
+	if restoreWorker != nil {
+		restoreWorker()
+	}
 	// Force the remote restore path; a healthy local cache deliberately does
 	// not read the S3 object at all.
 	cacheNode := l.vm(v.Name).Status.Local.NodeName

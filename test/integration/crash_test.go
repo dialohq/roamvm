@@ -14,10 +14,13 @@ import (
 )
 
 func TestLocalCrashRecovery(t *testing.T) {
+	// Only the stateless HTTP probe is shared; each failure gets its own VM.
+	shared := newLab(t)
+	shared.networkClient()
 	for _, failure := range []string{"hypervisor", "runner", "oom"} {
 		t.Run(failure, func(t *testing.T) {
 			l := newLab(t)
-			l.networkClient()
+			l.probe = shared.probe
 			l.storage()
 			v := l.spec("crash")
 			if failure == "oom" {

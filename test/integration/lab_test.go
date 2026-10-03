@@ -78,6 +78,10 @@ func newLab(t testing.TB) *lab {
 		ClientConfig()
 	must(t, err)
 	cfg.Timeout = 20 * time.Second
+	// The default 5 QPS throttles our 100ms polling and subsequent mutations.
+	// Keep a bounded budget with room for startup's multiple observations.
+	cfg.QPS = 50
+	cfg.Burst = 100
 	scheme := runtime.NewScheme()
 	must(t, core.AddToScheme(scheme))
 	must(t, api.AddToScheme(scheme))
