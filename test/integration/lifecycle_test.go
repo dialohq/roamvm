@@ -105,8 +105,9 @@ func TestLifecycle(t *testing.T) {
 		// Recovery has revoked the old owner and deleted its Pod. Reboot the
 		// still-cordoned worker while the guest starts on the other node.
 		restartedAt = time.Now()
+		l.power(v.Name, "Running")
 		l.powerNode(node, true)
-		v = l.start(v.Name)
+		v = l.ready(v.Name)
 		if v.Status.NodeName == node {
 			t.Fatal("recovery reused fenced node")
 		}
@@ -175,21 +176,14 @@ func TestLifecycle(t *testing.T) {
  done
  exit 1`)
 	must(t, err)
-	l.stop(v.Name)
-	equal(t, "VMM crash checkpoints working bytes", l.head(v).Checkpoint.Generation, durable.Checkpoint.Generation+1)
-	equal(t, "VMM crash releases owner", l.head(v).Owner, "")
-	l.start(v.Name)
-	equal(t, "crash recovery", l.request(v.Name, "/data", nil), payload)
-	payload = append(payload, byte(len(payload)%251))
-	equal(t, "repair checkpoint write", l.request(v.Name, "/data", payload), payload)
-	durable = l.stop(v.Name)
-	equal(t, "successive checkpoints advance once each", durable.Checkpoint.Generation, first.Checkpoint.Generation+3)
-	// The rebooted worker is not needed for the preceding local crash checks.
-	// Keep it cordoned while those run, then require fresh health before the
-	// cross-node restore below. Cleanup also waits if an earlier assertion fails.
-	if restoreWorker != nil {
-		restoreWorker()
-	}
+	crashed := l.stop(v.Name)
+	equal(t, "VMM crash checkpoints working bytes", crashed.Checkpoint.Generation, durable.Checkpoint.Generation+1)
+	equal(t, "VMM crash releases owner", crashed.Owner, "")
+	durable = crashed
+	equal(t, "successive checkpoints advance once each", durable.Checkpoint.Generation, first.Checkpoint.Generation+2)
+	// Restore these crash-produced bytes through the corruption/repair path below
+	// instead of another boot/stop solely to produce a repair checkpoint.
+	// TestLocalCrashRecovery separately exercises same-node crash restoration.
 	// Force the remote restore path; a healthy local cache deliberately does
 	// not read the S3 object at all.
 	cacheNode := l.vm(v.Name).Status.Local.NodeName
@@ -214,6 +208,11 @@ func TestLifecycle(t *testing.T) {
 			overwrite(original)
 		}
 	})
+	// S3 fault setup is independent of worker recovery. Require fresh capacity
+	// only now, before scheduling the remote restore; cleanup also waits on failure.
+	if restoreWorker != nil {
+		restoreWorker()
+	}
 	l.power(v.Name, "Running")
 	v = l.phase(v.Name, "RecoveryRequired")
 	log, err := l.kube.CoreV1().
