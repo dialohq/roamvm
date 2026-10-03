@@ -1,12 +1,24 @@
 {pkgs}: let
   kernel = pkgs.linuxPackages.kernel;
   moduleNames = ["virtio_pci" "virtio_blk" "virtio_net" "ext4" "isofs" "af_packet" "button" "evdev"];
-  modules = pkgs.makeModulesClosure {
+  moduleClosure = pkgs.makeModulesClosure {
     kernel = kernel.modules;
     firmware = pkgs.emptyDirectory;
     rootModules = moduleNames;
     allowMissing = false;
   };
+  # The initrd is already compressed. Avoid decompressing each module again
+  # at boot, including BusyBox's failed direct-load attempt before its fallback.
+  modules =
+    pkgs.runCommand "guest-modules" {
+      nativeBuildInputs = [pkgs.zstd pkgs.kmod];
+    } ''
+      mkdir -p $out
+      cp -r ${moduleClosure}/lib $out/lib
+      chmod -R u+w $out/lib
+      find $out/lib -name '*.ko.zst' -exec zstd -d --rm {} \;
+      depmod -b $out ${kernel.modDirVersion}
+    '';
   busybox = pkgs.pkgsStatic.busybox;
   applets = pkgs.runCommand "guest-applets" {} ''
     mkdir -p $out/bin
@@ -47,7 +59,7 @@
   };
 in
   pkgs.runCommand "roamvm-test-guest.tar.gz" {
-    nativeBuildInputs = [pkgs.e2fsprogs pkgs.qemu-utils];
+    nativeBuildInputs = [pkgs.e2fsprogs pkgs.qemu-utils pkgs.linux-scripts pkgs.binutils];
   } ''
     mkdir -p root/{sbin,proc,sys,dev,tmp,run,mnt} disk
     cp -r ${applets}/bin root/bin
@@ -60,7 +72,11 @@ in
     qemu-img convert -f raw -O qcow2 -c -o compression_type=zstd root.raw disk/root.qcow2
     qemu-img compare -f raw -F qcow2 root.raw disk/root.qcow2
     cp ${initrd}/initrd disk/initrd
-    cp ${kernel}/bzImage disk/vmlinux
+    # Decompress once in the cached image build, rather than on every guest boot.
+    # QEMU's PVH entry still uses the same Q35 devices, ACPI tables and initrd.
+    extract-vmlinux ${kernel}/bzImage > disk/vmlinux
+    strip --strip-debug disk/vmlinux
+    readelf -n disk/vmlinux | grep -q 'Xen.*0x00000012'
     # Keep errors on the console, without serializing every boot message through the
     # nested emulated UART. The full kernel log remains in the guest ring buffer.
     # The test Q35 guest has one PCI root. Skip Linux's legacy peer-root sweep
