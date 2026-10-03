@@ -67,7 +67,8 @@ in {
     };
   };
   services.qemuGuest.enable = true;
-  environment.systemPackages = [pkgs.curl pkgs.jq pkgs.k3s pkgs.cri-tools pkgs.util-linux];
+  # K3s also supplies crictl; prefer the small standalone client for probes.
+  environment.systemPackages = [pkgs.curl pkgs.jq pkgs.k3s (lib.hiPrio pkgs.cri-tools) pkgs.util-linux];
   environment.etc."rancher/k3s/registries.yaml".text = ''
     mirrors:
       "192.168.124.10:5000":

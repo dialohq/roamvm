@@ -18,9 +18,11 @@ flock -n 9 || { echo 'Another baseline/scenario operation is running' >&2; exit 
 
 stop_domains() {
   local domains name pids=()
+  local targets=("${names[@]}")
+  if (( $# )); then targets=("$@"); fi
   domains=$(virsh list --all --name)
-  for name in "${names[@]}"; do test -f "$lab/$name.xml"; done
-  for name in "${names[@]}"; do
+  for name in "${targets[@]}"; do test -f "$lab/$name.xml"; done
+  for name in "${targets[@]}"; do
     if grep -Fxq "$name" <<< "$domains"; then
       (
         if [[ $(virsh domstate "$name") != 'shut off' ]]; then virsh destroy "$name"; fi
@@ -33,20 +35,31 @@ stop_domains() {
 }
 
 reset_disks() {
+  local name pids=()
   test -f "$baseline/ready" || { echo 'Create a baseline first' >&2; exit 1; }
   # Validate every backing file before discarding any working disk.
   for name in "${names[@]}"; do
     test -f "$baseline/$name.qcow2"
     test -f "$baseline/$name.xml"
+    test -f "$lab/$name.xml"
   done
-  stop_domains
+  # Pipeline each node's teardown, overlay reset and optional paused restore.
+  # The caller must wait for every restore before resuming any node.
   for name in "${names[@]}"; do
-    qemu-img create -f qcow2 -F qcow2 -b "$baseline/$name.qcow2" "$lab/$name.qcow2.next"
-    mv -T "$lab/$name.qcow2.next" "$lab/$name.qcow2"
-    cp "$baseline/$name.xml" "$lab/$name.xml"
-    # Define the captured systems rather than rebuilding the node OS on reset.
-    virsh define "$lab/$name.xml"
+    (
+      stop_domains "$name"
+      qemu-img create -f qcow2 -F qcow2 -b "$baseline/$name.qcow2" "$lab/$name.qcow2.next"
+      mv -T "$lab/$name.qcow2.next" "$lab/$name.qcow2"
+      cp "$baseline/$name.xml" "$lab/$name.xml"
+      # Define captured systems rather than rebuilding the node OS on reset.
+      virsh define "$lab/$name.xml"
+      if [[ ${1:-} == restore ]]; then
+        virsh restore "$baseline/$name.save" --paused --parallel-channels 4
+      fi
+    ) &
+    pids+=("$!")
   done
+  wait_jobs "${pids[@]}"
   rm -f "$lab/guest-ref" "$lab/nixos-ref" "$lab/generation-ref" "$lab/firmware-ref"
   cp "$baseline/"*-ref "$lab/"
 }
@@ -57,13 +70,25 @@ wait_jobs() {
   return "$status"
 }
 
+require_persistent() {
+  local filesystem
+  filesystem=$(findmnt -n -o FSTYPE -T "$(realpath "$1")") || return 1
+  case "$filesystem" in
+    tmpfs|ramfs)
+      echo "Saved baselines require persistent storage: $1" >&2
+      return 1 ;;
+  esac
+}
+
 fingerprint() {
   # A RAM snapshot contains running binaries and mounted host files. Never
   # silently replay it against a different runtime, configuration or key.
   {
     git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/kustomization.yaml |
       sort -z | xargs -0 sha256sum
-    sha256sum bin/roamvm "$lab/id_ed25519.pub"
+    # OpenSSL uses hardware SHA acceleration for the large runtime binary;
+    # still hash the entire content on every reset, not just file metadata.
+    openssl dgst -sha256 -r bin/roamvm "$lab/id_ed25519.pub"
     stat -c '%d:%i' bin/roamvm "$lab/id_ed25519.pub"
   } | sha256sum
 }
@@ -100,10 +125,12 @@ warm_ready() {
     pids+=("$!")
   done
   wait_jobs "${pids[@]}"
-  kubectl --request-timeout=10s get --raw=/readyz
-  kubectl --request-timeout=10s get --raw="/api/v1/namespaces/roamvm-system/pods/$controller:8081/proxy/readyz"
-  curl --fail --silent --show-error --max-time 10 http://192.168.124.10:9000/minio/health/ready
-  curl --fail --silent --show-error --max-time 10 http://192.168.124.10:5000/v2/ >/dev/null
+  pids=()
+  kubectl --request-timeout=10s get --raw=/readyz & pids+=("$!")
+  kubectl --request-timeout=10s get --raw="/api/v1/namespaces/roamvm-system/pods/$controller:8081/proxy/readyz" & pids+=("$!")
+  curl --fail --silent --show-error --max-time 10 http://192.168.124.10:9000/minio/health/ready & pids+=("$!")
+  curl --fail --silent --show-error --max-time 10 http://192.168.124.10:5000/v2/ >/dev/null & pids+=("$!")
+  wait_jobs "${pids[@]}"
 }
 
 start_lab() {
@@ -113,15 +140,13 @@ start_lab() {
       echo 'Warm baseline does not match this checkout. Use reset-cold and prepare a new warm baseline.' >&2
       return 1
     }
-    for node in "${names[@]}"; do test -s "$warm/$node.save"; done
-    controller=$(cat "$warm/controller-pod")
-    reset_disks
-    bash test/libvirt/lab.sh network
     for node in "${names[@]}"; do
-      virsh restore "$warm/$node.save" --paused --parallel-channels 2 &
-      pids+=("$!")
+      test -s "$warm/$node.save"
+      require_persistent "$warm/$node.save"
     done
-    wait_jobs "${pids[@]}"
+    controller=$(cat "$warm/controller-pod")
+    bash test/libvirt/lab.sh network
+    reset_disks restore
     # No node runs against peers whose memory/disks have not yet been restored.
     pids=()
     for node in "${names[@]}"; do virsh resume "$node" & pids+=("$!"); done
@@ -137,6 +162,8 @@ start_lab() {
 case "${1:-}" in
   freeze-warm)
     test ! -e "$warm" || { echo 'Warm baseline already exists (or an incomplete freeze needs inspection)' >&2; exit 1; }
+    require_persistent "$lab"
+    test -z "${ROAMVM_WARM_MEMORY_DIR:-}" || { echo 'RAM images are stored persistently under .lab/libvirt/warm; ROAMVM_WARM_MEMORY_DIR is no longer supported' >&2; exit 1; }
     test "$(kubectl config current-context)" = roamvm-libvirt
     vms=$(kubectl get virtualmachines -A -o name)
     pods=$(kubectl get pods -A -l vm.roamvm.io/name -o name)
@@ -171,11 +198,7 @@ case "${1:-}" in
     mkdir "$warm"
     printf '%s\n' "$controller" > "$warm/controller-pod"
     fingerprint > "$warm/fingerprint"
-    memory_dir=${ROAMVM_WARM_MEMORY_DIR:-$warm}
-    mkdir -p "$memory_dir"
-    memory_dir=$(realpath "$memory_dir")
     for name in "${names[@]}"; do
-      test ! -e "$memory_dir/$name.save" && test ! -L "$memory_dir/$name.save"
       virsh dumpxml "$name" --inactive > "$warm/$name.xml"
       nix-store --add-root "$warm/$name-system" --realise "$(readlink -f "$lab/$name-system")" >/dev/null
       bash test/libvirt/lab.sh ssh "$name" sync </dev/null
@@ -183,19 +206,22 @@ case "${1:-}" in
     for name in "${names[@]}"; do virsh suspend "$name"; done
     pids=()
     for name in "${names[@]}"; do
-      virsh save "$name" "$memory_dir/$name.save" --paused --image-format sparse --parallel-channels 2 &
+      virsh save "$name" "$warm/$name.save" --paused --image-format sparse --parallel-channels 2 &
       pids+=("$!")
     done
     wait_jobs "${pids[@]}"
     for name in "${names[@]}"; do
-      if [[ "$memory_dir" != "$warm" ]]; then ln -s "$memory_dir/$name.save" "$warm/$name.save"; fi
       mv "$lab/$name.qcow2" "$warm/$name.qcow2"
       chmod a-w "$warm/$name.qcow2" "$warm/$name.save"
     done
     for fixture in guest nixos generation firmware; do
       if [[ -f "$lab/$fixture-ref" ]]; then cp "$lab/$fixture-ref" "$warm/"; fi
     done
+    # Publish readiness only after the images, disk renames and metadata are
+    # durable. A host crash during capture must leave an incomplete baseline.
+    sync -f "$warm"
     touch "$warm/ready"
+    sync -f "$warm"
     baseline="$warm"
     reset_disks
     echo 'Prepared cluster saved with RAM; resets and scenarios now use this warm baseline.'
