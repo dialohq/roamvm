@@ -373,8 +373,8 @@ func (l *lab) ready(name string) *api.VirtualMachine {
 		"guest HTTP response",
 		func() (bool, error) {
 			// Pod readiness can precede Service routing. Retry a dropped SYN
-			// rather than spending the full request timeout on that connection.
-			b, e := l.http(name, "/ready", nil, "--connect-timeout", "1")
+			// at the polling cadence, retaining the overall readiness deadline.
+			b, e := l.http(name, "/ready", nil, "--connect-timeout", "0.1")
 			return string(b) == "ready\n", e
 		},
 	)

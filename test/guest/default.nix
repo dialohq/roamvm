@@ -11,15 +11,25 @@
   # at boot, including BusyBox's failed direct-load attempt before its fallback.
   modules =
     pkgs.runCommand "guest-modules" {
-      nativeBuildInputs = [pkgs.zstd pkgs.kmod];
+      nativeBuildInputs = [pkgs.xz pkgs.kmod];
     } ''
       mkdir -p $out
       cp -r ${moduleClosure}/lib $out/lib
       chmod -R u+w $out/lib
-      find $out/lib -name '*.ko.zst' -exec zstd -d --rm {} \;
+      find $out/lib -name '*.ko.xz' -exec unxz {} +
+      test -z "$(find $out/lib -name '*.ko.*' -print -quit)"
       depmod -b $out ${kernel.modDirVersion}
     '';
-  busybox = pkgs.pkgsStatic.busybox;
+  busybox = pkgs.pkgsStatic.busybox.overrideAttrs (old: {
+    # Replace only the final console delay, not the TERM/KILL grace or syncs.
+    # Keep the original delay for consoles that cannot report drain completion.
+    postPatch = ''
+      ${old.postPatch or ""}
+      substituteInPlace init/init.c --replace-fail \
+        $'/* Allow time for last message to reach serial console, etc */\n\tsleep1();' \
+        $'/* Drain the final console message before reboot. */\n\tif (tcdrain(STDERR_FILENO) != 0)\n\t\tsleep1();'
+    '';
+  });
   applets = pkgs.runCommand "guest-applets" {} ''
     mkdir -p $out/bin
     cp ${busybox}/bin/busybox $out/bin/
