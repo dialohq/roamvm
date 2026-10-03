@@ -267,7 +267,6 @@ func (l *lab) networkClient() {
 	}}
 	p.Labels = map[string]string{"roamvm.test/client": l.probe}
 	l.create(p)
-	l.wait("network probe", func() (bool, error) { return podReady(l.pod(l.probe)), nil })
 }
 
 func podReady(p *core.Pod) bool {
@@ -368,6 +367,8 @@ func (l *lab) request(name, path string, body []byte) []byte {
 func (l *lab) ready(name string) *api.VirtualMachine {
 	l.t.Helper()
 	v := l.phase(name, "Running")
+	// Provision the probe and VM together; both must be ready before assertions.
+	l.wait("network probe", func() (bool, error) { return podReady(l.pod(l.probe)), nil })
 	l.wait(
 		"guest HTTP response",
 		func() (bool, error) {

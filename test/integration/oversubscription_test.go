@@ -233,8 +233,14 @@ func TestOversubscription(t *testing.T) {
 	})
 	l.power(pending.Name, "Stopped")
 	l.phase(pending.Name, "Stopped")
+	// Independent disks can shut down and checkpoint together. Still verify
+	// each durable generation before changing resources or restarting either VM.
+	for _, name := range names {
+		l.power(name, "Stopped")
+	}
 	for _, name := range names {
 		equal(t, "checkpoint after contention", l.stop(name).Checkpoint.Generation, int64(1))
+		l.gone(&core.Pod{ObjectMeta: meta(podNames[name])})
 	}
 	v := l.vm(names[0])
 	base := v.DeepCopy()
