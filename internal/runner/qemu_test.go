@@ -25,6 +25,9 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 	args, err := qemuArgs(t.Context(), p, filepath.Join(dir, "qmp"))
 	require.NoError(t, err)
 	text := strings.Join(args, " ")
+	require.Contains(t, args, "socket,id=serial0,path="+filepath.Join(dir, "serial.sock")+",server=on,wait=off,logfile=/dev/stdout")
+	require.Contains(t, text, "-serial chardev:serial0")
+	require.NotContains(t, args, "stdio")
 	for _, want := range []string{"-smp 8", "-m 2048", "memory-backend-memfd", "hugetlbsize=2097152", "vfio-pci,host=0000:01:00.0", "systemd.hostname=devbox", "-no-shutdown"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %s in %s", want, text)
