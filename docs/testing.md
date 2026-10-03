@@ -23,7 +23,9 @@ plane so deliberately powering off a worker does not remove cluster services.
 The lab omits metrics-server (the scenarios read CPU cgroup counters directly)
 and runs K3s with `GOGC=50` to favor lower resident memory over GC throughput.
 Guest memory reservations and hypervisor overhead remain unchanged; this does
-not enable memory overcommit.
+not enable memory overcommit. The intentional OOM test uses a 1.25 GiB container
+limit, above the 512 MiB guest's reservation but below node capacity, and checks
+that recovery did not rely on a node-wide OOM kill.
 
 Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
 disk space (64 GiB recommended for all fixtures). Each of the three domains has
