@@ -207,14 +207,6 @@ PULL
     wait_jobs "${pids[@]}"
     controller=$(kubectl -n roamvm-system get pods -l app=roamvm-controller -o json | jq -er '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name] | if length == 1 then .[0] else error("Expected one controller pod") end')
     warm_ready
-    # /readyz is a process probe, not a leader-election/reconciliation barrier.
-    # Freeze only after this controller has processed and deleted a fresh VM.
-    jq -nc --arg image "$(cat "$lab/guest-ref")" '{apiVersion:"vm.roamvm.io/v1alpha1",kind:"VirtualMachine",metadata:{generateName:"warm-probe-",namespace:"default"},spec:{powerState:"Stopped",image:$image}}' |
-      kubectl create -f - -o name > "$lab/warm-probe"
-    probe=$(cat "$lab/warm-probe")
-    kubectl -n default wait "$probe" --for=jsonpath='{.status.phase}'=Stopped --timeout=60s
-    kubectl -n default delete "$probe" --wait=true --timeout=60s
-    rm "$lab/warm-probe"
     # Installation leaves large, reclaimable image/file caches in guest RAM.
     # Keep sparse restore fast without persisting those preparation-only pages.
     pids=()
@@ -242,7 +234,17 @@ RECLAIM
       pids+=("$!")
     done
     wait_jobs "${pids[@]}"
-    # Rewarm the actual readiness path after reclaiming preparation caches.
+    # Warm the real guest path after reclaiming installation caches. Merely
+    # pulling images leaves QEMU, the kernel and provisioning cold on every reset.
+    # This also proves controller reconciliation, not just process readiness.
+    for node in "${names[@]:1}"; do
+      jq -nc --arg image "$(cat "$lab/guest-ref")" --arg node "$node" '{apiVersion:"vm.roamvm.io/v1alpha1",kind:"VirtualMachine",metadata:{generateName:"warm-probe-",namespace:"default"},spec:{powerState:"Running",image:$image,cpus:2,memory:"512Mi",readinessPort:8080,nodeSelector:{"kubernetes.io/hostname":$node}}}' |
+        kubectl create -f - -o name > "$lab/warm-probe"
+      probe=$(cat "$lab/warm-probe")
+      kubectl -n default wait "$probe" --for=condition=Ready --timeout=180s
+      kubectl -n default delete "$probe" --wait=true --timeout=180s
+      rm "$lab/warm-probe"
+    done
     warm_ready
     mkdir "$warm"
     printf '%s\n' "$controller" > "$warm/controller-pod"
