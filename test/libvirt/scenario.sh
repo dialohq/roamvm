@@ -185,6 +185,15 @@ case "${1:-}" in
     for name in "${names[@]:1}"; do
       bash test/libvirt/lab.sh ssh "$name" systemctl restart roamvm-device-plugin </dev/null
     done
+    # Cache the small guest shared by most scenarios on both workers. Keep the
+    # large optional NixOS fixtures registry-only to avoid bloating every reset.
+    image=$(cat "$lab/guest-ref")
+    pids=()
+    for name in "${names[@]:1}"; do
+      bash test/libvirt/lab.sh ssh "$name" timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$image" </dev/null &
+      pids+=("$!")
+    done
+    wait_jobs "${pids[@]}"
     controller=$(kubectl -n roamvm-system get pods -l app=roamvm-controller -o json | jq -er '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name] | if length == 1 then .[0] else error("Expected one controller pod") end')
     warm_ready
     # /readyz is a process probe, not a leader-election/reconciliation barrier.

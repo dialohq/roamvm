@@ -111,7 +111,9 @@ case "${1:-}" in
       if (( SECONDS >= deadline )); then echo 'Kubernetes API did not become ready' >&2; exit 1; fi
       sleep 0.5
     done
-    kubectl --kubeconfig "$lab/kubeconfig" wait nodes --all --for=condition=Ready --timeout=180s
+    # On a fresh cluster, --all can succeed while only the control plane exists.
+    kubectl --kubeconfig "$lab/kubeconfig" wait node "${names[@]}" --for=create --timeout=180s
+    kubectl --kubeconfig "$lab/kubeconfig" wait node "${names[@]}" --for=condition=Ready --timeout=180s
     ;;
   down)
     for name in "${names[@]}"; do

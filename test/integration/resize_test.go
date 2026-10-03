@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -24,6 +26,8 @@ type guestStorage struct {
 	DiskSectors     string
 	GrowthSize      int64
 	GrowthHash      string
+	GrowthHeld      bool
+	GrowthPasses    int
 }
 
 func TestOnlineResize(t *testing.T) {
@@ -48,13 +52,23 @@ func TestOnlineResize(t *testing.T) {
 	if before.BootID == "" || before.FilesystemBytes <= 0 {
 		t.Fatalf("invalid guest identity: %+v", before)
 	}
-	for _, size := range []int64{2 << 30, 3 << 30} {
+	for _, size := range []int64{2 << 30, 3 << 30, 4 << 30} {
+		l.request(v.Name, "/growth?action=hold", []byte{})
+		l.wait("growth pass held after filesystem resize", func() (bool, error) { return inspect().GrowthHeld, nil })
 		v = l.vm(v.Name)
 		old := v.DeepCopy()
 		v.Spec.RootDiskSize = fmt.Sprint(size)
 		started := time.Now()
 		must(t, l.Patch(l.ctx, v, client.MergeFrom(old)))
-		l.wait("online disk and filesystem growth", func() (bool, error) {
+		l.wait("new block capacity while grow service is busy", func() (bool, error) {
+			current := inspect()
+			equal(t, "grow service remains held", current.GrowthHeld, true)
+			return current.DiskSectors == fmt.Sprintln(size/512), nil
+		})
+		l.request(v.Name, "/growth?action=release", []byte{})
+		// The periodic timer is disabled. A notification delivered while the
+		// oneshot was active must cause another pass as soon as it finishes.
+		must(t, wait.PollUntilContextTimeout(l.ctx, 100*time.Millisecond, 30*time.Second, true, func(context.Context) (bool, error) {
 			current := inspect()
 			equal(t, "same guest boot", current.BootID, before.BootID)
 			equal(t, "same running process", current.PID, before.PID)
@@ -62,12 +76,23 @@ func TestOnlineResize(t *testing.T) {
 				t.Fatal("process uptime reset")
 			}
 			return current.FilesystemBytes > size*9/10 && current.DiskSectors == fmt.Sprintln(size/512), nil
-		})
+		}))
+		l.request(v.Name, "/growth?action=check", []byte{})
 		l.wait("reported disk capacity", func() (bool, error) {
 			vm := l.vm(v.Name)
 			return vm.Status.RootDiskSize == size && apimeta.IsStatusConditionTrue(vm.Status.Conditions, "DiskReady"), nil
 		})
 		t.Logf("live growth to %d bytes including ext4: %s; boot/process preserved", size, time.Since(started))
+	}
+	passes := inspect().GrowthPasses
+	if passes == 0 {
+		t.Fatal("fixture did not count growth passes")
+	}
+	// The last growpart can queue one final no-op pass. It must not repeatedly
+	// reopen the disk writable and feed its own udev watch indefinitely.
+	time.Sleep(3 * time.Second)
+	if current := inspect().GrowthPasses; current > passes+1 {
+		t.Fatalf("growth service keeps retriggering: %d -> %d passes", passes, current)
 	}
 	for _, size := range []string{"1Gi", "0", "513", "17Ti"} {
 		vm := l.vm(v.Name)

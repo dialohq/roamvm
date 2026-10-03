@@ -31,6 +31,20 @@
           networkConfig.DHCP = "ipv4";
         };
         systemd.network.wait-online.enable = false;
+        # Test-only gate after a growth pass: deliver another disk event while
+        # the oneshot is still active, before allowing it to become inactive.
+        systemd.services.roamvm-grow-root.serviceConfig.ExecStartPre = pkgs.writeShellScript "count-growth" ''
+          count=$(cat /run/growth-passes 2>/dev/null || echo 0)
+          echo $((count + 1)) > /run/growth-passes.next
+          mv /run/growth-passes.next /run/growth-passes
+        '';
+        systemd.services.roamvm-grow-root.serviceConfig.ExecStartPost = pkgs.writeShellScript "hold-growth" ''
+          if test -e /run/hold-growth; then
+            touch /run/growth-held
+            trap 'rm -f /run/growth-held' EXIT
+            while test -e /run/hold-growth; do sleep 0.1; done
+          fi
+        '';
         systemd.services.guest-test = {
           wantedBy = ["multi-user.target"];
           after = ["local-fs.target"];

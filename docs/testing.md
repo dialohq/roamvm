@@ -95,9 +95,15 @@ E2E tests, including real node failure and NetworkPolicy enforcement.
 
 **Warm snapshots save RAM as well as disks.** `libvirt-freeze-warm` verifies the
 running NixOS configurations, builds/installs current RoamVM, restarts the device
-plugins and checks service readiness. It creates a stopped probe VM, waits for
-reconciliation, then deletes it before capture; a process health check alone
-does not prove the controller has acquired leadership. It pauses all nodes before
+plugins, and pulls/unpacks the small guest shared by most scenarios on both
+workers before checking service readiness. Its image transfer is paid at capture,
+rather than on the first VM start after every reset. The large optional NixOS
+fixtures stay in the registry until their scenarios pull them: preloading all of
+them added roughly 6 GiB of worker image caches to the baseline. PVC creation and
+guest boot still happen normally inside each scenario.
+Before capture it creates a stopped probe VM, waits for reconciliation, and
+deletes it; a process health check alone does not prove the controller has
+acquired leadership. It pauses all nodes before
 saving their memory in parallel, retains read-only disks under `.lab/libvirt/warm`, and
 creates disposable working overlays. Before capture it flushes/reclaims file
 caches, compacts guest memory, and briefly lowers the free-page reporting
@@ -135,10 +141,15 @@ virtiofs are not snapshotted; do not modify them during a capture or restore.
 
 Use `make libvirt-reset-cold` to bypass a warm snapshot. To refresh it after code
 changes, restore the cold baseline first, take the lab down, remove only
-`.lab/libvirt/warm`, then run `make libvirt-up libvirt-freeze-warm`. Never remove a
-baseline while working disks still reference it. Without a cold baseline,
-recreate the disposable lab instead. Existing 9p lab domains must be recreated
+`.lab/libvirt/warm`, then run `make libvirt-up libvirt-install libvirt-fixtures
+libvirt-freeze-warm` (omit `libvirt-fixtures` when not using optional fixtures).
+Never remove a baseline while working disks still reference it. Without a cold
+baseline, recreate the disposable lab instead. Existing 9p lab domains must be recreated
 with `make libvirt-down libvirt-up` before capturing RAM.
+
+Cold startup waits for all three named nodes to exist and become Ready, and
+installation waits for the storage/DNS deployments to be created. Waiting for
+`nodes --all` alone can return before workers register on a fresh cluster.
 
 `libvirt-freeze` creates a **cold disk snapshot**. It stops K3s,
 MinIO and the registry, flushes the disks, and stops all three domains. It moves
@@ -220,28 +231,71 @@ and runtime defaults are unchanged. Readiness-only HTTP connections time out
 after one second and retry under the existing 180-second readiness deadline;
 ordinary requests, including the 10-second CPU loads, retain their old timeout.
 Waits lasting at least one second are logged by the test helper.
+After a worker power cycle, the lifecycle test requires a new kubelet heartbeat
+and positive healthy KVM capacity before uncordoning it; cached Node Ready
+status alone can admit a VM before the device plugin has re-registered.
+Corrupt-checkpoint refusal checks the runner's hypervisor-start marker as well
+as the kernel banner, so quiet console output cannot conceal an attempted boot.
 
 All six race-enabled scenarios passed serially on the same 6-vCPU runner:
 
-| Scenario | Previous recorded run | Optimized run |
-| --- | ---: | ---: |
-| Crash recovery | 2m52s | 2m25s |
-| Lifecycle | 4m11s | 3m17s |
-| Networking | 1m20s | 1m07s |
-| CPU oversubscription | 5m45s | 4m41s |
-| Disk resize | 5m36s | 3m00s |
-| NixOS generations | 6m32s | 6m07s |
-| Total Go package execution | 26m17s | 20m37s |
+| Scenario | Original run | Quiet boots/readiness | Cache/growth/recovery fixes |
+| --- | ---: | ---: | ---: |
+| Crash recovery | 2m52s | 2m25s | 2m28s |
+| Lifecycle | 4m11s | 3m17s | 3m48s |
+| Networking | 1m20s | 1m07s | 1m12s |
+| CPU oversubscription | 5m45s | 4m41s | 4m11s |
+| Disk resize | 5m36s | 3m00s | 2m42s |
+| NixOS generations | 6m32s | 6m07s | 6m02s |
+| Total Go package execution | 26m17s | 20m37s | 20m24s |
 
-The full `make libvirt-scenarios` command took **20m57s**, including resets and
-Go invocation overhead, but excluding fixture builds, transfers and baseline
-capture. Package execution fell about 22% versus the previous recorded run.
+The latest full `make libvirt-scenarios` command took **20m44s**, versus 20m57s
+after quiet boots/readiness changes: only about 1% less overall. Both include
+resets and Go invocation overhead, but exclude fixture builds, transfers and
+baseline capture. The first iteration reduced package execution about 22%.
+The latest run saves time in resize and CPU scenarios but pays a real 35-second
+worker-rejoin wait that the old lifecycle test could incorrectly skip. The three
+held-service filesystem expansions took 2.69s, 2.89s and 1.81s; a previous lost
+notification had taken 32.9s. No fixed CPU-load duration or fault was removed.
 A fresh generation-only before/after comparison took 7m03s and 6m02s (14% less).
 These are individual runs, not latency guarantees: image caches, provisioning
 and the guest resize retry timer contribute variation, particularly to resize.
 No scenarios, assertions, durability checks or CPU-load durations were removed.
 Rebuild/publish the fixtures and recapture the baseline to adopt these settings;
 an older frozen baseline still references the old guest image digests.
+
+The next iteration preloads the shared small guest on both workers and fixes
+online growth notifications arriving while the growth service is already active.
+The growth module queues a marker for another pass, rather than waiting for the
+unchanged 30-second fallback timer. The udev notification helper records each
+device's last observed capacity: even `growpart` returning `NOCHANGE` can generate
+another udev event, so repeating it for unchanged capacity would form a feedback
+loop. Filtering notifications independently of growth success prevents that loop
+on failures too. The timer still retries failures at unchanged capacity, and a
+concurrent expansion queues another pass.
+The module disables service-level start limiting, which can permanently fail
+the path watcher during a burst; the path unit keeps its own trigger limit.
+The resize test disables the timer, deliberately holds the service across each
+disk change, and checks three successive expansions, the live watcher, absence
+of repeated growth passes, unchanged guest identity and data after cross-node
+restore.
+The old module failed the held-service test, and the queued version with the
+default service start limit failed the watcher check on repeated growth.
+With start limiting disabled but without the capacity guard, the idle-pass
+regression also failed: the service ran another two passes in two seconds.
+After moving capacity filtering into udev, the resize scenario passed again in
+2m53s, with expansions taking 2.58s, 2.60s and 3.08s. The lifecycle scenario also
+passed again with the stricter no-hypervisor-start corruption assertion. These
+follow-up runs are separate from the full-suite timing above.
+
+Three independent fresh-reset startup samples with preloading took **22.01,
+23.01 and 21.21 seconds**, versus **23.47, 22.23 and 24.50 seconds** before it
+(median 22.01s versus 23.47s, about 6% less). Each sample creates a fresh VM/PVC
+and measures through its first HTTP response; these are not checkpoint-restart
+or lab-reset times. A further reset/start with the registry stopped passed in
+22.01s, proving the worker could use the cached fixture without contacting it.
+These compare prepared baselines on this runner, not a production-storage
+benchmark or an isolated estimate of network transfer time.
 
 ### Transfer a prepared lab to another checkout or host
 

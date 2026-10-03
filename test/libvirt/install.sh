@@ -4,11 +4,12 @@ export KUBECONFIG="$PWD/.lab/libvirt/kubeconfig"
 test "$(kubectl config current-context)" = roamvm-libvirt
 # Take over the already-provisioned addon. Otherwise K3s can race our image pin
 # during startup. A .skip file retains resources but stops manifest reapplication.
-kubectl -n kube-system get deployment/local-path-provisioner >/dev/null
+kubectl -n kube-system wait deployment/local-path-provisioner --for=create --timeout=180s
 bash test/libvirt/lab.sh ssh roamvm-libvirt-control-plane 'set -e; skip=/var/lib/rancher/k3s/server/manifests/local-storage.yaml.skip; if ! test -f "$skip"; then touch "$skip"; systemctl restart k3s; fi' </dev/null
 kubectl -n kube-system set image deployment/local-path-provisioner local-path-provisioner=rancher/local-path-provisioner:v0.0.37
 # Keep cluster services off workers that the failure tests deliberately power off.
 for deployment in coredns local-path-provisioner; do
+  kubectl -n kube-system wait deployment/"$deployment" --for=create --timeout=180s
   kubectl -n kube-system patch deployment "$deployment" --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"roamvm-libvirt-control-plane"}}}}}'
   kubectl -n kube-system rollout status deployment/"$deployment" --timeout=180s
 done
