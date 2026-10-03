@@ -195,6 +195,35 @@ case "${1:-}" in
     kubectl -n default wait "$probe" --for=jsonpath='{.status.phase}'=Stopped --timeout=60s
     kubectl -n default delete "$probe" --wait=true --timeout=60s
     rm "$lab/warm-probe"
+    # Installation leaves large, reclaimable image/file caches in guest RAM.
+    # Keep sparse restore fast without persisting those preparation-only pages.
+    pids=()
+    for name in "${names[@]}"; do
+      bash test/libvirt/lab.sh ssh "$name" bash -s <<'RECLAIM' &
+set -euo pipefail
+reporting=/sys/module/page_reporting/parameters/page_reporting_order
+order=$(cat "$reporting")
+trap 'echo "$order" > "$reporting"' EXIT
+# Report small free blocks too; the normal 2 MiB threshold misses fragmented
+# pages. Restore the original threshold so tests do not pay this overhead.
+echo 0 > "$reporting"
+sync
+echo 3 > /proc/sys/vm/drop_caches
+# Unlike drop_caches, proactive reclaim also evicts mapped clean file pages.
+# This is best-effort: the kernel may reclaim less and return EAGAIN. Do not
+# swap or kill services to meet a size target; keep all live anonymous memory.
+if ! echo '256M swappiness=0' > /sys/fs/cgroup/system.slice/memory.reclaim; then
+  echo 'File-cache reclaim was partial; retaining the remaining pages.' >&2
+fi
+echo 1 > /proc/sys/vm/compact_memory
+# Free-page reporting is asynchronous. This delay is paid only at capture.
+sleep 5
+RECLAIM
+      pids+=("$!")
+    done
+    wait_jobs "${pids[@]}"
+    # Rewarm the actual readiness path after reclaiming preparation caches.
+    warm_ready
     mkdir "$warm"
     printf '%s\n' "$controller" > "$warm/controller-pod"
     fingerprint > "$warm/fingerprint"
