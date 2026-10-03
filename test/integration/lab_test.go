@@ -123,6 +123,12 @@ func (l *lab) storage() {
 
 func (l *lab) wait(description string, check func() (bool, error)) {
 	l.t.Helper()
+	started := time.Now()
+	defer func() {
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			l.t.Logf("wait %s: %s", description, elapsed.Round(time.Millisecond))
+		}
+	}()
 	var last error
 	err := wait.PollUntilContextTimeout(
 		l.ctx,
@@ -293,11 +299,12 @@ func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte,
 	return out.Bytes(), nil
 }
 
-func (l *lab) http(name, path string, body []byte) ([]byte, error) {
+func (l *lab) http(name, path string, body []byte, options ...string) ([]byte, error) {
 	args := []string{"curl", "-fsS", "--max-time", "20"}
 	if body != nil {
 		args = append(args, "--data-binary", "@-")
 	}
+	args = append(args, options...)
 	args = append(args, "http://"+name+".default.svc.cluster.local:8080"+path)
 	return l.exec(l.probe, "curl", body, args...)
 }
@@ -314,7 +321,12 @@ func (l *lab) ready(name string) *api.VirtualMachine {
 	v := l.phase(name, "Running")
 	l.wait(
 		"guest HTTP response",
-		func() (bool, error) { b, e := l.http(name, "/ready", nil); return string(b) == "ready\n", e },
+		func() (bool, error) {
+			// Pod readiness can precede Service routing. Retry a dropped SYN
+			// rather than spending the full request timeout on that connection.
+			b, e := l.http(name, "/ready", nil, "--connect-timeout", "1")
+			return string(b) == "ready\n", e
+		},
 	)
 	return v
 }
