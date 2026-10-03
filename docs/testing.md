@@ -32,8 +32,15 @@ limit, above the 512 MiB guest's reservation but below node capacity, and checks
 that recovery did not rely on a node-wide OOM kill.
 
 Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
-disk space (64 GiB recommended for all fixtures). Each of the three domains has
-2 GiB RAM and four vCPUs, totaling 6 GiB assigned RAM (previously 8 GiB).
+disk space (64 GiB recommended for all fixtures). Each domain has 2 GiB RAM,
+totaling 6 GiB. The control plane and first worker have four vCPUs; worker2 has
+two, matching the CPU-oversubscription fixture without restarting K3s to change
+its advertised budget. The test still pins that worker to two host CPUs and
+runs two four-vCPU guests, including explicit quota and checkpoint checks.
+Expose vCPUs as cores in one socket, not separate sockets. On AMD hosts without
+an exposed invariant TSC, multiple sockets make Linux mark TSC unsynchronized.
+This does not guarantee stable clocks across nested save/restore; do not force
+`tsc=reliable` to suppress a watchdog failure.
 They use sparse 16 GiB root disks and share the host Nix store read-only via
 virtiofs. Do not put all three disks in tmpfs: image unpacking competes with guest
 RAM. Provisioning requires an accessible system libvirt connection, including
@@ -137,8 +144,10 @@ E2E tests, including real node failure and NetworkPolicy enforcement.
 **Warm snapshots save RAM as well as disks.** `libvirt-freeze-warm` verifies the
 running NixOS configurations against the current declaration, installs RoamVM, restarts the device
 plugins, and pulls/unpacks the small guest shared by most scenarios on both
-workers before checking service readiness. Its image transfer is paid at capture,
-rather than on the first VM start after every reset. The large optional NixOS
+workers before checking service readiness. It also caches the curl probe on the
+control plane and the provisioner's configured PVC helper image on both workers.
+Image transfer and unpacking are paid at capture, rather than repeated after
+every reset; a registry mirror alone would not eliminate unpacking. Large optional NixOS
 fixtures stay in the registry until their scenarios pull them: preloading all of
 them added roughly 6 GiB of worker image caches to the baseline. PVC creation and
 guest boot still happen normally inside each scenario.

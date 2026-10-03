@@ -81,7 +81,7 @@ fingerprint() {
   # A RAM snapshot contains running binaries and mounted host files. Never
   # silently replay it against a different runtime, configuration or key.
   {
-    git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/common.sh test/libvirt/config.nix test/libvirt/terraform.nix test/libvirt/terraform.lock.hcl test/libvirt/kustomization.nix |
+    git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/guest test/libvirt/scenario.sh test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/common.sh test/libvirt/config.nix test/libvirt/terraform.nix test/libvirt/terraform.lock.hcl test/libvirt/kustomization.nix |
       sort -z | xargs -0 sha256sum
     # OpenSSL uses hardware SHA acceleration for the large runtime binary;
     # still hash the entire content on every reset, not just file metadata.
@@ -183,12 +183,25 @@ case "${1:-}" in
     for name in "${names[@]:1}"; do
       bash test/libvirt/lab.sh ssh "$name" systemctl restart roamvm-device-plugin </dev/null
     done
-    # Cache the small guest shared by most scenarios on both workers. Keep the
-    # large optional NixOS fixtures registry-only to avoid bloating every reset.
+    # Freeze node-local unpacked images, not just a registry cache. Otherwise
+    # every reset repeats public pulls for the probe and PVC helper Pods.
+    # Keep this probe image aligned with networkClient in integration/lab_test.go.
+    probe_image=curlimages/curl:8.17.0
+    helper_image=$(kubectl -n kube-system get configmap local-path-config -o jsonpath='{.data.helperPod\.yaml}' |
+      kubectl create --dry-run=client -f - -o jsonpath='{.spec.containers[0].image}')
+    test -n "$helper_image"
+    # Large optional NixOS fixtures remain registry-only.
     image=$(cat "$lab/guest-ref")
     pids=()
+    bash test/libvirt/lab.sh ssh "$control" timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$probe_image" </dev/null &
+    pids+=("$!")
     for name in "${names[@]:1}"; do
-      bash test/libvirt/lab.sh ssh "$name" timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$image" </dev/null &
+      bash test/libvirt/lab.sh ssh "$name" bash -s -- "$image" "$helper_image" <<'PULL' &
+set -euo pipefail
+for image; do
+  timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$image"
+done
+PULL
       pids+=("$!")
     done
     wait_jobs "${pids[@]}"

@@ -39,7 +39,17 @@
       memory_unit = "MiB";
       vcpu = node.cpus;
       # Omit running: the harness owns power state, including save/restore.
-      cpu.mode = "host-passthrough";
+      cpu = {
+        mode = "host-passthrough";
+        # Libvirt otherwise presents one socket per vCPU. On AMD without
+        # constant_tsc, Linux treats that as an unsynchronized multi-socket
+        # system, disabling fast clock reads and degrading nested KVM.
+        topology = {
+          sockets = 1;
+          cores = node.cpus;
+          threads = 1;
+        };
+      };
       memory_backing = {
         memory_source.type = "memfd";
         memory_access.mode = "shared";

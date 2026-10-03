@@ -29,8 +29,8 @@ func TestOversubscription(t *testing.T) {
 	node := &core.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}
 	l.get(node)
 	capacity := node.Status.Capacity.Cpu().Value()
-	if capacity <= 2 {
-		t.Fatal("test requires more than two host CPUs")
+	if capacity < 2 {
+		t.Fatal("test requires at least two host CPUs")
 	}
 	config := l.nodeExec(nil, nodeName, "cat", "/var/lib/kubelet/config.yaml")
 	if strings.Contains(string(config), "kubeReserved:") {
@@ -61,8 +61,27 @@ func TestOversubscription(t *testing.T) {
 	}
 	allocatable := func(expected int64) {
 		l.wait(
-			"CPU allocation",
-			func() (bool, error) { l.get(node); return node.Status.Allocatable.Cpu().Value() == expected, nil },
+			"CPU allocation and schedulable worker",
+			func() (bool, error) {
+				l.get(node)
+				slots := node.Status.Allocatable["vm.roamvm.io/kvm"]
+				if node.Status.Allocatable.Cpu().Value() != expected || slots.Value() < 2 {
+					return false, nil
+				}
+				// K3s publishes CPU capacity before CRI/CNI and device slots are ready.
+				// Submitting Pods then sends them through scheduler failure/backoff.
+				for _, taint := range node.Spec.Taints {
+					if taint.Key == core.TaintNodeNotReady || taint.Key == core.TaintNodeUnreachable {
+						return false, nil
+					}
+				}
+				for _, condition := range node.Status.Conditions {
+					if condition.Type == core.NodeReady {
+						return condition.Status == core.ConditionTrue, nil
+					}
+				}
+				return false, nil
+			},
 		)
 	}
 	restoreCPUs := func() { l.run(nil, "docker", "update", "--cpuset-cpus", originalSet, nodeName) }
@@ -72,19 +91,23 @@ func TestOversubscription(t *testing.T) {
 	}
 	// Register before fixture cleanup so Pods stop while the constrained node is still running.
 	t.Cleanup(func() {
-		writeConfig(config)
+		if capacity > 2 {
+			writeConfig(config)
+		}
 		restoreCPUs()
 		allocatable(capacity)
 	})
 	if !l.libvirt() {
 		l.run(nil, "docker", "update", "--cpuset-cpus", cpuset.New(cpus...).String(), nodeName)
 	}
-	writeConfig(
-		append(
-			slices.Clone(config),
-			[]byte(fmt.Sprintf("\nkubeReserved:\n  cpu: %q\n", strconv.FormatInt(capacity-2, 10)))...,
-		),
-	)
+	if capacity > 2 {
+		writeConfig(
+			append(
+				slices.Clone(config),
+				[]byte(fmt.Sprintf("\nkubeReserved:\n  cpu: %q\n", strconv.FormatInt(capacity-2, 10)))...,
+			),
+		)
+	}
 	allocatable(2)
 	l.networkClient()
 	names := []string{}

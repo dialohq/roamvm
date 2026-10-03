@@ -14,6 +14,7 @@ for slot in 0 1; do
   tofu -chdir="$work/tf-$slot" validate
   kubectl kustomize "$work/config-$slot" >/dev/null
   jq -e '.resource.libvirt_domain | length == 3 and all(.[]; has("running") | not)' "$work/config-$slot/main.tf.json" >/dev/null
+  jq -e '.resource.libvirt_domain | all(.[]; .cpu.topology.sockets == 1 and .cpu.topology.threads == 1 and .cpu.topology.cores == .vcpu)' "$work/config-$slot/main.tf.json" >/dev/null
   jq -e '.resource.libvirt_network.lab.bridge | .stp == "off" and .delay == "0"' "$work/config-$slot/main.tf.json" >/dev/null
   # Terraform JSON can silently discard unknown nested object attributes.
   # In particular, the provider's kernel_args example drops the boot command.
@@ -24,6 +25,8 @@ done
 jq -es '
   .[0] as $a | .[1] as $b |
   $a.slot == 0 and $b.slot == 1 and
+  $a.nodes[$a.cluster + "-worker2"].cpus == 2 and
+  $b.nodes[$b.cluster + "-worker2"].cpus == 2 and
   $a.network.gateway == "192.168.124.1" and $b.network.gateway == "192.168.125.1" and
   $a.network.name != $b.network.name and $a.network.bridge != $b.network.bridge and
   ([($a.nodes | keys[]) as $n | $b.nodes | has($n)] | any | not) and
