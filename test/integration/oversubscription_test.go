@@ -61,8 +61,27 @@ func TestOversubscription(t *testing.T) {
 	}
 	allocatable := func(expected int64) {
 		l.wait(
-			"CPU allocation",
-			func() (bool, error) { l.get(node); return node.Status.Allocatable.Cpu().Value() == expected, nil },
+			"CPU allocation and schedulable worker",
+			func() (bool, error) {
+				l.get(node)
+				slots := node.Status.Allocatable["vm.roamvm.io/kvm"]
+				if node.Status.Allocatable.Cpu().Value() != expected || slots.Value() < 2 {
+					return false, nil
+				}
+				// K3s publishes CPU capacity before CRI/CNI and device slots are ready.
+				// Submitting Pods then sends them through scheduler failure/backoff.
+				for _, taint := range node.Spec.Taints {
+					if taint.Key == core.TaintNodeNotReady || taint.Key == core.TaintNodeUnreachable {
+						return false, nil
+					}
+				}
+				for _, condition := range node.Status.Conditions {
+					if condition.Type == core.NodeReady {
+						return condition.Status == core.ConditionTrue, nil
+					}
+				}
+				return false, nil
+			},
 		)
 	}
 	restoreCPUs := func() { l.run(nil, "docker", "update", "--cpuset-cpus", originalSet, nodeName) }
@@ -214,8 +233,14 @@ func TestOversubscription(t *testing.T) {
 	})
 	l.power(pending.Name, "Stopped")
 	l.phase(pending.Name, "Stopped")
+	// Independent disks can shut down and checkpoint together. Still verify
+	// each durable generation before changing resources or restarting either VM.
+	for _, name := range names {
+		l.power(name, "Stopped")
+	}
 	for _, name := range names {
 		equal(t, "checkpoint after contention", l.stop(name).Checkpoint.Generation, int64(1))
+		l.gone(&core.Pod{ObjectMeta: meta(podNames[name])})
 	}
 	v := l.vm(names[0])
 	base := v.DeepCopy()

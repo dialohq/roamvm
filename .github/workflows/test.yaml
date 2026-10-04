@@ -5,6 +5,12 @@ on:
 permissions:
   contents: read
 jobs:
+  lab-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop -c make libvirt-check
   unit:
     runs-on: ubuntu-latest
     steps:

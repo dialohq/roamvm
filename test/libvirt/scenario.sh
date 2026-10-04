@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export LIBVIRT_DEFAULT_URI=qemu:///session
-root=$(git rev-parse --show-toplevel)
+source "$(dirname "$0")/common.sh"
+lock_lab
+load_lab
 test "$PWD" = "$root" || { echo 'Run from the repository root' >&2; exit 1; }
-lab="$root/.lab/libvirt"
 baseline="$lab/baseline"
 warm="$lab/warm"
 if [[ -f "$warm/ready" && ${1:-} != freeze && ${1:-} != freeze-warm && ${1:-} != reset-cold ]]; then
   baseline="$warm"
 fi
 export KUBECONFIG="$lab/kubeconfig"
-names=(roamvm-libvirt-control-plane roamvm-libvirt-worker roamvm-libvirt-worker2)
 mkdir -p "$lab"
-# A reset and its test must own the whole cluster, not just one domain.
-exec 9> "$lab/scenario.lock"
-flock -n 9 || { echo 'Another baseline/scenario operation is running' >&2; exit 1; }
 
 stop_domains() {
   local domains name pids=()
@@ -26,7 +22,6 @@ stop_domains() {
     if grep -Fxq "$name" <<< "$domains"; then
       (
         if [[ $(virsh domstate "$name") != 'shut off' ]]; then virsh destroy "$name"; fi
-        virsh undefine "$name"
       ) &
       pids+=("$!")
     fi
@@ -42,6 +37,11 @@ reset_disks() {
     test -f "$baseline/$name.qcow2"
     test -f "$baseline/$name.xml"
     test -f "$lab/$name.xml"
+    # Terraform owns definitions and UUIDs. Never restore old RAM into changed
+    # hardware or silently redefine a domain to match an obsolete snapshot.
+    virsh dumpxml "$name" --inactive | cmp "$baseline/$name.xml" - || {
+      echo "$name: baseline domain differs; prepare a new baseline" >&2; return 1;
+    }
   done
   # Pipeline each node's teardown, overlay reset and optional paused restore.
   # The caller must wait for every restore before resuming any node.
@@ -50,9 +50,6 @@ reset_disks() {
       stop_domains "$name"
       qemu-img create -f qcow2 -F qcow2 -b "$baseline/$name.qcow2" "$lab/$name.qcow2.next"
       mv -T "$lab/$name.qcow2.next" "$lab/$name.qcow2"
-      cp "$baseline/$name.xml" "$lab/$name.xml"
-      # Define captured systems rather than rebuilding the node OS on reset.
-      virsh define "$lab/$name.xml"
       if [[ ${1:-} == restore ]]; then
         virsh restore "$baseline/$name.save" --paused --parallel-channels 4
       fi
@@ -84,12 +81,12 @@ fingerprint() {
   # A RAM snapshot contains running binaries and mounted host files. Never
   # silently replay it against a different runtime, configuration or key.
   {
-    git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/kustomization.yaml |
+    git ls-files --cached --others --exclude-standard -z -- api cmd internal config go.mod go.sum flake.nix flake.lock test/guest test/libvirt/scenario.sh test/libvirt/node.nix test/libvirt/runtime.nix test/libvirt/install.sh test/libvirt/lab.sh test/libvirt/common.sh test/libvirt/config.nix test/libvirt/terraform.nix test/libvirt/terraform.lock.hcl test/libvirt/kustomization.nix test/libvirt/volumes.nix |
       sort -z | xargs -0 sha256sum
     # OpenSSL uses hardware SHA acceleration for the large runtime binary;
     # still hash the entire content on every reset, not just file metadata.
-    openssl dgst -sha256 -r bin/roamvm "$lab/id_ed25519.pub"
-    stat -c '%d:%i' bin/roamvm "$lab/id_ed25519.pub"
+    openssl dgst -sha256 -r "$manifest" "$lab/id_ed25519.pub"
+    stat -c '%d:%i' "$lab/id_ed25519.pub"
   } | sha256sum
 }
 
@@ -128,8 +125,8 @@ warm_ready() {
   pids=()
   kubectl --request-timeout=10s get --raw=/readyz & pids+=("$!")
   kubectl --request-timeout=10s get --raw="/api/v1/namespaces/roamvm-system/pods/$controller:8081/proxy/readyz" & pids+=("$!")
-  curl --fail --silent --show-error --max-time 10 http://192.168.124.10:9000/minio/health/ready & pids+=("$!")
-  curl --fail --silent --show-error --max-time 10 http://192.168.124.10:5000/v2/ >/dev/null & pids+=("$!")
+  curl --fail --silent --show-error --max-time 10 "http://$control_ip:9000/minio/health/ready" & pids+=("$!")
+  curl --fail --silent --show-error --max-time 10 "http://$control_ip:5000/v2/" >/dev/null & pids+=("$!")
   wait_jobs "${pids[@]}"
 }
 
@@ -145,7 +142,6 @@ start_lab() {
       require_persistent "$warm/$node.save"
     done
     controller=$(cat "$warm/controller-pod")
-    bash test/libvirt/lab.sh network
     reset_disks restore
     # No node runs against peers whose memory/disks have not yet been restored.
     pids=()
@@ -154,7 +150,7 @@ start_lab() {
     warm_ready
   else
     reset_disks
-    bash test/libvirt/lab.sh up
+    bash test/libvirt/lab.sh start
     bash test/libvirt/install.sh
   fi
 }
@@ -164,46 +160,53 @@ case "${1:-}" in
     test ! -e "$warm" || { echo 'Warm baseline already exists (or an incomplete freeze needs inspection)' >&2; exit 1; }
     require_persistent "$lab"
     test -z "${ROAMVM_WARM_MEMORY_DIR:-}" || { echo 'RAM images are stored persistently under .lab/libvirt/warm; ROAMVM_WARM_MEMORY_DIR is no longer supported' >&2; exit 1; }
-    test "$(kubectl config current-context)" = roamvm-libvirt
+    test "$(kubectl config current-context)" = "$cluster"
     vms=$(kubectl get virtualmachines -A -o name)
     pods=$(kubectl get pods -A -l vm.roamvm.io/name -o name)
     test -z "$vms$pods" || { echo 'Remove test VMs and wait for their pods before freezing' >&2; exit 1; }
     test -s "$lab/guest-ref"
+    build_lab_config "$lab/config-check"
+    test "$(readlink -f "$lab/config")" = "$(readlink -f "$lab/config-check")" || {
+      echo 'Apply the current lab configuration with make libvirt-up before freezing' >&2; exit 1;
+    }
     for name in "${names[@]}"; do
       test -f "$lab/$name.xml"
       test -f "$lab/$name.qcow2" && test ! -L "$lab/$name.qcow2"
       test "$(virsh domstate "$name")" = running
       grep -q "type='virtiofs'" "$lab/$name.xml" || { echo 'Recreate domains with virtiofs before saving RAM' >&2; exit 1; }
-      nix build ".#nixosConfigurations.$name.config.system.build.toplevel" --out-link "$lab/$name-system"
       system=$(bash test/libvirt/lab.sh ssh "$name" readlink -f /run/current-system </dev/null)
       test "$system" = "$(readlink -f "$lab/$name-system")" || { echo "Recreate $name with the current NixOS configuration" >&2; exit 1; }
     done
     # Capture only a deployment of the current source, not merely a fingerprint
     # of edited files beside stale running processes.
-    make build
     bash test/libvirt/install.sh
     for name in "${names[@]:1}"; do
       bash test/libvirt/lab.sh ssh "$name" systemctl restart roamvm-device-plugin </dev/null
     done
-    # Cache the small guest shared by most scenarios on both workers. Keep the
-    # large optional NixOS fixtures registry-only to avoid bloating every reset.
+    # Freeze node-local unpacked images, not just a registry cache. Otherwise
+    # every reset repeats public pulls for the probe and PVC helper Pods.
+    # Keep this probe image aligned with networkClient in integration/lab_test.go.
+    probe_image=curlimages/curl:8.17.0
+    helper_image=$(kubectl -n kube-system get configmap local-path-config -o jsonpath='{.data.helperPod\.yaml}' |
+      kubectl create --dry-run=client -f - -o jsonpath='{.spec.containers[0].image}')
+    test -n "$helper_image"
+    # Large optional NixOS fixtures remain registry-only.
     image=$(cat "$lab/guest-ref")
     pids=()
+    bash test/libvirt/lab.sh ssh "$control" timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$probe_image" </dev/null &
+    pids+=("$!")
     for name in "${names[@]:1}"; do
-      bash test/libvirt/lab.sh ssh "$name" timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$image" </dev/null &
+      bash test/libvirt/lab.sh ssh "$name" bash -s -- "$image" "$helper_image" <<'PULL' &
+set -euo pipefail
+for image; do
+  timeout 180 crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock pull "$image"
+done
+PULL
       pids+=("$!")
     done
     wait_jobs "${pids[@]}"
     controller=$(kubectl -n roamvm-system get pods -l app=roamvm-controller -o json | jq -er '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name] | if length == 1 then .[0] else error("Expected one controller pod") end')
     warm_ready
-    # /readyz is a process probe, not a leader-election/reconciliation barrier.
-    # Freeze only after this controller has processed and deleted a fresh VM.
-    jq -nc --arg image "$(cat "$lab/guest-ref")" '{apiVersion:"vm.roamvm.io/v1alpha1",kind:"VirtualMachine",metadata:{generateName:"warm-probe-",namespace:"default"},spec:{powerState:"Stopped",image:$image}}' |
-      kubectl create -f - -o name > "$lab/warm-probe"
-    probe=$(cat "$lab/warm-probe")
-    kubectl -n default wait "$probe" --for=jsonpath='{.status.phase}'=Stopped --timeout=60s
-    kubectl -n default delete "$probe" --wait=true --timeout=60s
-    rm "$lab/warm-probe"
     # Installation leaves large, reclaimable image/file caches in guest RAM.
     # Keep sparse restore fast without persisting those preparation-only pages.
     pids=()
@@ -231,7 +234,17 @@ RECLAIM
       pids+=("$!")
     done
     wait_jobs "${pids[@]}"
-    # Rewarm the actual readiness path after reclaiming preparation caches.
+    # Warm the real guest path after reclaiming installation caches. Merely
+    # pulling images leaves QEMU, the kernel and provisioning cold on every reset.
+    # This also proves controller reconciliation, not just process readiness.
+    for node in "${names[@]:1}"; do
+      jq -nc --arg image "$(cat "$lab/guest-ref")" --arg node "$node" '{apiVersion:"vm.roamvm.io/v1alpha1",kind:"VirtualMachine",metadata:{generateName:"warm-probe-",namespace:"default"},spec:{powerState:"Running",image:$image,cpus:2,memory:"512Mi",readinessPort:8080,nodeSelector:{"kubernetes.io/hostname":$node}}}' |
+        kubectl create -f - -o name > "$lab/warm-probe"
+      probe=$(cat "$lab/warm-probe")
+      kubectl -n default wait "$probe" --for=condition=Ready --timeout=180s
+      kubectl -n default delete "$probe" --wait=true --timeout=180s
+      rm "$lab/warm-probe"
+    done
     warm_ready
     mkdir "$warm"
     printf '%s\n' "$controller" > "$warm/controller-pod"
@@ -250,7 +263,10 @@ RECLAIM
     wait_jobs "${pids[@]}"
     for name in "${names[@]}"; do
       mv "$lab/$name.qcow2" "$warm/$name.qcow2"
-      chmod a-w "$warm/$name.qcow2" "$warm/$name.save"
+      chmod a-w "$warm/$name.qcow2"
+      # System libvirt creates root-owned save files; only the daemon reads
+      # them during restore. Harden user-owned files on session connections.
+      if [[ -O "$warm/$name.save" ]]; then chmod a-w "$warm/$name.save"; fi
     done
     for fixture in guest nixos generation firmware; do
       if [[ -f "$lab/$fixture-ref" ]]; then cp "$lab/$fixture-ref" "$warm/"; fi
@@ -268,7 +284,7 @@ RECLAIM
     test ! -e "$baseline" || { echo 'Baseline already exists (or an incomplete freeze needs inspection)' >&2; exit 1; }
     test ! -e "$warm" || { echo 'Create the cold baseline before the warm baseline, not from disks backed by it' >&2; exit 1; }
     export KUBECONFIG="$lab/kubeconfig"
-    test "$(kubectl config current-context)" = roamvm-libvirt
+    test "$(kubectl config current-context)" = "$cluster"
     vms=$(kubectl get virtualmachines -A -o name)
     test -z "$vms" || { echo 'Remove test VMs before freezing the lab' >&2; exit 1; }
     test -s "$lab/guest-ref"
@@ -280,11 +296,11 @@ RECLAIM
     done
     mkdir "$baseline"
     for name in "${names[@]}"; do
-      cp "$lab/$name.xml" "$baseline/"
+      virsh dumpxml "$name" --inactive > "$baseline/$name.xml"
       nix-store --add-root "$baseline/$name-system" --realise "$(readlink -f "$lab/$name-system")" >/dev/null
       bash test/libvirt/lab.sh ssh "$name" 'systemctl stop k3s && sync'
     done
-    bash test/libvirt/lab.sh ssh roamvm-libvirt-control-plane 'systemctl stop minio docker-registry && sync'
+    bash test/libvirt/lab.sh ssh "$control" 'systemctl stop minio docker-registry && sync'
     stop_domains
     for name in "${names[@]}"; do
       mv "$lab/$name.qcow2" "$baseline/$name.qcow2"
@@ -300,23 +316,17 @@ RECLAIM
   reset|reset-cold)
     start_lab
     ;;
+  run-all)
+    while read -r scenario; do
+      bash "$0" run "$scenario"
+    done < <(jq -r '.scenarios | keys[]' "$manifest")
+    ;;
   run)
     scenario=${2:-}
-    case "$scenario" in
-      crash) pattern=TestLocalCrashRecovery ;;
-      lifecycle) pattern=TestLifecycle ;;
-      network) pattern=TestKubernetes ;;
-      cpu) pattern=TestOversubscription ;;
-      resize) pattern='Test(OnlineResize|ResizeWithoutExpandableStorage)' ;;
-      generations) pattern=TestNixOSGenerations ;;
-      *) echo 'Scenarios: crash lifecycle network cpu resize generations' >&2; exit 1 ;;
-    esac
+    specification=$(jq -ec --arg name "$scenario" '.scenarios[$name] // error("Unknown scenario: " + $name)' "$manifest")
+    pattern=$(jq -r '.tests | "(" + join("|") + ")"' <<< "$specification")
     # Missing optional fixtures must fail here, not silently skip a scenario.
-    if [[ "$scenario" == resize ]]; then test -s "$baseline/nixos-ref"; fi
-    if [[ "$scenario" == generations ]]; then
-      test -s "$baseline/generation-ref"
-      test -s "$baseline/firmware-ref"
-    fi
+    while read -r fixture; do test -s "$baseline/$fixture-ref"; done < <(jq -r '(.fixtures // {})[]' <<< "$specification")
     run="$lab/runs/$(date -u +%Y%m%dT%H%M%S)-$scenario"
     mkdir -p "$run"
     git rev-parse HEAD > "$run/revision"
@@ -330,12 +340,9 @@ RECLAIM
       source test/libvirt/env
       export ROAMVM_TEST_NETWORK_POLICY=1
       unset ROAMVM_TEST_RESIZE_IMAGE ROAMVM_TEST_GENERATION_IMAGE ROAMVM_TEST_FIRMWARE_IMAGE
-      if [[ "$scenario" == resize ]]; then export ROAMVM_TEST_RESIZE_IMAGE; ROAMVM_TEST_RESIZE_IMAGE=$(cat "$baseline/nixos-ref"); fi
-      if [[ "$scenario" == generations ]]; then
-        export ROAMVM_TEST_GENERATION_IMAGE ROAMVM_TEST_FIRMWARE_IMAGE
-        ROAMVM_TEST_GENERATION_IMAGE=$(cat "$baseline/generation-ref")
-        ROAMVM_TEST_FIRMWARE_IMAGE=$(cat "$baseline/firmware-ref")
-      fi
+      while IFS=$'\t' read -r variable fixture; do
+        export "$variable=$(cat "$baseline/$fixture-ref")"
+      done < <(jq -r '(.fixtures // {}) | to_entries[] | [.key, .value] | @tsv' <<< "$specification")
       go test -tags=integration -race -count=1 -timeout=30m -v -run "^$pattern$" ./test/integration
     ) 2>&1 | tee "$run/output.log"
     statuses=("${PIPESTATUS[@]}")
@@ -346,5 +353,5 @@ RECLAIM
     echo "Scenario output: $run (exit $status); working disks retained until the next reset."
     exit "$status"
     ;;
-  *) echo "Usage: $0 freeze|freeze-warm|reset|reset-cold|run SCENARIO" >&2; exit 1 ;;
+  *) echo "Usage: $0 freeze|freeze-warm|reset|reset-cold|run-all|run SCENARIO" >&2; exit 1 ;;
 esac

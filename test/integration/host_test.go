@@ -11,7 +11,9 @@ import (
 	"k8s.io/utils/cpuset"
 )
 
-func (l *lab) libvirt() bool { return l.cluster == "roamvm-libvirt" }
+func (l *lab) libvirt() bool {
+	return l.cluster == "roamvm-libvirt" || strings.HasPrefix(l.cluster, "roamvm-libvirt-")
+}
 
 func (l *lab) nodeExec(input []byte, node string, args ...string) []byte {
 	l.t.Helper()
@@ -35,7 +37,7 @@ func (l *lab) powerNode(node string, running bool) {
 		if running {
 			action = "start"
 		}
-		l.run(nil, "virsh", "-c", "qemu:///session", action, node)
+		l.run(nil, "virsh", action, node)
 	} else if running {
 		l.run(nil, "docker", "start", node)
 	} else {
@@ -78,7 +80,7 @@ func (l *lab) pinLibvirtCPUs(node string) {
 	if len(cpus) != 2 {
 		l.t.Fatal("fewer than two available host CPUs")
 	}
-	output := string(l.run(nil, "virsh", "-c", "qemu:///session", "vcpupin", node, "--live"))
+	output := string(l.run(nil, "virsh", "vcpupin", node, "--live"))
 	var pins [][2]string
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
@@ -96,16 +98,16 @@ func (l *lab) pinLibvirtCPUs(node string) {
 	// Restore even if changing one of the later vCPU affinities fails.
 	l.t.Cleanup(func() {
 		for _, pin := range pins {
-			l.run(nil, "virsh", "-c", "qemu:///session", "vcpupin", node, pin[0], pin[1], "--live")
+			l.run(nil, "virsh", "vcpupin", node, pin[0], pin[1], "--live")
 		}
 	})
 	l.t.Logf("constraining %s to host CPUs %s", node, strings.Join(cpus, ","))
 	for _, pin := range pins {
-		l.run(nil, "virsh", "-c", "qemu:///session", "vcpupin", node, pin[0], strings.Join(cpus, ","), "--live")
+		l.run(nil, "virsh", "vcpupin", node, pin[0], strings.Join(cpus, ","), "--live")
 	}
 	want, err := cpuset.Parse(strings.Join(cpus, ","))
 	must(l.t, err)
-	output = string(l.run(nil, "virsh", "-c", "qemu:///session", "vcpupin", node, "--live"))
+	output = string(l.run(nil, "virsh", "vcpupin", node, "--live"))
 	checked := 0
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)

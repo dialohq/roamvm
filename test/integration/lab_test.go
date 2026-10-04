@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,8 @@ import (
 	"k8s.io/client-go/transport/spdy"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 type lab struct {
@@ -47,6 +50,7 @@ type lab struct {
 	cluster, image, probe string
 	store                 *state.S3
 	state                 state.Manager
+	created               []client.Object
 }
 
 func must(t testing.TB, err error) {
@@ -69,12 +73,18 @@ func newLab(t testing.TB) *lab {
 	switch raw.CurrentContext {
 	case "kind-roamvm-test", "kind-roamvm", "kind-roamvm-cilium", "kind-roamvm-crash-test", "roamvm-libvirt":
 	default:
-		t.Fatalf("refusing context %q; use the disposable kind lab", raw.CurrentContext)
+		if raw.CurrentContext != os.Getenv("ROAMVM_TEST_CONTEXT") || !strings.HasPrefix(raw.CurrentContext, "roamvm-libvirt-") {
+			t.Fatalf("refusing context %q; use a disposable lab", raw.CurrentContext)
+		}
 	}
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, &clientcmd.ConfigOverrides{}).
 		ClientConfig()
 	must(t, err)
 	cfg.Timeout = 20 * time.Second
+	// The default 5 QPS throttles our 100ms polling and subsequent mutations.
+	// Keep a bounded budget with room for startup's multiple observations.
+	cfg.QPS = 50
+	cfg.Burst = 100
 	scheme := runtime.NewScheme()
 	must(t, core.AddToScheme(scheme))
 	must(t, api.AddToScheme(scheme))
@@ -158,14 +168,49 @@ func (l *lab) get(obj client.Object) {
 func (l *lab) create(obj client.Object) {
 	l.t.Helper()
 	must(l.t, l.Create(l.ctx, obj))
+	l.created = append(l.created, obj)
+	if len(l.created) > 1 {
+		return
+	}
+	// Register at the first fixture, preserving earlier host-restoration cleanup.
+	// Kubernetes can tear down independent resources together; do not serialize
+	// their termination waits. PVC protection still fences in-use volumes.
 	l.t.Cleanup(func() {
 		if l.t.Failed() {
-			l.t.Logf("retained %T %s for debugging", obj, obj.GetName())
+			for _, obj := range l.created {
+				l.t.Logf("retained %T %s for debugging", obj, obj.GetName())
+			}
 			return
 		}
-		must(l.t, client.IgnoreNotFound(l.Delete(l.ctx, obj)))
-		l.gone(obj)
+		for _, obj := range l.created {
+			must(l.t, client.IgnoreNotFound(l.Delete(l.ctx, obj)))
+		}
+		for _, obj := range l.created {
+			l.gone(obj)
+		}
 	})
+}
+
+func TestFixtureCleanup(t *testing.T) {
+	var operations []string
+	c := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			operations = append(operations, "delete "+obj.GetName())
+			return c.Delete(ctx, obj, opts...)
+		},
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			operations = append(operations, "wait "+key.Name)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+	t.Run("fixtures", func(t *testing.T) {
+		t.Cleanup(func() { operations = append(operations, "restore host") })
+		l := &lab{t: t, ctx: t.Context(), Client: c}
+		l.create(&core.Pod{ObjectMeta: meta("probe")})
+		l.create(&core.Pod{ObjectMeta: meta("runner")})
+	})
+	equal(t, "submit every deletion before waiting or restoring host", operations,
+		[]string{"delete probe", "delete runner", "wait probe", "wait runner", "restore host"})
 }
 
 func (l *lab) gone(obj client.Object) {
@@ -255,12 +300,12 @@ func (l *lab) networkClient() {
 			},
 		},
 		Containers: []core.Container{
-			{Name: "curl", Image: "curlimages/curl:8.17.0", Command: []string{"sh", "-c", "exec sleep 7200"}},
+			// PID 1 must handle TERM; bare sleep otherwise waits for forced termination.
+			{Name: "curl", Image: "curlimages/curl:8.17.0", Command: []string{"sh", "-c", "trap 'exit 0' TERM INT; sleep 7200 & wait"}},
 		},
 	}}
 	p.Labels = map[string]string{"roamvm.test/client": l.probe}
 	l.create(p)
-	l.wait("network probe", func() (bool, error) { return podReady(l.pod(l.probe)), nil })
 }
 
 func podReady(p *core.Pod) bool {
@@ -270,6 +315,48 @@ func podReady(p *core.Pod) bool {
 		}
 	}
 	return false
+}
+
+// Exec stream writers can outlive StreamWithContext when it is cancelled.
+// Return a copy so callers never share storage with those writers.
+type execOutput struct {
+	mu   sync.Mutex
+	data bytes.Buffer
+}
+
+func (b *execOutput) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.data.Write(p)
+}
+
+func (b *execOutput) snapshot() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Clone(b.data.Bytes())
+}
+
+func TestExecOutput(t *testing.T) {
+	var out execOutput
+	_, err := out.Write([]byte("prefix:"))
+	must(t, err)
+	first := out.snapshot()
+	first[0] = 'X'
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			_, _ = out.Write([]byte("ab"))
+		}
+	}()
+	for range 1000 {
+		snapshot := string(out.snapshot())
+		if !strings.HasPrefix(snapshot, "prefix:") || strings.TrimPrefix(snapshot, "prefix:") != strings.Repeat("ab", (len(snapshot)-7)/2) {
+			t.Fatalf("corrupt output snapshot: %q", snapshot)
+		}
+	}
+	<-done
+	equal(t, "complete exec output", string(out.snapshot()), "prefix:"+strings.Repeat("ab", 1000))
 }
 
 func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte, error) {
@@ -285,7 +372,7 @@ func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte,
 	if err != nil {
 		return nil, err
 	}
-	var out, stderr bytes.Buffer
+	var out, stderr execOutput
 	ctx, cancel := context.WithTimeout(l.ctx, 45*time.Second)
 	defer cancel()
 	options := remotecommand.StreamOptions{Stdout: &out, Stderr: &stderr}
@@ -294,9 +381,9 @@ func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte,
 	}
 	err = executor.StreamWithContext(ctx, options)
 	if err != nil {
-		return out.Bytes(), fmt.Errorf("exec %s/%s: %w: %s", pod, container, err, stderr.String())
+		return out.snapshot(), fmt.Errorf("exec %s/%s: %w: %s", pod, container, err, stderr.snapshot())
 	}
-	return out.Bytes(), nil
+	return out.snapshot(), nil
 }
 
 func (l *lab) http(name, path string, body []byte, options ...string) ([]byte, error) {
@@ -319,12 +406,14 @@ func (l *lab) request(name, path string, body []byte) []byte {
 func (l *lab) ready(name string) *api.VirtualMachine {
 	l.t.Helper()
 	v := l.phase(name, "Running")
+	// Provision the probe and VM together; both must be ready before assertions.
+	l.wait("network probe", func() (bool, error) { return podReady(l.pod(l.probe)), nil })
 	l.wait(
 		"guest HTTP response",
 		func() (bool, error) {
 			// Pod readiness can precede Service routing. Retry a dropped SYN
-			// rather than spending the full request timeout on that connection.
-			b, e := l.http(name, "/ready", nil, "--connect-timeout", "1")
+			// at the polling cadence, retaining the overall readiness deadline.
+			b, e := l.http(name, "/ready", nil, "--connect-timeout", "0.1")
 			return string(b) == "ready\n", e
 		},
 	)

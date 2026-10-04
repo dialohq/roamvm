@@ -14,10 +14,13 @@ import (
 )
 
 func TestLocalCrashRecovery(t *testing.T) {
+	// Only the stateless HTTP probe is shared; each failure gets its own VM.
+	shared := newLab(t)
+	shared.networkClient()
 	for _, failure := range []string{"hypervisor", "runner", "oom"} {
 		t.Run(failure, func(t *testing.T) {
 			l := newLab(t)
-			l.networkClient()
+			l.probe = shared.probe
 			l.storage()
 			v := l.spec("crash")
 			if failure == "oom" {
@@ -92,7 +95,7 @@ func (l *lab) killContainer(pod *core.Pod, name string) {
 		}
 		args := []string{"crictl", "inspect", id}
 		if l.libvirt() {
-			args = append([]string{"k3s"}, args...)
+			args = []string{"crictl", "--config", "/dev/null", "--runtime-endpoint", "unix:///run/k3s/containerd/containerd.sock", "inspect", id}
 		}
 		must(l.t, json.Unmarshal(l.nodeExec(nil, pod.Spec.NodeName, args...), &container))
 		if container.Info.PID <= 1 {

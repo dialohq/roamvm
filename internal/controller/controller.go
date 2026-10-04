@@ -299,7 +299,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			if _, err := r.status(ctx, &vm, "Stopped", pod.Annotations[Message], nil); err != nil {
 				return ctrl.Result{}, err
 			}
-			if pod.Status.Phase != core.PodSucceeded && pod.Status.Phase != core.PodFailed {
+			// The stopped-disk annotation is written only after QEMU exits and
+			// its disk/session are synced. Wait for the runner to release its
+			// lock, not for the sidecar and kubelet's whole-Pod completion.
+			terminated := pod.Status.Phase == core.PodSucceeded || pod.Status.Phase == core.PodFailed
+			for _, container := range pod.Status.ContainerStatuses {
+				if container.Name == "runner" && container.State.Terminated != nil && pod.Spec.RestartPolicy == core.RestartPolicyNever {
+					terminated = true
+				}
+			}
+			if !terminated {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
 			if !vm.Status.Local.Durable {
@@ -307,7 +316,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					return ctrl.Result{}, err
 				}
 			}
-			return r.releasePod(ctx, pod)
+			// Only the disposable sidecar remains. No guest shutdown or upload
+			// runs in it now; the retained PVC and worker own the checkpoint.
+			return r.releasePod(ctx, pod, client.GracePeriodSeconds(0))
 		}
 		if pod.Status.Phase != core.PodSucceeded && pod.Status.Phase != core.PodFailed {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -362,7 +373,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	return r.status(ctx, &vm, phase, message, pod)
 }
 
-func (r *Reconciler) releasePod(ctx context.Context, pod *core.Pod) (ctrl.Result, error) {
+func (r *Reconciler) releasePod(ctx context.Context, pod *core.Pod, options ...client.DeleteOption) (ctrl.Result, error) {
 	controllerutil.RemoveFinalizer(pod, Finalizer)
 	if err := r.Update(ctx, pod); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -371,7 +382,7 @@ func (r *Reconciler) releasePod(ctx context.Context, pod *core.Pod) (ctrl.Result
 		return ctrl.Result{}, err
 	}
 	if pod.DeletionTimestamp == nil {
-		if err := client.IgnoreNotFound(r.Delete(ctx, pod)); err != nil {
+		if err := client.IgnoreNotFound(r.Delete(ctx, pod, options...)); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
