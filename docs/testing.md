@@ -284,38 +284,6 @@ reset; logs, revision, tracked diff and exit status remain under
 operations are locked against each other; do not run manual lab commands or
 other tests concurrently.
 
-For development, keep the installed cluster running between scenarios:
-
-```sh
-make libvirt-reset                     # Once, if the lab is not already running
-make libvirt-dev SCENARIO=network
-make libvirt-dev SCENARIO=lifecycle
-```
-
-`libvirt-dev` runs the same tests in an owned `<cluster>-dev` namespace. Before
-each run it deletes that namespace's VMs, waits for their finalizers, then deletes
-the namespace and waits for its PVs to be reclaimed. The local-path provisioner
-removes each deleted claim's directory, not the worker's entire storage tree.
-Other namespaces, image caches and object-store checkpoints remain untouched.
-Consumed warm PVs are not rebound: after the pool is exhausted, ordinary
-local-path provisioning creates fresh directories. Failed tests retain their
-resources until the next development run; logs use the usual `runs` directory.
-
-This mode requires healthy, running, uncordoned nodes. It refuses unowned
-namespaces and non-`Delete` PVs, and never forces finalizers or deletes PVs
-directly. If cleanup cannot finish, inspect the retained lab or use
-`make libvirt-reset` to discard its working state. It is not a pristine reset:
-cluster-wide mutations or arbitrary host writes need the normal reset path.
-Scenario fault injection still stops/restarts components where the test requires
-it. The same slot lock prevents concurrent runs on one lab; use separate
-`ROAMVM_LAB_SLOT` values for parallel labs.
-
-Development runs use the currently installed runtime and live fixture references;
-they do not rebuild or deploy changes. Run `make libvirt-install` after runtime
-code edits. Node OS/configuration changes still require normal reprovisioning and
-a new baseline. `libvirt-scenario` and `libvirt-scenarios` keep their existing
-fresh-reset behavior and remain the isolation checks for CI.
-
 Keep an installed baseline at its original path: overlays contain absolute
 backing paths. Use the export/import workflow below to move it. Freezing refuses
 to overwrite an existing baseline. To change the node OS or fixture set, take

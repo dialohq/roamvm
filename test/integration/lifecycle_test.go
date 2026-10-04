@@ -220,7 +220,7 @@ func TestLifecycle(t *testing.T) {
 	l.wait("corrupt restore runner logs", func() (bool, error) {
 		var err error
 		log, err = l.kube.CoreV1().
-			Pods(testNamespace()).
+			Pods("default").
 			GetLogs(v.Status.PodName, &core.PodLogOptions{Container: "runner"}).
 			DoRaw(l.ctx)
 		return err == nil, err

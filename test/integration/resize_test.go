@@ -146,7 +146,7 @@ func TestResizeWithoutExpandableStorage(t *testing.T) {
 	v = l.vm(v.Name)
 	pod := l.pod(v.Status.PodName)
 	var pvc core.PersistentVolumeClaim
-	must(t, l.Get(l.ctx, client.ObjectKey{Namespace: testNamespace(), Name: pod.Name + "-working"}, &pvc))
+	must(t, l.Get(l.ctx, client.ObjectKey{Namespace: "default", Name: pod.Name + "-working"}, &pvc))
 	if pvc.Spec.StorageClassName == nil || (*pvc.Spec.StorageClassName != "standard" && *pvc.Spec.StorageClassName != "local-path") {
 		t.Skip("this test targets the lab's non-expandable local-path class")
 	}

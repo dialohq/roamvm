@@ -110,9 +110,5 @@ libvirt-reset-cold:
 libvirt-scenario:
 	bash test/libvirt/scenario.sh run "$(SCENARIO)"
 
-.PHONY: libvirt-dev
-libvirt-dev:
-	bash test/libvirt/scenario.sh dev "$(SCENARIO)"
-
 libvirt-scenarios:
 	bash test/libvirt/scenario.sh run-all
