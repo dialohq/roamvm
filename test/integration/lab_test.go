@@ -300,7 +300,8 @@ func (l *lab) networkClient() {
 			},
 		},
 		Containers: []core.Container{
-			{Name: "curl", Image: "curlimages/curl:8.17.0", Command: []string{"sh", "-c", "exec sleep 7200"}},
+			// PID 1 must handle TERM; bare sleep otherwise waits for forced termination.
+			{Name: "curl", Image: "curlimages/curl:8.17.0", Command: []string{"sh", "-c", "trap 'exit 0' TERM INT; sleep 7200 & wait"}},
 		},
 	}}
 	p.Labels = map[string]string{"roamvm.test/client": l.probe}
