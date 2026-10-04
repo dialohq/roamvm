@@ -1,0 +1,34 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-network
+spec:
+  powerState: Running
+  cpus: 2
+  memory: 512Mi
+  readinessPort: 8080
+  shutdownTimeoutSeconds: 120
+  config:
+    sources:
+      - configMap: {name: scenario-network}
+      - secret: {name: scenario-network}
+  configDisks:
+    - name: agent
+      label: TEST_AGENT
+      projection:
+        sources:
+          - secret: {name: scenario-network}
+    - name: tool
+      label: TEST_TOOL
+      projection:
+        sources:
+          - configMap: {name: scenario-network}
+  disks:
+    - name: workspace
+      claimName: scenario-network
+      volumeMode: Filesystem
+  resources:
+    requests:
+      cpu: 250m
+    limits:
+      cpu: "2"

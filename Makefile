@@ -15,7 +15,8 @@ build:
 test:
 	go vet ./...
 	go test -race ./...
-	go test -tags=integration -race ./internal/runner ./test/integration -run '^(TestExecOutput|TestFixtureCleanup)$$'
+	go test -tags=integration ./test/integration -run '^$$'
+	nu --no-config-file test/runner-test.nu
 
 generate:
 	go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1 object paths=./api/... crd output:crd:artifacts:config=config/crd
@@ -56,8 +57,7 @@ lab-generation-guest: build
 	bin/roamvm image-push --plain-http --tag localhost:15001/generation-guest:local --tar .lab/generation-guest.tar.gz > .lab/generation-guest-ref
 	bin/roamvm image-push --plain-http --tag localhost:15001/firmware-guest:local --tar .lab/firmware-guest.tar.gz > .lab/firmware-guest-ref
 
-integration:
-	go test -tags=integration -race -count=1 -timeout=30m -v ./test/integration
+integration: libvirt-scenarios
 
 benchmark:
 	go test -tags=integration -run '^$$' -bench BenchmarkStartup -benchtime=5x -count=1 -timeout=30m -v ./test/integration
@@ -112,3 +112,6 @@ libvirt-scenario:
 
 libvirt-scenarios:
 	bash test/libvirt/scenario.sh run-all
+
+.PHONY: test-scenario
+test-scenario: libvirt-scenario

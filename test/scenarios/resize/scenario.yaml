@@ -1,0 +1,106 @@
+lab: ../../libvirt/config.nix
+fixtures:
+  ROAMVM_TEST_RESIZE_IMAGE: nixos
+requires: [ROAMVM_TEST_RESIZE_IMAGE]
+cases:
+  - name: online
+    steps:
+      - cleanup: |
+          use ../vm.nu
+          vm cleanup
+      - cleanup: |
+          use ../harness.nu [checked state]
+          let node = (state).snapshots?.before-restart?.node? | default ""
+          if $node != "" { checked { kubectl uncordon $node } | ignore }
+      - run: |
+          use ../vm.nu *
+          init
+          create vm.yaml
+          expose
+          ready
+          request /storage
+          capture initial
+          sample /storage
+      - assert: nu --no-config-file assert.nu initial
+
+      # Exercise each 2/3/4 GiB notification boundary while preserving one boot.
+      - run: nu --no-config-file grow.nu
+
+      - run: |
+          use ../vm.nu *
+          request /storage
+          capture passes
+      - assert: nu --no-config-file assert.nu passes
+      - run: |
+          use ../vm.nu *
+          sleep 3sec
+          request /storage
+      - assert: nu --no-config-file assert.nu settled
+      - assert: |
+          use ../harness.nu [state api]
+          use ../vm.nu [observe]
+          use std/assert
+          observe
+          let vm = (state).vm.metadata.name
+          for size in ["1Gi" "0" "513" "17Ti" ""] {
+            let result = api PATCH $"/apis/vm.roamvm.io/v1alpha1/namespaces/default/virtualmachines/($vm)" {spec: {rootDiskSize: $size}} application/merge-patch+json
+            assert equal $result.reason Invalid
+            assert equal $result.code 422
+          }
+      - run: |
+          use ../harness.nu [state guest-request]
+          use ../vm.nu [observe request capture stop start]
+          observe
+          let s = state
+          let original = $s.snapshots.initial.response | from json
+          guest-request $s.vm.metadata.name $"/fill?bytes=($original.filesystemBytes + 67108864)" "" | ignore
+          request /storage
+          capture grown
+      - assert: nu --no-config-file assert.nu allocation
+      - run: |
+          use ../vm.nu *
+          capture before-restart
+          stop stopped
+          let node = (open $env.SCENARIO_STATE).snapshots.before-restart.node
+          use ../harness.nu [checked]
+          checked { kubectl cordon $node } | ignore
+          start
+          request /storage
+      - assert: nu --no-config-file assert.nu restored
+      - run: |
+          use ../vm.nu *
+          stop final
+
+  - name: denied
+    steps:
+      - cleanup: |
+          use ../vm.nu
+          vm cleanup
+      - run: |
+          use ../vm.nu *
+          init
+          create denied.yaml
+          expose
+          ready
+          request /data "resize failure must preserve this running guest"
+          capture before
+      - assert: |
+          use ../vm.nu [observe]
+          use std/assert
+          observe
+          assert ((open $env.SCENARIO_STATE).pvc.spec.storageClassName in [standard local-path])
+      - run: |
+          use ../vm.nu [observe]
+          observe
+          let name = (open $env.SCENARIO_STATE).vm.metadata.name
+          use ../harness.nu [checked]
+          checked { kubectl patch virtualmachine $name --type merge --patch '{"spec":{"rootDiskSize":"80Gi"}}' } | ignore
+      - assert: nu --no-config-file assert.nu denied
+        eventually: true
+      - run: |
+          use ../vm.nu *
+          request /data
+      - assert: nu --no-config-file assert.nu preserved
+      - run: |
+          use ../vm.nu *
+          stop final

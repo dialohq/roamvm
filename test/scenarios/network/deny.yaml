@@ -1,0 +1,8 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scenario-network
+spec:
+  podSelector:
+    matchLabels: {vm.roamvm.io/name: scenario-network}
+  policyTypes: [Ingress]

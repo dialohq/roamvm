@@ -185,7 +185,7 @@ case "${1:-}" in
     done
     # Freeze node-local unpacked images, not just a registry cache. Otherwise
     # every reset repeats public pulls for the probe and PVC helper Pods.
-    # Keep this probe image aligned with networkClient in integration/lab_test.go.
+    # Keep this probe image aligned with scenarios/vm.nu.
     probe_image=curlimages/curl:8.17.0
     helper_image=$(kubectl -n kube-system get configmap local-path-config -o jsonpath='{.data.helperPod\.yaml}' |
       kubectl create --dry-run=client -f - -o jsonpath='{.spec.containers[0].image}')
@@ -317,14 +317,14 @@ RECLAIM
     start_lab
     ;;
   run-all)
-    while read -r scenario; do
+    for file in "$root"/test/scenarios/*/scenario.yaml; do
+      scenario=$(basename "$(dirname "$file")")
       bash "$0" run "$scenario"
-    done < <(jq -r '.scenarios | keys[]' "$manifest")
+    done
     ;;
   run)
     scenario=${2:-}
-    specification=$(jq -ec --arg name "$scenario" '.scenarios[$name] // error("Unknown scenario: " + $name)' "$manifest")
-    pattern=$(jq -r '.tests | "(" + join("|") + ")"' <<< "$specification")
+    specification=$(scenario_spec "$scenario")
     # Missing optional fixtures must fail here, not silently skip a scenario.
     while read -r fixture; do test -s "$baseline/$fixture-ref"; done < <(jq -r '(.fixtures // {})[]' <<< "$specification")
     run="$lab/runs/$(date -u +%Y%m%dT%H%M%S)-$scenario"
@@ -343,9 +343,9 @@ RECLAIM
       while IFS=$'\t' read -r variable fixture; do
         export "$variable=$(cat "$baseline/$fixture-ref")"
       done < <(jq -r '(.fixtures // {}) | to_entries[] | [.key, .value] | @tsv' <<< "$specification")
-      go test -tags=integration -race -count=1 -timeout=30m -json -run "^$pattern$" ./test/integration |
-        tee "$run/events.json" | jq --unbuffered -rj 'select(.Output != null) | .Output'
-      check_scenario_result "$(jq -c .tests <<< "$specification")" "$run/events.json"
+      nu --no-config-file test/runner.nu "test/scenarios/$scenario/scenario.yaml" |
+        tee "$run/events.json" | jq --unbuffered -r '.message // empty'
+      check_scenario_result "$(jq -c '[.cases[]?.name] | if length == 0 then ["default"] else . end' <<< "$specification")" "$run/events.json"
     ) 2>&1 | tee "$run/output.log"
     statuses=("${PIPESTATUS[@]}")
     status=${statuses[0]}

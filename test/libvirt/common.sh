@@ -41,13 +41,25 @@ load_lab() {
   control_ip=$(jq -r --arg name "$control" '.nodes[$name].ip' "$manifest")
 }
 
+scenario_spec() {
+  local directory specification definition
+  [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Expected a scenario directory name' >&2; return 1; }
+  directory="$root/test/scenarios/$1"
+  specification=$(nu --no-config-file --stdin -c 'from yaml | to json --raw' < "$directory/scenario.yaml") || return 1
+  definition=$(jq -er '.lab | select(type == "string" and length > 0)' <<< "$specification") || return 1
+  # This runner owns the shared libvirt lab. Reject a different definition
+  # before touching its working disks, rather than silently running elsewhere.
+  test "$(realpath -e "$directory/$definition")" = "$root/test/libvirt/config.nix" || {
+    echo "Scenario $1 references a different lab: $definition" >&2; return 1;
+  }
+  printf '%s\n' "$specification"
+}
+
 check_scenario_result() {
-  # Go exits successfully for no matching tests and for skipped tests. Neither
-  # means the declared real-cluster scenario was exercised.
+  # Exit zero alone cannot substitute for every declared case completing.
   jq -es --argjson tests "$1" '
     ($tests | length) > 0 and
-    all(.[]; .Action != "skip" and .Action != "fail") and
-    (map(select(.Action == "pass") | .Test) as $passed |
-      all($tests[]; . as $test | $passed | index($test) != null))
+    all(.[]; (.status // "passed") == "passed" and (.exit_code // 0) == 0) and
+    (map(select(.event == "case" and .status == "passed") | .name) | sort) == ($tests | sort)
   ' "$2" >/dev/null || { echo 'Scenario did not pass every declared test (missing, skipped or failed test)' >&2; return 1; }
 }

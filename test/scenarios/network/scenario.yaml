@@ -1,0 +1,109 @@
+lab: ../../libvirt/config.nix
+requires: [ROAMVM_TEST_NETWORK_POLICY]
+steps:
+  - cleanup: |
+      use ../vm.nu
+      vm cleanup
+  - run: |
+      use ../vm.nu *
+      init
+      create pending.yaml
+      phase Pending
+      power Stopped
+      phase Stopped
+      nu --no-config-file network.nu pending-stop
+  - assert: nu --no-config-file assert.nu pending-stop
+  # Admission and server-side apply bypass create; register their cleanup first.
+  - cleanup: kubectl delete virtualmachine scenario-network-unpinned scenario-network-duplicate-label --ignore-not-found --wait=true
+  - run: nu --no-config-file network.nu invalid
+  - assert: nu --no-config-file assert.nu invalid
+  - run: |
+      use ../vm.nu [create]
+      create configmap.yaml
+      create secret.yaml
+      create pvc.yaml
+      create prepare.yaml
+      nu --no-config-file network.nu prepare-secondary
+  - cleanup: kubectl delete virtualmachine scenario-network --ignore-not-found --wait=true
+  - run: |
+      use ../vm.nu *
+      use ../harness.nu [checked]
+      checked { nu --no-config-file network.nu apply } | ignore
+      select-vm scenario-network
+      expose
+      ready
+      nu --no-config-file network.nu apply-dry-run
+  - assert: nu --no-config-file assert.nu submissions
+  - run: |
+      use ../vm.nu [request]
+      request /config
+  - assert: nu --no-config-file assert.nu config-first
+  - run: |
+      use ../vm.nu [request]
+      request /config-disks
+  - assert: nu --no-config-file assert.nu config-disks
+  - run: |
+      use ../vm.nu [request]
+      request /secondary
+  - assert: nu --no-config-file assert.nu secondary-initial
+  - run: |
+      use ../vm.nu [request]
+      request /secondary guest-pvc-write
+  - assert: nu --no-config-file assert.nu response guest-pvc-write
+  - run: |
+      use ../vm.nu [create]
+      create deny.yaml
+  - assert: |
+      use ../vm.nu [observe]
+      use ../harness.nu [state]
+      use std/assert
+      observe
+      let s = state
+      let result = (kubectl exec $s.probe -c curl -- curl -fsS --max-time 2 $"http://($s.vm.metadata.name):8080/ready" | complete)
+      assert ($result.exit_code != 0)
+    eventually: true
+  - run: |
+      use ../vm.nu [ready]
+      use ../harness.nu [checked]
+      checked { nu --no-config-file network.nu allow-policy } | ignore
+      ready
+      nu --no-config-file network.nu mutate-image
+  - assert: nu --no-config-file assert.nu image-mutation
+  - run: |
+      use ../vm.nu [forward]
+      forward
+  - assert: nu --no-config-file assert.nu forwarded
+  - run: |
+      use ../vm.nu [request]
+      use ../harness.nu [checked]
+      checked { nu --no-config-file network.nu update-config } | ignore
+      request /config
+  - assert: nu --no-config-file assert.nu config-first
+  - run: |
+      use ../vm.nu *
+      stop before-restart
+      start
+      request /config
+  - assert: nu --no-config-file assert.nu config-second
+  - run: |
+      use ../vm.nu [request]
+      request /secondary
+  - assert: nu --no-config-file assert.nu response guest-pvc-write
+  - run: |
+      use ../vm.nu [request]
+      request /data finalizer-commits-this
+  - assert: nu --no-config-file assert.nu response finalizer-commits-this
+  - run: |
+      use ../vm.nu [delete-vm]
+      delete-vm
+  - assert: nu --no-config-file assert.nu deleted
+  - run: |
+      use ../vm.nu *
+      use ../harness.nu [checked]
+      checked { nu --no-config-file network.nu remember-deleted } | ignore
+      create restored.yaml
+      checked { nu --no-config-file network.nu seed-head } | ignore
+      expose
+      start
+      request /data
+  - assert: nu --no-config-file assert.nu response finalizer-commits-this

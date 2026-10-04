@@ -77,21 +77,4 @@ in {
         );
     }) ["coredns" "local-path-provisioner"];
   };
-  scenarios = {
-    crash = {tests = ["TestLocalCrashRecovery"];};
-    lifecycle = {tests = ["TestLifecycle"];};
-    network = {tests = ["TestKubernetes"];};
-    cpu = {tests = ["TestOversubscription"];};
-    resize = {
-      tests = ["TestOnlineResize" "TestResizeWithoutExpandableStorage"];
-      fixtures.ROAMVM_TEST_RESIZE_IMAGE = "nixos";
-    };
-    generations = {
-      tests = ["TestNixOSGenerations"];
-      fixtures = {
-        ROAMVM_TEST_GENERATION_IMAGE = "generation";
-        ROAMVM_TEST_FIRMWARE_IMAGE = "firmware";
-      };
-    };
-  };
 }

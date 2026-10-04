@@ -1,0 +1,83 @@
+lab: ../../libvirt/config.nix
+cases:
+  - name: hypervisor
+    env: {CRASH_MODE: hypervisor, CRASH_VM: vm.yaml, MEMORY_MAX: max}
+    steps: &crash_steps
+      - cleanup: |
+          use ../vm.nu
+          vm cleanup
+      - run: |
+          use ../vm.nu *
+          init
+          create $env.CRASH_VM
+          expose
+          ready
+          random durable 90112
+          write-data durable
+      - assert: |
+          use ../harness.nu [checked]
+          checked { cmp ($env.SCENARIO_DATA | path join response) ($env.SCENARIO_DATA | path join payload-durable) } | ignore
+      - run: |
+          use ../vm.nu [observe]
+          use ../harness.nu [state data checked]
+          observe
+          checked { kubectl exec (state).vm.status.podName -c runner -- /bin/sh -c 'cat /sys/fs/cgroup/memory.max' } | save --raw --force (data response)
+      - assert: |
+          use ../vm.nu [observe]
+          use ../harness.nu [state data]
+          use std/assert
+          observe
+          let s = state
+          assert ($s.head.checkpoint? == null)
+          assert equal (open --raw (data response) | str trim) $env.MEMORY_MAX
+      - run: |
+          use ../vm.nu [capture]
+          use ../harness.nu [state node save-values]
+          capture running
+          save-values {global_ooms: (node (state).snapshots.running.node dmesg | split row global_oom | length | $in - 1)}
+      - assert: |
+          use ../vm.nu [observe]
+          use ../harness.nu [state data]
+          observe
+          (state).values | to json | save --force (data before-ooms.json)
+      - run: |
+          use ../harness.nu [checked]
+          checked { nu --no-config-file inject.nu } | ignore
+      - run: &oom_count |
+          use ../vm.nu [phase]
+          use ../harness.nu [state node save-values]
+          phase Stopped
+          save-values {global_ooms: (node (state).snapshots.running.node dmesg | split row global_oom | length | $in - 1)}
+      - assert: |
+          use ../vm.nu [observe]
+          use ../harness.nu [state data]
+          use std/assert
+          observe
+          let s = state
+          assert equal $s.vm.spec.powerState Stopped
+          assert ($s.vm.status.local? != null)
+          assert ($s.vm.status.message | is-not-empty)
+          if $env.CRASH_MODE == oom {
+            assert ($s.vm.status.message | str contains OOMKilled)
+            assert equal $s.values (open (data before-ooms.json))
+          }
+      - run: |
+          use ../harness.nu [state checked]
+          checked { kubectl wait --for=delete $"pod/((state).snapshots.running.pod.metadata.name)" --timeout=180s } | ignore
+          use ../vm.nu *
+          start
+          read-data
+      - assert: |
+          use ../vm.nu [observe]
+          use ../harness.nu [data checked]
+          observe
+          checked { cmp (data response) (data payload-durable) } | ignore
+      - run: |
+          use ../vm.nu [stop]
+          stop final
+  - name: runner
+    env: {CRASH_MODE: runner, CRASH_VM: vm.yaml, MEMORY_MAX: max}
+    steps: *crash_steps
+  - name: oom
+    env: {CRASH_MODE: oom, CRASH_VM: oom.yaml, MEMORY_MAX: "1342177280"}
+    steps: *crash_steps

@@ -52,9 +52,27 @@ jq -es '
   $a.network.gateway == "192.168.124.1" and $b.network.gateway == "192.168.125.1" and
   $a.network.name != $b.network.name and $a.network.bridge != $b.network.bridge and
   ([($a.nodes | keys[]) as $n | $b.nodes | has($n)] | any | not) and
-  ([($a.nodes[].mac) as $mac | $b.nodes[] | .mac == $mac] | any | not) and
-  $a.scenarios == $b.scenarios
+  ([($a.nodes[].mac) as $mac | $b.nodes[] | .mac == $mac] | any | not)
 ' "$work/config-0/manifest.json" "$work/config-1/manifest.json" >/dev/null
+# Scenario YAML, not the lab manifest, owns the lab reference and fixtures.
+for file in "$root"/test/scenarios/*/scenario.yaml; do
+  scenario_spec "$(basename "$(dirname "$file")")" > "$work/scenario.json"
+  jq -e '.lab == "../../libvirt/config.nix"' "$work/scenario.json" >/dev/null
+done
+scenario_spec resize | jq -e '.fixtures == {ROAMVM_TEST_RESIZE_IMAGE:"nixos"}' >/dev/null
+scenario_spec generations | jq -e '.fixtures == {ROAMVM_TEST_GENERATION_IMAGE:"generation",ROAMVM_TEST_FIRMWARE_IMAGE:"firmware"} and (.cases[1].steps == .cases[0].steps)' >/dev/null
+(
+  # Intentionally isolate invalid fixtures from the real checkout.
+  # shellcheck disable=SC2030
+  root="$work"
+  mkdir -p "$root/test/scenarios/invalid" "$root/test/libvirt"
+  touch "$root/test/libvirt/config.nix" "$root/test/libvirt/other.nix"
+  for definition in '' 'lab: ../../libvirt/missing.nix' 'lab: ../../libvirt/other.nix'; do
+    printf '%s\nsteps: [{ready: {}}]\n' "$definition" > "$root/test/scenarios/invalid/scenario.yaml"
+    if scenario_spec invalid; then echo 'Accepted invalid lab reference' >&2; exit 1; fi
+  done
+)
+# shellcheck disable=SC2031
 common="$root/test/libvirt/common.sh"
 (
   export XDG_RUNTIME_DIR="$work" ROAMVM_LAB_SLOT=0
@@ -71,16 +89,15 @@ if ROAMVM_LAB_SLOT=100 bash -c 'source "$1"' bash "$common" >"$work/invalid.log"
   echo 'Accepted an out-of-range lab slot' >&2; exit 1
 fi
 grep -q 'must be 0..99' "$work/invalid.log"
-# A package PASS cannot substitute for a missing scenario test. A skipped
-# subtest also fails even when Go reports its parent as passing.
-printf '%s\n' '{"Action":"pass","Test":"TestOne"}' '{"Action":"pass","Test":"TestTwo"}' > "$work/events.json"
+# Require an explicit success for every case, without duplicates or failures.
+printf '%s\n' '{"event":"case","status":"passed","name":"TestOne"}' '{"event":"case","status":"passed","name":"TestTwo"}' > "$work/events.json"
 check_scenario_result '["TestOne","TestTwo"]' "$work/events.json"
 if check_scenario_result '["TestOne","TestMissing"]' "$work/events.json"; then exit 1; fi
-for action in skip fail; do
-  printf '{"Action":"%s","Test":"TestOne/subtest"}\n' "$action" > "$work/events.json"
-  printf '%s\n' '{"Action":"pass","Test":"TestOne"}' >> "$work/events.json"
+for action in skipped failed; do
+  printf '{"event":"case","status":"%s","name":"TestOne/subtest"}\n' "$action" > "$work/events.json"
+  printf '%s\n' '{"event":"case","status":"passed","name":"TestOne"}' >> "$work/events.json"
   if check_scenario_result '["TestOne"]' "$work/events.json"; then exit 1; fi
 done
-printf '%s\n' '{"Action":"pass"}' > "$work/events.json"
+printf '%s\n' '{"status":"passed"}' > "$work/events.json"
 if check_scenario_result '["TestOne"]' "$work/events.json"; then exit 1; fi
 echo 'Lab declarations, provider schemas, lock isolation and scenario results passed.'

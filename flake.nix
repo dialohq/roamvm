@@ -20,6 +20,11 @@
       export PATH=/run/wrappers/bin:$PATH
       exec ${pkgs.virtiofsd}/bin/virtiofsd "$@"
     '';
+    testCli = pkgs.writeShellScriptBin "te2e" ''
+      set -euo pipefail
+      root=$(git rev-parse --show-toplevel)
+      exec ${pkgs.bash}/bin/bash "$root/test/cli.sh" "$@"
+    '';
     runtime = import ./test/libvirt/runtime.nix {inherit pkgs;};
     mkLab = slot: let
       layout = import ./test/libvirt/config.nix {inherit slot;};
@@ -80,7 +85,7 @@
       config.Env = ["PATH=/bin"];
     };
     devShells.x86_64-linux.default = pkgs.mkShell {
-      packages = with pkgs; [go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck libvirt virtiofsd opentofu openssh openssl iproute2 iptables e2fsprogs minio-client util-linux curl jq];
+      packages = with pkgs; [testCli go_1_26 gofumpt gnumake docker-client docker-compose kind kubectl qemu_kvm qemu-utils alejandra shellcheck libvirt virtiofsd opentofu openssh openssl iproute2 iptables e2fsprogs minio-client util-linux curl jq nushell];
     };
   };
 }

@@ -93,10 +93,13 @@ case "$operation" in
     ;;
   fixtures)
     load_lab
+    specifications=$(for file in "$root"/test/scenarios/*/scenario.yaml; do
+      scenario_spec "$(basename "$(dirname "$file")")" || exit 1
+    done)
     while read -r fixture; do
       nix build "$root#test-$fixture-guest" --out-link "$lab/$fixture.tar.gz"
       "$binary" image-push --plain-http --tag "$control_ip:5000/$fixture:local" --tar "$lab/$fixture.tar.gz" > "$lab/$fixture-ref"
-    done < <(jq -r '[.scenarios[] | (.fixtures // {})[]] | unique[]' "$manifest")
+    done < <(jq -rs '[.[] | (.fixtures // {})[]] | unique[]' <<< "$specifications")
     ;;
   start)
     load_lab

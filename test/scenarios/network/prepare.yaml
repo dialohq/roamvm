@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scenario-network-prepare
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: prepare
+      image: alpine:3.23
+      command:
+        - sh
+        - -ec
+        - |
+          apk add --no-cache e2fsprogs
+          mkdir /tmp/root
+          printf prepared-by-kubernetes > /tmp/root/marker
+          truncate -s 64M /volume/disk.img
+          mke2fs -q -t ext4 -F -d /tmp/root /volume/disk.img
+      volumeMounts: [{name: disk, mountPath: /volume}]
+  volumes:
+    - name: disk
+      persistentVolumeClaim: {claimName: scenario-network}
