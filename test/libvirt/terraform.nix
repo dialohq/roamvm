@@ -53,6 +53,14 @@
       memory_backing = {
         memory_source.type = "memfd";
         memory_access.mode = "shared";
+        # Shared memfd RAM otherwise uses 4 KiB pages on common hosts, making
+        # nested guest memory translation expensive even with warm disk caches.
+        memory_huge_pages.hugepages = [
+          {
+            size = 2048;
+            unit = "KiB";
+          }
+        ];
       };
       os = {
         type = "hvm";

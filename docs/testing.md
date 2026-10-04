@@ -51,6 +51,19 @@ runs QEMU as that unprivileged user without changing disk ownership. Host change
 are an administrator step, not a hidden side effect of `make libvirt-up`.
 Virtiofs also needs working user-namespace helpers/subordinate UID/GID ranges.
 
+The domains use 2 MiB huge pages for their shared RAM. Ordinary shared `memfd`
+RAM can remain backed by 4 KiB pages even when anonymous transparent huge pages
+are enabled, substantially slowing nested KVM. The host module reserves 3,072
+huge pages (6 GiB) at boot; set its `labInstances` argument to the number of
+concurrent labs. This pool is unavailable to ordinary host allocations even
+while labs are stopped. Guest memory limits stay unchanged; snapshots remain
+persistent on disk.
+On other Linux hosts, reserve the same pool as an administrator before starting
+the lab, for example `sudo sysctl -w vm.nr_hugepages=3072` for one instance.
+Check `HugePages_Total` in `/proc/meminfo`: runtime allocation can fall short on
+a fragmented host. Boot parameters `hugepagesz=2M hugepages=3072` reserve it early.
+Budget additional pages for any other huge-page users; never shrink their pool.
+
 Leave several GiB free beyond the frozen baseline for migration and generation
 tests, which hold images on both workers. A full host filesystem makes libvirt
 pause nodes with `I/O error`; that is distinct from guest memory exhaustion.

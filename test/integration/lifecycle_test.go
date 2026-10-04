@@ -215,11 +215,16 @@ func TestLifecycle(t *testing.T) {
 	}
 	l.power(v.Name, "Running")
 	v = l.phase(v.Name, "RecoveryRequired")
-	log, err := l.kube.CoreV1().
-		Pods("default").
-		GetLogs(v.Status.PodName, &core.PodLogOptions{Container: "runner"}).
-		DoRaw(l.ctx)
-	must(t, err)
+	// The rebooted worker's log tunnel can reconnect after it reports Ready.
+	var log []byte
+	l.wait("corrupt restore runner logs", func() (bool, error) {
+		var err error
+		log, err = l.kube.CoreV1().
+			Pods("default").
+			GetLogs(v.Status.PodName, &core.PodLogOptions{Container: "runner"}).
+			DoRaw(l.ctx)
+		return err == nil, err
+	})
 	// Quiet test kernels can suppress the banner; the runner's spawn marker cannot.
 	if !strings.Contains(string(log), "integrity mismatch") || strings.Contains(string(log), "startup stage=hypervisor") || strings.Contains(string(log), "Linux version") {
 		t.Fatalf("corruption was not rejected before boot: %s", log)

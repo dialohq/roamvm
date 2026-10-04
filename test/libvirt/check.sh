@@ -27,6 +27,7 @@ for slot in 0 1; do
   ' "$work/config-$slot/warm-volumes.json" >/dev/null
   jq -e '.resource.libvirt_domain | length == 3 and all(.[]; has("running") | not)' "$work/config-$slot/main.tf.json" >/dev/null
   jq -e '.resource.libvirt_domain | all(.[]; .cpu.topology.sockets == 1 and .cpu.topology.threads == 1 and .cpu.topology.cores == .vcpu)' "$work/config-$slot/main.tf.json" >/dev/null
+  jq -e '.resource.libvirt_domain | all(.[]; .memory == 2048 and .memory_backing.memory_source.type == "memfd" and .memory_backing.memory_access.mode == "shared" and .memory_backing.memory_huge_pages.hugepages == [{size:2048,unit:"KiB"}])' "$work/config-$slot/main.tf.json" >/dev/null
   jq -e '.resource.libvirt_network.lab.bridge | .stp == "off" and .delay == "0"' "$work/config-$slot/main.tf.json" >/dev/null
   # Terraform JSON can silently discard unknown nested object attributes.
   # In particular, the provider's kernel_args example drops the boot command.
@@ -34,6 +35,10 @@ for slot in 0 1; do
   tofu -chdir="$work/tf-$slot" providers schema -json |
     jq -e '.provider_schemas[].resource_schemas.libvirt_domain.block.attributes.os.nested_type.attributes.cmdline.type == "string"' >/dev/null
 done
+nix eval --impure --json --expr '
+  map (args: ((import ./test/libvirt/host.nix args) {pkgs = {};}).boot.kernelParams)
+    [{labUser = "test";} {labUser = "test"; labInstances = 2;}]
+' | jq -e '. == [["hugepagesz=2M","hugepages=3072"],["hugepagesz=2M","hugepages=6144"]]' >/dev/null
 jq -es '[.[].items[].metadata.name] | length == (unique | length)' "$work/config-0/warm-volumes.json" "$work/config-1/warm-volumes.json" >/dev/null
 jq -es '
   .[0] as $a | .[1] as $b |

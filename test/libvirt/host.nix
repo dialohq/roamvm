@@ -1,5 +1,11 @@
 # Import on a dedicated NixOS lab host: (import ./host.nix {labUser = "coder";})
-{labUser}: {pkgs, ...}: {
+{
+  labUser,
+  labInstances ? 1,
+}: {pkgs, ...}: {
+  # Reserve early, before memory fragmentation can prevent 2 MiB allocations.
+  # Each three-node lab assigns 6 GiB RAM, including when restored from disk.
+  boot.kernelParams = ["hugepagesz=2M" "hugepages=${toString (3072 * labInstances)}"];
   virtualisation.libvirtd = {
     enable = true;
     qemu = {
