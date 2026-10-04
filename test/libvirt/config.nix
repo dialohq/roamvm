@@ -47,6 +47,36 @@ in {
       cpus = 4;
     };
   };
+  # Take ownership only of these fields on K3s's bundled Deployments. Keep
+  # cluster services off workers that scenarios deliberately power off.
+  addons = {
+    apiVersion = "v1";
+    kind = "List";
+    items = map (name: {
+      apiVersion = "apps/v1";
+      kind = "Deployment";
+      metadata = {
+        inherit name;
+        namespace = "kube-system";
+      };
+      spec.template.spec =
+        {
+          nodeSelector."kubernetes.io/hostname" = "${cluster}-control-plane";
+        }
+        // (
+          if name == "local-path-provisioner"
+          then {
+            containers = [
+              {
+                inherit name;
+                image = "rancher/local-path-provisioner:v0.0.37";
+              }
+            ];
+          }
+          else {}
+        );
+    }) ["coredns" "local-path-provisioner"];
+  };
   scenarios = {
     crash = {tests = ["TestLocalCrashRecovery"];};
     lifecycle = {tests = ["TestLifecycle"];};
