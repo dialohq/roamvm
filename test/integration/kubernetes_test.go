@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -231,7 +232,8 @@ func TestKubernetes(t *testing.T) {
 	l.start(name)
 	equal(t, "configuration refreshes at next boot", config()["setting"], "second")
 	equal(t, "secondary disk survives restart", string(l.request(name, "/secondary", nil)), "guest-pvc-write")
-	l.request(name, "/data", []byte("finalizer-commits-this"))
+	final := []byte("finalizer-commits-this")
+	equal(t, "final write", l.request(name, "/data", final), final)
 	must(t, l.Delete(l.ctx, v))
 	l.gone(v)
 	h := l.head(v)
@@ -239,4 +241,17 @@ func TestKubernetes(t *testing.T) {
 	equal(t, "deletion released owner", h.Owner, "")
 	equal(t, "deletion committed new generation", h.Checkpoint.Generation, int64(2))
 	l.get(pvc)
+	// Seed a stopped test VM from the deleted VM's durable head. Its new UID
+	// has no local cache: the ordinary startup path must restore the S3 bytes.
+	restored := l.spec("deleted-restore")
+	restored.Spec.PowerState = "Stopped"
+	l.create(restored)
+	h.VMID = string(restored.UID)
+	encoded, err = json.Marshal(h)
+	must(t, err)
+	_, err = l.state.Store.Put(l.ctx, state.HeadKey(h.VMID), bytes.NewReader(encoded), int64(len(encoded)), "")
+	must(t, err)
+	l.service(restored, core.ServiceTypeClusterIP)
+	l.start(restored.Name)
+	equal(t, "deletion checkpoint contains final write", l.request(restored.Name, "/data", nil), final)
 }

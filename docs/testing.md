@@ -89,6 +89,14 @@ Lab configuration lives in `test/libvirt`; generated XML, disks, unique SSH keys
 kubeconfig and fixture references live in `.lab/libvirt`. Inspect a node with
 `bash test/libvirt/lab.sh ssh roamvm-libvirt-worker systemctl --failed`.
 
+The setup has three owners: NixOS declares node services; Terranix declares
+libvirt hardware/networking; Nix-generated Kubernetes manifests declare runtime
+resources, warm volumes and add-on image/placement overrides. `install.sh` waits
+for K3s's bundled add-ons before applying those overrides, taking ownership only
+of the declared fields. Shell handles image import, readiness, freeze/restore and
+running scenarios; Go owns fault sequences and assertions. Every scenario starts
+from the frozen baseline, not the previous scenario's running cluster.
+
 `make libvirt-plan` builds the declaration and shows the Terraform plan (exit 2
 means changes). `make libvirt-up` applies it and boots the nodes. `make
 libvirt-down` only powers them off; `make libvirt-destroy` removes Terraform-owned
@@ -280,7 +288,10 @@ steps. They measure lab reset, not startup of a guest VM inside the lab.
 **Reset discards all changes in the working lab**, including failed-test VMs.
 A scenario leaves its working disks available for debugging until the next
 reset; logs, revision, tracked diff and exit status remain under
-`.lab/libvirt/runs`. The scenario loop stops on failure. Baseline/scenario
+`.lab/libvirt/runs`. Each run also records Go's structured events in `events.json`.
+The harness requires every declared test to pass and rejects skipped tests or
+subtests; a successful Go exit with no matching tests is not a successful scenario.
+The scenario loop stops on failure. Baseline/scenario
 operations are locked against each other; do not run manual lab commands or
 other tests concurrently.
 

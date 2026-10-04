@@ -76,7 +76,7 @@ func TestLocalCrashRecovery(t *testing.T) {
 			l.start(v.Name)
 			equal(t, "restart preserves uncheckpointed work", l.request(v.Name, "/data", nil), payload)
 			l.stop(v.Name)
-			t.Logf("%s: first-boot working disk survived crash and normal stop/start", failure)
+			t.Logf("%s: first-boot working disk survived local crash recovery and a durable stop", failure)
 		})
 	}
 }

@@ -343,7 +343,9 @@ RECLAIM
       while IFS=$'\t' read -r variable fixture; do
         export "$variable=$(cat "$baseline/$fixture-ref")"
       done < <(jq -r '(.fixtures // {}) | to_entries[] | [.key, .value] | @tsv' <<< "$specification")
-      go test -tags=integration -race -count=1 -timeout=30m -v -run "^$pattern$" ./test/integration
+      go test -tags=integration -race -count=1 -timeout=30m -json -run "^$pattern$" ./test/integration |
+        tee "$run/events.json" | jq --unbuffered -rj 'select(.Output != null) | .Output'
+      check_scenario_result "$(jq -c .tests <<< "$specification")" "$run/events.json"
     ) 2>&1 | tee "$run/output.log"
     statuses=("${PIPESTATUS[@]}")
     status=${statuses[0]}

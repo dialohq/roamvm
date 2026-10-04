@@ -40,3 +40,14 @@ load_lab() {
   control=$(jq -r '.nodes | to_entries[] | select(.value.role == "server") | .key' "$manifest")
   control_ip=$(jq -r --arg name "$control" '.nodes[$name].ip' "$manifest")
 }
+
+check_scenario_result() {
+  # Go exits successfully for no matching tests and for skipped tests. Neither
+  # means the declared real-cluster scenario was exercised.
+  jq -es --argjson tests "$1" '
+    ($tests | length) > 0 and
+    all(.[]; .Action != "skip" and .Action != "fail") and
+    (map(select(.Action == "pass") | .Test) as $passed |
+      all($tests[]; . as $test | $passed | index($test) != null))
+  ' "$2" >/dev/null || { echo 'Scenario did not pass every declared test (missing, skipped or failed test)' >&2; return 1; }
+}

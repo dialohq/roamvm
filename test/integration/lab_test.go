@@ -441,7 +441,9 @@ func (l *lab) stop(name string) state.Head {
 	v := l.phase(name, "Stopped")
 	l.wait(name+" checkpoint durable", func() (bool, error) {
 		v = l.vm(name)
-		return apimeta.IsStatusConditionTrue(v.Status.Conditions, "CheckpointReady"), nil
+		condition := apimeta.FindStatusCondition(v.Status.Conditions, "CheckpointReady")
+		return v.Status.Phase == "Stopped" && condition != nil &&
+			condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == v.Generation, nil
 	})
 	h := l.head(v)
 	equal(l.t, "durable stopped state", h.State, "Stopped")

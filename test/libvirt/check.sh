@@ -13,6 +13,12 @@ for slot in 0 1; do
   tofu -chdir="$work/tf-$slot" init -backend=false -input=false -lockfile=readonly
   tofu -chdir="$work/tf-$slot" validate
   kubectl kustomize "$work/config-$slot" >/dev/null
+  jq -e '.cluster as $cluster | .addons.items |
+    map(.metadata.name) == ["coredns", "local-path-provisioner"] and
+    all(.[]; .metadata.namespace == "kube-system" and
+      .spec.template.spec.nodeSelector["kubernetes.io/hostname"] == ($cluster + "-control-plane")) and
+    .[1].spec.template.spec.containers == [{name:"local-path-provisioner",image:"rancher/local-path-provisioner:v0.0.37"}]
+  ' "$work/config-$slot/manifest.json" >/dev/null
   jq -e --slurpfile layout "$work/config-$slot/manifest.json" '
     .items as $volumes |
     ($volumes | length) == 16 and
@@ -65,4 +71,16 @@ if ROAMVM_LAB_SLOT=100 bash -c 'source "$1"' bash "$common" >"$work/invalid.log"
   echo 'Accepted an out-of-range lab slot' >&2; exit 1
 fi
 grep -q 'must be 0..99' "$work/invalid.log"
-echo 'Lab declarations, provider schemas and lock isolation passed.'
+# A package PASS cannot substitute for a missing scenario test. A skipped
+# subtest also fails even when Go reports its parent as passing.
+printf '%s\n' '{"Action":"pass","Test":"TestOne"}' '{"Action":"pass","Test":"TestTwo"}' > "$work/events.json"
+check_scenario_result '["TestOne","TestTwo"]' "$work/events.json"
+if check_scenario_result '["TestOne","TestMissing"]' "$work/events.json"; then exit 1; fi
+for action in skip fail; do
+  printf '{"Action":"%s","Test":"TestOne/subtest"}\n' "$action" > "$work/events.json"
+  printf '%s\n' '{"Action":"pass","Test":"TestOne"}' >> "$work/events.json"
+  if check_scenario_result '["TestOne"]' "$work/events.json"; then exit 1; fi
+done
+printf '%s\n' '{"Action":"pass"}' > "$work/events.json"
+if check_scenario_result '["TestOne"]' "$work/events.json"; then exit 1; fi
+echo 'Lab declarations, provider schemas, lock isolation and scenario results passed.'
