@@ -139,7 +139,7 @@ func BenchmarkStartup(b *testing.B) {
 		b.Logf("boot %d actual guest response: %s; observed stages: %v", i, elapsed, observations)
 		current = l.vm(v.Name)
 		logs, e := l.kube.CoreV1().
-			Pods("default").
+			Pods(testNamespace()).
 			GetLogs(current.Status.PodName, &core.PodLogOptions{Container: "runner"}).
 			DoRaw(l.ctx)
 		must(b, e)

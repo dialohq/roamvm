@@ -156,7 +156,16 @@ func (l *lab) wait(description string, check func() (bool, error)) {
 	}
 }
 
-func meta(name string) metav1.ObjectMeta { return metav1.ObjectMeta{Name: name, Namespace: "default"} }
+func testNamespace() string {
+	if namespace := os.Getenv("ROAMVM_TEST_NAMESPACE"); namespace != "" {
+		return namespace
+	}
+	return "default"
+}
+
+func meta(name string) metav1.ObjectMeta {
+	return metav1.ObjectMeta{Name: name, Namespace: testNamespace()}
+}
 
 func unique(prefix string) string { return fmt.Sprintf("%s-%x", prefix, time.Now().UnixNano()) }
 
@@ -192,13 +201,16 @@ func (l *lab) create(obj client.Object) {
 }
 
 func TestFixtureCleanup(t *testing.T) {
+	t.Setenv("ROAMVM_TEST_NAMESPACE", "fixture-cleanup")
 	var operations []string
 	c := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
 		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			require.Equal(t, "fixture-cleanup", obj.GetNamespace())
 			operations = append(operations, "delete "+obj.GetName())
 			return c.Delete(ctx, obj, opts...)
 		},
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			require.Equal(t, "fixture-cleanup", key.Namespace)
 			operations = append(operations, "wait "+key.Name)
 			return c.Get(ctx, key, obj, opts...)
 		},
@@ -363,7 +375,7 @@ func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte,
 	req := l.kube.CoreV1().
 		RESTClient().
 		Post().
-		Namespace("default").
+		Namespace(testNamespace()).
 		Resource("pods").
 		Name(pod).
 		SubResource("exec").
@@ -392,7 +404,7 @@ func (l *lab) http(name, path string, body []byte, options ...string) ([]byte, e
 		args = append(args, "--data-binary", "@-")
 	}
 	args = append(args, options...)
-	args = append(args, "http://"+name+".default.svc.cluster.local:8080"+path)
+	args = append(args, "http://"+name+"."+testNamespace()+".svc.cluster.local:8080"+path)
 	return l.exec(l.probe, "curl", body, args...)
 }
 
@@ -526,7 +538,7 @@ func (l *lab) forward(pod string, port int32) (string, func()) {
 	url := l.kube.CoreV1().
 		RESTClient().
 		Post().
-		Namespace("default").
+		Namespace(testNamespace()).
 		Resource("pods").
 		Name(pod).
 		SubResource("portforward").

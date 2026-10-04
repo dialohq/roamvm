@@ -155,6 +155,45 @@ start_lab() {
   fi
 }
 
+reuse_lab() {
+  local node existing volumes
+  export ROAMVM_TEST_NAMESPACE="$cluster-dev"
+  test "$(kubectl config current-context)" = "$cluster"
+  for node in "${names[@]}"; do
+    test "$(virsh domstate "$node")" = running || { echo 'Development mode requires a running lab; use make libvirt-reset first.' >&2; return 1; }
+  done
+  controller=$(kubectl -n roamvm-system get pods -l app=roamvm-controller -o json | jq -er '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name] | if length == 1 then .[0] else error("Expected one controller pod") end')
+  warm_ready
+  kubectl wait node "${names[@]}" --for=condition=Ready --timeout=60s
+  kubectl get node "${names[@]}" -o json | jq -e 'if all(.items[]; .spec.unschedulable != true) then true else error("Uncordon lab nodes before a development run") end' >/dev/null
+  existing=$(kubectl get namespace "$ROAMVM_TEST_NAMESPACE" --ignore-not-found -o json)
+  if [[ -n "$existing" ]]; then
+    jq -e --arg cluster "$cluster" '.metadata.labels["roamvm.test/lab"] == $cluster' <<< "$existing" >/dev/null || {
+      echo "Refusing to erase unowned namespace $ROAMVM_TEST_NAMESPACE" >&2; return 1;
+    }
+    volumes=$(kubectl get pv -o json | jq -ce --arg ns "$ROAMVM_TEST_NAMESPACE" '
+      [.items[] | select(.spec.claimRef.namespace == $ns)] |
+      if all(.[]; .spec.persistentVolumeReclaimPolicy == "Delete")
+      then map("pv/" + .metadata.name) else error("Development PVCs require Delete reclaim policy") end')
+    # Keep credentials/RBAC alive until VM finalizers finish their checkpoints.
+    kubectl -n "$ROAMVM_TEST_NAMESPACE" delete virtualmachines --all --wait=true --timeout=180s
+    kubectl delete namespace "$ROAMVM_TEST_NAMESPACE" --wait=true --timeout=180s
+    # The provisioner removes exactly each claim's directory before deleting its
+    # PV. Never wipe the node disk or reuse a path while reclamation is pending.
+    while read -r volume; do kubectl wait "$volume" --for=delete --timeout=180s; done < <(jq -r '.[]' <<< "$volumes")
+  fi
+  jq -nc --arg ns "$ROAMVM_TEST_NAMESPACE" --arg cluster "$cluster" '{apiVersion:"v1",kind:"Namespace",metadata:{name:$ns,labels:{"roamvm.test/lab":$cluster}}}' | kubectl create -f -
+  # Reuse the installed fixture's runtime configuration, not another copy of it.
+  kubectl -n default get serviceaccount/roamvm-runtime rolebinding/roamvm-daemon secret/roamvm-object-store configmap/roamvm-runtime --ignore-not-found -o json |
+    jq --arg ns "$ROAMVM_TEST_NAMESPACE" '
+      (.items | map(.kind)) as $k |
+      if ($k | index("ServiceAccount")) == null or ($k | index("RoleBinding")) == null or ($k | index("Secret")) == null
+      then error("Install the lab runtime configuration first") else . end |
+      .items |= map(.metadata = {name:.metadata.name,namespace:$ns} |
+        if .kind == "RoleBinding" then .subjects |= map(.namespace = $ns) else . end)' |
+    kubectl create -f -
+}
+
 case "${1:-}" in
   freeze-warm)
     test ! -e "$warm" || { echo 'Warm baseline already exists (or an incomplete freeze needs inspection)' >&2; exit 1; }
@@ -321,13 +360,15 @@ RECLAIM
       bash "$0" run "$scenario"
     done < <(jq -r '.scenarios | keys[]' "$manifest")
     ;;
-  run)
+  run|dev)
     scenario=${2:-}
     specification=$(jq -ec --arg name "$scenario" '.scenarios[$name] // error("Unknown scenario: " + $name)' "$manifest")
     pattern=$(jq -r '.tests | "(" + join("|") + ")"' <<< "$specification")
+    fixtures="$baseline"
+    if [[ $1 == dev ]]; then fixtures="$lab"; fi
     # Missing optional fixtures must fail here, not silently skip a scenario.
-    while read -r fixture; do test -s "$baseline/$fixture-ref"; done < <(jq -r '(.fixtures // {})[]' <<< "$specification")
-    run="$lab/runs/$(date -u +%Y%m%dT%H%M%S)-$scenario"
+    while read -r fixture; do test -s "$fixtures/$fixture-ref"; done < <(jq -r '(.fixtures // {})[]' <<< "$specification")
+    run="$lab/runs/$(date -u +%Y%m%dT%H%M%S)-$1-$scenario"
     mkdir -p "$run"
     git rev-parse HEAD > "$run/revision"
     git diff HEAD > "$run/worktree.patch"
@@ -335,13 +376,14 @@ RECLAIM
     set +e
     (
       set -e
-      start_lab
+      unset ROAMVM_TEST_NAMESPACE
+      if [[ $1 == dev ]]; then reuse_lab; else start_lab; fi
       # shellcheck disable=SC1091
       source test/libvirt/env
       export ROAMVM_TEST_NETWORK_POLICY=1
       unset ROAMVM_TEST_RESIZE_IMAGE ROAMVM_TEST_GENERATION_IMAGE ROAMVM_TEST_FIRMWARE_IMAGE
       while IFS=$'\t' read -r variable fixture; do
-        export "$variable=$(cat "$baseline/$fixture-ref")"
+        export "$variable=$(cat "$fixtures/$fixture-ref")"
       done < <(jq -r '(.fixtures // {}) | to_entries[] | [.key, .value] | @tsv' <<< "$specification")
       go test -tags=integration -race -count=1 -timeout=30m -v -run "^$pattern$" ./test/integration
     ) 2>&1 | tee "$run/output.log"
@@ -353,5 +395,5 @@ RECLAIM
     echo "Scenario output: $run (exit $status); working disks retained until the next reset."
     exit "$status"
     ;;
-  *) echo "Usage: $0 freeze|freeze-warm|reset|reset-cold|run-all|run SCENARIO" >&2; exit 1 ;;
+  *) echo "Usage: $0 freeze|freeze-warm|reset|reset-cold|run-all|run SCENARIO|dev SCENARIO" >&2; exit 1 ;;
 esac
