@@ -2,7 +2,7 @@ use std/assert
 use ../vm.nu [observe]
 
 def main [check: string] {
-  observe
+  if $check in [restored denied preserved] { observe }
   let s = open $env.SCENARIO_STATE
   let response = open --raw ($env.SCENARIO_DATA | path join response)
   match $check {

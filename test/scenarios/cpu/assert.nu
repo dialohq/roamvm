@@ -1,5 +1,5 @@
 use std/assert
-use ../vm.nu [observe]
+use ../vm.nu [observe observe-storage]
 
 def load-ok [load: record] {
   assert equal $load.report.cpus 4
@@ -8,7 +8,8 @@ def load-ok [load: record] {
 }
 
 export def main [check: string, name: string = ""] {
-  observe
+  if $check in [runtime unschedulable checkpoint] { observe }
+  if $check == checkpoint { observe-storage }
   let s = open $env.SCENARIO_STATE
   match $check {
     runtime => {

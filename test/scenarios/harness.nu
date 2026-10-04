@@ -1,8 +1,8 @@
 # Shared transports and scratch state; scenario decisions belong in each directory.
 export def state [] { open $env.SCENARIO_STATE }
 export def data [name: string] { $env.SCENARIO_DATA | path join $name }
-export def values [] { if (data values.json | path exists) { open (data values.json) } else { {} } }
-export def save-values [v: record] { $v | to json | save --force (data values.json) }
+export def values [] { (state).values? | default {} }
+export def save-values [v: record] { state | upsert values $v | to json | save --force $env.SCENARIO_STATE }
 
 export def checked [command: closure] {
   let result = $in | do $command | complete
@@ -16,7 +16,7 @@ export def --wrapped node [name: string, ...args: string] {
   checked { bash ($env.SCENARIO_ROOT | path join test libvirt lab.sh) ssh $name $command }
 }
 
-export def guest-request [name: string, path: string, body?: string] {
+export def guest-request [name: string, path: string, body?: any] {
   let probe = (state).probe
   let url = $"http://($name).default.svc.cluster.local:8080($path)"
   if $body == null {
@@ -73,10 +73,6 @@ export def mc-config [] {
     touch $marker
   }
   $config
-}
-
-export def s3-get [key: string] {
-  checked { mc --config-dir (mc-config) cat $"fixture/($env.S3_BUCKET)/($key)" }
 }
 
 export def s3-list [prefix: string] {

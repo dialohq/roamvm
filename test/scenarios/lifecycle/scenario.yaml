@@ -32,9 +32,7 @@ steps:
       use ../vm.nu *
       request "/dns?name=kubernetes.default.svc.cluster.local"
   - assert: |
-      use ../vm.nu [observe]
       use std/assert
-      observe
       assert ((open --raw ($env.SCENARIO_DATA | path join response) | str length) >= 5)
   - run: |
       use ../vm.nu *

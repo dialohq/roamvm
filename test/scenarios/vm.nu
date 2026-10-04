@@ -1,6 +1,6 @@
 # Ordinary scenario helpers for the VM integration lab.  Importing this module
 # has no side effects; scenario.yaml explicitly calls cleanup and then init.
-use harness.nu [checked data values wait-until mc-config s3-get-optional s3-list]
+use harness.nu [checked data guest-request wait-until mc-config s3-get-optional]
 
 def current [] { open $env.SCENARIO_STATE }
 def save-state [state: record] { $state | to json | save --force $env.SCENARIO_STATE }
@@ -26,7 +26,7 @@ export def init [] {
   }
   if (($env.S3_ENDPOINT? | default "") == "") or (($env.S3_BUCKET? | default "") == "") { error make {msg: "S3_ENDPOINT and S3_BUCKET are required"} }
   mkdir $env.SCENARIO_DATA
-  save-state {selected: null, uid: null, deleted: false, paused: false, probe: "", resources: [], snapshots: {}, vm: null, pod: null, pvc: null, head: null, objects: [], values: {}}
+  save-state {selected: null, uid: null, deleted: false, paused: false, probe: "", resources: [], snapshots: {}, vm: null, pod: null, pvc: null, head: null, values: {}}
   mc-config | ignore
 }
 
@@ -96,16 +96,8 @@ export def ready [] {
   observe
 }
 
-export def request [path: string, body?: string] {
-  let name = vm-name
-  let probe = (current).probe
-  let url = $"http://($name).default.svc.cluster.local:8080($path)"
-  if $body == null {
-    checked { bash -c 'kubectl exec "$1" -c curl -- curl -fsS --max-time 20 "$2" > "$3"' -- $probe $url (response-path) } | ignore
-  } else {
-    $body | save --raw --force (data request-body)
-    checked { bash -c 'kubectl exec -i "$1" -c curl -- curl -fsS --max-time 20 --data-binary @- "$2" < "$3" > "$4"' -- $probe $url (data request-body) (response-path) } | ignore
-  }
+export def request [path: string, body?: any] {
+  guest-request (vm-name) $path $body | save --raw --force (response-path)
 }
 
 export def random [name: string, bytes: int] {
@@ -120,8 +112,7 @@ export def append-data [name: string] {
   checked { bash -c 'printf "\\$(printf %03o $(( $1 % 251 )))" >> "$2"' -- $size $path } | ignore
 }
 export def write-data [name: string] {
-  let s = current; let url = $"http://((vm-name)).default.svc.cluster.local:8080/data"
-  checked { bash -c 'kubectl exec -i "$1" -c curl -- curl -fsS --max-time 20 --data-binary @- "$2" < "$3" > "$4"' -- $s.probe $url (data $"payload-($name)") (response-path) } | ignore
+  request /data (open --raw (data $"payload-($name)"))
 }
 export def read-data [] { request /data }
 
@@ -130,14 +121,12 @@ export def start [] { power Running; ready }
 
 export def capture [name: string] {
   observe
+  observe-storage
   let s = current
   mut snap = {node: ($s.vm.status.nodeName? | default ($s.vm.status.local?.nodeName? | default "")), head: $s.head, pod: $s.pod, vm: $s.vm, response: ""}
   if (response-path | path exists) {
-    let valid = (do { iconv -f UTF-8 -t UTF-8 (response-path) } | complete).exit_code == 0
-    if $valid { $snap = $snap | upsert response (open --raw (response-path)) } else {
-      let target = data $"snapshot-($name).response"; cp (response-path) $target
-      $snap = $snap | upsert responseFile $target
-    }
+    let response = open --raw (response-path)
+    if ($response | describe) == string { $snap = $snap | upsert response $response }
   }
   save-state ($s | upsert snapshots ($s.snapshots | upsert $name $snap))
 }
@@ -161,6 +150,7 @@ export def delete-vm [] {
   checked { kubectl delete virtualmachine $name --wait=true --timeout=180s } | ignore
   save-state ((current) | upsert uid $v.metadata.uid | upsert deleted true)
   observe
+  observe-storage
 }
 
 export def observe [] {
@@ -177,12 +167,15 @@ export def observe [] {
     if ($claim == "") { $claim = $vm.status.local?.claimName? | default "" }
     if $claim != "" { $pvc = kget pvc $claim }
   }
-  mut head = null; mut objects = []
+  save-state ($s | merge {vm: $vm, pod: $pod, pvc: $pvc})
+}
+
+export def observe-storage [] {
+  let s = current
+  mut head = null
   if not ($s.paused? | default false) and (($s.uid? | default "") != "") {
     let uid = $s.uid
     let result = s3-get-optional $"vm/($uid)/head.json"; if $result.found { $head = $result.body | from json }
-    $objects = s3-list $"vm/($uid)/overlay/"
   }
-  let observed = $s | upsert vm $vm | upsert pod $pod | upsert pvc $pvc | upsert head $head | upsert objects $objects | upsert values (values)
-  save-state $observed
+  save-state ($s | upsert head $head)
 }

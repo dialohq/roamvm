@@ -23,10 +23,10 @@ cases:
           observe
           checked { kubectl exec (state).vm.status.podName -c runner -- /bin/sh -c 'cat /sys/fs/cgroup/memory.max' } | save --raw --force (data response)
       - assert: |
-          use ../vm.nu [observe]
+          use ../vm.nu [observe-storage]
           use ../harness.nu [state data]
           use std/assert
-          observe
+          observe-storage
           let s = state
           assert ($s.head.checkpoint? == null)
           assert equal (open --raw (data response) | str trim) $env.MEMORY_MAX
@@ -36,9 +36,7 @@ cases:
           capture running
           save-values {global_ooms: (node (state).snapshots.running.node dmesg | split row global_oom | length | $in - 1)}
       - assert: |
-          use ../vm.nu [observe]
           use ../harness.nu [state data]
-          observe
           (state).values | to json | save --force (data before-ooms.json)
       - run: |
           use ../harness.nu [checked]
@@ -68,9 +66,7 @@ cases:
           start
           read-data
       - assert: |
-          use ../vm.nu [observe]
           use ../harness.nu [data checked]
-          observe
           checked { cmp (data response) (data payload-durable) } | ignore
       - run: |
           use ../vm.nu [stop]

@@ -13,9 +13,9 @@ steps:
       phase Stopped
   - assert: |
       use ../harness.nu [state checked]
-      use ../vm.nu [observe]
+      use ../vm.nu [observe-storage]
       use std/assert
-      observe
+      observe-storage
       assert ((state).head == null)
       assert ((checked { kubectl get pods -l $"vm.roamvm.io/name=((state).vm.metadata.name)" -o name } | str trim | is-empty))
     eventually: true
@@ -64,10 +64,8 @@ steps:
       use ../vm.nu [create]
       create deny.yaml
   - assert: |
-      use ../vm.nu [observe]
       use ../harness.nu [state]
       use std/assert
-      observe
       let s = state
       let result = (kubectl exec $s.probe -c curl -- curl -fsS --max-time 2 $"http://($s.vm.metadata.name):8080/ready" | complete)
       assert ($result.exit_code != 0)

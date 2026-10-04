@@ -1,11 +1,9 @@
 use std/assert
-use ../vm.nu [observe]
+use ../vm.nu [observe-storage]
 
 def response [] { open --raw ($env.SCENARIO_DATA | path join response) }
 
 def main [check: string, expected: string = ""] {
-  observe
-  let s = open $env.SCENARIO_STATE
   match $check {
     config-first => {
       assert equal (response | from json) {setting: first, credential: local-fixture-only}
@@ -18,6 +16,8 @@ def main [check: string, expected: string = ""] {
     response => { assert equal (response) $expected }
     forwarded => { assert equal (response) "ready\n" }
     deleted => {
+      observe-storage
+      let s = open $env.SCENARIO_STATE
       assert equal $s.head.state Stopped
       assert equal ($s.head.owner? | default "") ""
       assert equal $s.head.checkpoint.generation 2

@@ -1,12 +1,12 @@
 use std/assert
-use ../vm.nu [observe]
+use ../vm.nu [observe observe-storage]
 
 def container [pod: record, name: string] {
   $pod.status.containerStatuses | where name == $name | first
 }
 
 def main [check: string, reference: string = "", delta: int = 0] {
-  observe
+  if $check in [retained generation] { observe-storage } else if $check != corruption { observe }
   let s = open $env.SCENARIO_STATE
   match $check {
     runtime => {
