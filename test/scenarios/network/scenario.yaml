@@ -11,29 +11,39 @@ steps:
       phase Pending
       power Stopped
       phase Stopped
-      nu --no-config-file network.nu pending-stop
-  - assert: nu --no-config-file assert.nu pending-stop
+  - assert: |
+      use ../harness.nu [state checked]
+      use ../vm.nu [observe]
+      use std/assert
+      observe
+      assert ((state).head == null)
+      assert ((checked { kubectl get pods -l $"vm.roamvm.io/name=((state).vm.metadata.name)" -o name } | str trim | is-empty))
+    eventually: true
   # Admission and server-side apply bypass create; register their cleanup first.
   - cleanup: kubectl delete virtualmachine scenario-network-unpinned scenario-network-duplicate-label --ignore-not-found --wait=true
-  - run: nu --no-config-file network.nu invalid
-  - assert: nu --no-config-file assert.nu invalid
+  - assert: |
+      use network.nu admission
+      admission
   - run: |
       use ../vm.nu [create]
+      use ../harness.nu [checked]
       create configmap.yaml
       create secret.yaml
       create pvc.yaml
       create prepare.yaml
-      nu --no-config-file network.nu prepare-secondary
+      checked { kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/scenario-network-prepare --timeout=180s } | ignore
+      checked { kubectl delete pod scenario-network-prepare --wait=true } | ignore
   - cleanup: kubectl delete virtualmachine scenario-network --ignore-not-found --wait=true
   - run: |
       use ../vm.nu *
-      use ../harness.nu [checked]
-      checked { nu --no-config-file network.nu apply } | ignore
+      use network.nu apply
+      apply
       select-vm scenario-network
       expose
       ready
-      nu --no-config-file network.nu apply-dry-run
-  - assert: nu --no-config-file assert.nu submissions
+  - assert: |
+      use network.nu apply
+      apply --dry-run
   - run: |
       use ../vm.nu [request]
       request /config
@@ -64,11 +74,12 @@ steps:
     eventually: true
   - run: |
       use ../vm.nu [ready]
-      use ../harness.nu [checked]
-      checked { nu --no-config-file network.nu allow-policy } | ignore
+      use network.nu allow-policy
+      allow-policy
       ready
-      nu --no-config-file network.nu mutate-image
-  - assert: nu --no-config-file assert.nu image-mutation
+  - assert: |
+      use network.nu immutable-image
+      immutable-image
   - run: |
       use ../vm.nu [forward]
       forward
@@ -76,7 +87,7 @@ steps:
   - run: |
       use ../vm.nu [request]
       use ../harness.nu [checked]
-      checked { nu --no-config-file network.nu update-config } | ignore
+      checked { kubectl patch configmap scenario-network --type merge -p '{"data":{"setting":"second"}}' } | ignore
       request /config
   - assert: nu --no-config-file assert.nu config-first
   - run: |
@@ -99,10 +110,11 @@ steps:
   - assert: nu --no-config-file assert.nu deleted
   - run: |
       use ../vm.nu *
-      use ../harness.nu [checked]
-      checked { nu --no-config-file network.nu remember-deleted } | ignore
+      use ../harness.nu [state s3-put]
+      let head = (state).head
       create restored.yaml
-      checked { nu --no-config-file network.nu seed-head } | ignore
+      let uid = (state).vm.metadata.uid
+      s3-put $"vm/($uid)/head.json" ($head | upsert vmID $uid | to json --raw)
       expose
       start
       request /data

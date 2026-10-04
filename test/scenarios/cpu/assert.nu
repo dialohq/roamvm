@@ -7,7 +7,7 @@ def load-ok [load: record] {
   assert ($load.report.iterations | all {|n| $n > 0 })
 }
 
-def main [check: string, name: string = ""] {
+export def main [check: string, name: string = ""] {
   observe
   let s = open $env.SCENARIO_STATE
   match $check {

@@ -1,7 +1,7 @@
 apiVersion: vm.roamvm.io/v1alpha1
 kind: VirtualMachine
 metadata:
-  name: scenario-cpu-two
+  name: ${CPU_VM}
   namespace: default
 spec:
   powerState: Running

@@ -10,31 +10,22 @@ steps:
       use ../vm.nu
       vm cleanup
   - run: |
-      use ../vm.nu *
-      create vm-one.yaml
-      expose
-      create vm-two.yaml
-      expose
-      select-vm scenario-cpu-one
-      ready
-      capture one-running
-      nu --no-config-file observe.nu
-  - assert: nu --no-config-file assert.nu runtime
-  - run: |
-      use ../vm.nu [request]
-      request /data scenario-cpu-one
-  - assert: nu --no-config-file assert.nu response scenario-cpu-one
-  - run: |
-      use ../vm.nu *
-      select-vm scenario-cpu-two
-      ready
-      capture two-running
-      nu --no-config-file observe.nu
-  - assert: nu --no-config-file assert.nu runtime
-  - run: |
-      use ../vm.nu [request]
-      request /data scenario-cpu-two
-  - assert: nu --no-config-file assert.nu response scenario-cpu-two
+      use ../vm.nu [create expose]
+      for name in [scenario-cpu-one scenario-cpu-two] {
+        with-env {CPU_VM: $name} { create vm.yaml; expose }
+      }
+  - assert: |
+      use ../vm.nu [select-vm ready request]
+      use observe.nu
+      use assert.nu
+      for name in [scenario-cpu-one scenario-cpu-two] {
+        select-vm $name
+        ready
+        observe
+        assert runtime
+        request /data $name
+        assert response $name
+      }
   - run: |
       use ../vm.nu [select-vm]
       select-vm scenario-cpu-one

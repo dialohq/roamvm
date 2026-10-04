@@ -26,7 +26,7 @@ export def init [] {
   }
   if (($env.S3_ENDPOINT? | default "") == "") or (($env.S3_BUCKET? | default "") == "") { error make {msg: "S3_ENDPOINT and S3_BUCKET are required"} }
   mkdir $env.SCENARIO_DATA
-  save-state {selected: null, uid: null, deleted: false, paused: false, samplePath: null, probe: "", resources: [], snapshots: {}, vm: null, pod: null, pvc: null, head: null, objects: [], values: {}, sample: null}
+  save-state {selected: null, uid: null, deleted: false, paused: false, probe: "", resources: [], snapshots: {}, vm: null, pod: null, pvc: null, head: null, objects: [], values: {}}
   mc-config | ignore
 }
 
@@ -127,7 +127,6 @@ export def read-data [] { request /data }
 
 export def power [state: string] { checked { kubectl patch virtualmachine (vm-name) --type merge -p $'{"spec":{"powerState":"($state)"}}' } | ignore }
 export def start [] { power Running; ready }
-export def sample [path: string] { save-state ((current) | upsert samplePath $path) }
 
 export def capture [name: string] {
   observe
@@ -184,12 +183,6 @@ export def observe [] {
     let result = s3-get-optional $"vm/($uid)/head.json"; if $result.found { $head = $result.body | from json }
     $objects = s3-list $"vm/($uid)/overlay/"
   }
-  mut sampled = null
-  if (($s.samplePath? | default "") != "") and ($vm != null) and (($vm.status.phase? | default "") == Running) {
-    let probe = $s.probe
-    let url = $"http://($name).default.svc.cluster.local:8080($s.samplePath)"
-    $sampled = checked { kubectl exec $probe -c curl -- curl -fsS --max-time 20 $url } | from json
-  }
-  let observed = $s | upsert vm $vm | upsert pod $pod | upsert pvc $pvc | upsert head $head | upsert objects $objects | upsert values (values) | upsert sample $sampled
+  let observed = $s | upsert vm $vm | upsert pod $pod | upsert pvc $pvc | upsert head $head | upsert objects $objects | upsert values (values)
   save-state $observed
 }

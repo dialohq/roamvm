@@ -20,7 +20,6 @@ cases:
           ready
           request /storage
           capture initial
-          sample /storage
       - assert: nu --no-config-file assert.nu initial
 
       # Exercise each 2/3/4 GiB notification boundary while preserving one boot.

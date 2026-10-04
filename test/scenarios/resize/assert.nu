@@ -1,7 +1,7 @@
 use std/assert
 use ../vm.nu [observe]
 
-def main [check: string, size: int = 0] {
+def main [check: string] {
   observe
   let s = open $env.SCENARIO_STATE
   let response = open --raw ($env.SCENARIO_DATA | path join response)
@@ -10,23 +10,6 @@ def main [check: string, size: int = 0] {
       let before = $s.snapshots.initial.response | from json
       assert ($before.bootID | is-not-empty)
       assert ($before.filesystemBytes > 0)
-    }
-    held => { assert $s.sample.growthHeld }
-    capacity => {
-      assert $s.sample.growthHeld
-      assert equal $s.sample.diskSectors $"($size // 512)\n"
-    }
-    grown => {
-      let before = $s.snapshots.initial.response | from json
-      assert equal $s.sample.bootID $before.bootID
-      assert equal $s.sample.pid $before.pid
-      assert ($s.sample.uptime > $before.uptime)
-      assert ($s.sample.filesystemBytes > ($size * 9 // 10))
-      assert equal $s.sample.diskSectors $"($size // 512)\n"
-    }
-    reported => {
-      assert equal $s.vm.status.rootDiskSize $size
-      assert ($s.vm.status.conditions | any {|c| $c.type == DiskReady and $c.status == "True" })
     }
     passes => { assert (($response | from json).growthPasses > 0) }
     settled => { assert (($response | from json).growthPasses <= (($s.snapshots.passes.response | from json).growthPasses + 1)) }

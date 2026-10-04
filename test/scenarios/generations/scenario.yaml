@@ -25,51 +25,26 @@ cases:
           ready
           request /generation
           capture initial
-      - assert: |
-          use ../vm.nu [observe]
-          use std/assert
-          observe
-          let generation = (open $env.SCENARIO_STATE).snapshots.initial.response | from json
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation initial
+      - assert: nu --no-config-file generation.nu initial
       - run: |
           use ../vm.nu *
           request /data "workspace files survive generation changes"
           request "/rebuild?action=test" ""
           request /generation
-      - assert: |
-          use ../vm.nu [observe]
-          use std/assert
-          observe
-          let generation = open --raw ($env.SCENARIO_DATA | path join response) | from json
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation updated
+      - assert: nu --no-config-file generation.nu updated
       - run: |
           use ../vm.nu *
           stop tested
           start
           request /generation
-      - assert: |
-          use ../vm.nu [observe]
-          use std/assert
-          observe
-          let generation = open --raw ($env.SCENARIO_DATA | path join response) | from json
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation initial
+      - assert: nu --no-config-file generation.nu initial
 
       - run: |
           use ../vm.nu *
           request "/rebuild?action=switch" ""
           request /generation
           capture switched
-      - assert: |
-          use ../vm.nu [observe]
-          use std/assert
-          observe
-          let generation = open --raw ($env.SCENARIO_DATA | path join response) | from json
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation updated
-          assert ($generation.cmdline | str contains generation=initial)
+      - assert: nu --no-config-file generation.nu updated generation=initial
       - run: |
           use ../vm.nu *
           capture before-move
@@ -83,58 +58,39 @@ cases:
       - assert: |
           use ../vm.nu [observe]
           use std/assert
+          use generation.nu
           observe
           let s = open $env.SCENARIO_STATE
-          let generation = open --raw ($env.SCENARIO_DATA | path join response) | from json
+          let generation = generation updated generation=updated
           let switched = $s.snapshots.switched.response | from json
           assert ($s.vm.status.nodeName != $s.snapshots.before-move.node)
           assert equal $s.vm.metadata.uid $s.snapshots.before-move.vm.metadata.uid
           assert equal $s.vm.spec.image $env.GENERATION_IMAGE
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation updated
-          assert ($generation.cmdline | str contains generation=updated)
           assert equal ($generation | get booted-system) ($switched | get current-system)
           assert ($generation.bootID != $switched.bootID)
       - run: |
           use ../vm.nu *
           request /data
       - assert: |
-          use ../vm.nu [observe]
           use std/assert
-          observe
           assert equal (open --raw ($env.SCENARIO_DATA | path join response) | str trim) "workspace files survive generation changes"
 
       - run: |
           use ../vm.nu *
           request "/rebuild?action=rollback" ""
           request /generation
-      - assert: |
-          use ../vm.nu [observe]
-          use std/assert
-          observe
-          let generation = open --raw ($env.SCENARIO_DATA | path join response) | from json
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation initial
+      - assert: nu --no-config-file generation.nu initial
       - run: |
           use ../vm.nu *
           stop rolled-back
           start
           request /generation
-      - assert: |
-          use ../vm.nu [observe]
-          use std/assert
-          observe
-          let generation = open --raw ($env.SCENARIO_DATA | path join response) | from json
-          assert equal $generation.hostname generation-workspace
-          assert equal $generation.generation initial
-          assert ($generation.cmdline | str contains generation=initial)
+      - assert: nu --no-config-file generation.nu initial generation=initial
       - run: |
           use ../vm.nu *
           request /data
       - assert: |
-          use ../vm.nu [observe]
           use std/assert
-          observe
           assert equal (open --raw ($env.SCENARIO_DATA | path join response)) "workspace files survive generation changes"
       - run: |
           use ../vm.nu *
