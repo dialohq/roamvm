@@ -3,15 +3,14 @@
   pkgs,
   modulesPath,
   name,
+  node,
+  layout,
+  roamvm,
   ...
 }: let
-  server = name == "roamvm-libvirt-control-plane";
-  ip =
-    if server
-    then "192.168.124.10"
-    else if name == "roamvm-libvirt-worker"
-    then "192.168.124.11"
-    else "192.168.124.12";
+  server = node.role == "server";
+  ip = node.ip;
+  control = layout.nodes."${layout.cluster}-control-plane".ip;
 in {
   imports = [(modulesPath + "/virtualisation/qemu-vm.nix")];
   system.stateVersion = "26.05";
@@ -25,9 +24,9 @@ in {
         source = "/nix/store";
         target = "/nix/.ro-store";
       };
-      lab = {
-        source = "lab";
-        target = "/lab";
+      lab-state = {
+        source = "lab-state";
+        target = "/lab-state";
       };
     };
   };
@@ -37,7 +36,7 @@ in {
     fsType = lib.mkForce "virtiofs";
     options = lib.mkForce ["ro"];
   };
-  virtualisation.fileSystems."/lab" = {
+  virtualisation.fileSystems."/lab-state" = {
     fsType = lib.mkForce "virtiofs";
     options = lib.mkForce ["ro"];
   };
@@ -50,10 +49,10 @@ in {
     interfaces.eth0.ipv4.addresses = [
       {
         address = ip;
-        prefixLength = 24;
+        prefixLength = layout.network.prefix;
       }
     ];
-    defaultGateway = "192.168.124.1";
+    defaultGateway = layout.network.gateway;
     nameservers = ["1.1.1.1"];
   };
   services.openssh = {
@@ -61,7 +60,7 @@ in {
     settings = {
       PermitRootLogin = "prohibit-password";
       PasswordAuthentication = false;
-      AuthorizedKeysFile = "/lab/.lab/libvirt/id_ed25519.pub";
+      AuthorizedKeysFile = "/lab-state/id_ed25519.pub";
       # This test-only key is owned by the unprivileged host user on the share.
       StrictModes = false;
     };
@@ -71,17 +70,26 @@ in {
   environment.systemPackages = [pkgs.curl pkgs.jq pkgs.k3s (lib.hiPrio pkgs.cri-tools) pkgs.util-linux];
   environment.etc."rancher/k3s/registries.yaml".text = ''
     mirrors:
-      "192.168.124.10:5000":
-        endpoint: ["http://192.168.124.10:5000"]
+      "${control}:5000":
+        endpoint: ["http://${control}:5000"]
   '';
-  # Writable solely so the CPU oversubscription test can change and restore it.
-  systemd.tmpfiles.rules = [
-    "d /var/lib/kubelet 0755 root root -"
-    "C /var/lib/kubelet/config.yaml 0644 root root - ${pkgs.writeText "kubelet-lab.yaml" ''
+  # Reapply at boot, but keep writable so the CPU oversubscription test can
+  # change and restore it without changing the declarative node definition.
+  environment.etc."roamvm/kubelet.yaml" = {
+    mode = "0644";
+    text = ''
       apiVersion: kubelet.config.k8s.io/v1beta1
       kind: KubeletConfiguration
+      # Publish recovered device capacity promptly, without increasing the
+      # API reporting rate when node status is unchanged.
+      nodeStatusUpdateFrequency: 1s
+      nodeStatusReportFrequency: 5m
       allowedUnsafeSysctls: [net.ipv4.ip_forward, net.ipv4.conf.all.route_localnet]
-    ''}"
+    '';
+  };
+  systemd.tmpfiles.rules = [
+    "d /var/lib/kubelet 0755 root root -"
+    "L+ /var/lib/kubelet/config.yaml - - - - /etc/roamvm/kubelet.yaml"
   ];
   services.k3s = {
     enable = true;
@@ -93,10 +101,10 @@ in {
     serverAddr =
       if server
       then ""
-      else "https://192.168.124.10:6443";
+      else "https://${control}:6443";
     extraFlags =
       ["--node-ip=${ip}" "--kubelet-arg=config=/var/lib/kubelet/config.yaml"]
-      ++ lib.optionals server ["--disable=traefik" "--disable=servicelb" "--disable=metrics-server" "--tls-san=192.168.124.10"];
+      ++ lib.optionals server ["--disable=traefik" "--disable=servicelb" "--disable=metrics-server" "--tls-san=${control}"];
   };
   # This small test cluster favors lower resident memory over GC throughput.
   # This is a heap-growth target, not a hard memory cap or memory overcommit.
@@ -105,7 +113,7 @@ in {
     wantedBy = ["multi-user.target"];
     after = ["k3s.service"];
     serviceConfig = {
-      ExecStart = "/lab/bin/roamvm device-plugin";
+      ExecStart = "${roamvm}/bin/roamvm device-plugin";
       Restart = "always";
       RestartSec = 2;
     };

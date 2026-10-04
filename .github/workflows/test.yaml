@@ -5,6 +5,12 @@ on:
 permissions:
   contents: read
 jobs:
+  lab-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop -c make libvirt-check
   unit:
     runs-on: ubuntu-latest
     steps:
@@ -13,8 +19,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: sudo apt-get update && sudo apt-get install -y qemu-utils qemu-system-x86
-      - run: make fmt-check test generate
+      - uses: cachix/install-nix-action@v31
+      - run: nix develop -c make fmt-check test generate
       - run: git diff --exit-code -- api config/crd
       - run: docker compose -f test/lab/compose.yaml config --quiet
       - run: docker build -t roamvm:ci .

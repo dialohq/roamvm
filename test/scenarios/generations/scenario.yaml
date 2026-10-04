@@ -1,0 +1,103 @@
+lab: ../../libvirt/config.nix
+fixtures:
+  ROAMVM_TEST_GENERATION_IMAGE: generation
+  ROAMVM_TEST_FIRMWARE_IMAGE: firmware
+requires: [GENERATION_IMAGE]
+
+cases:
+  - name: migrate
+    env:
+      GENERATION_IMAGE: ${ROAMVM_TEST_GENERATION_IMAGE}
+      GENERATION_BOOT_MODE: ""
+    steps: &generation_steps
+      - cleanup: |
+          use ../vm.nu
+          vm cleanup
+      - cleanup: |
+          use ../harness.nu [checked state]
+          let node = (state).snapshots?.before-move?.node? | default ""
+          if $node != "" { checked { kubectl uncordon $node } | ignore }
+      - run: |
+          use ../vm.nu *
+          init
+          create vm.yaml
+          expose
+          ready
+          request /generation
+          capture initial
+      - assert: nu --no-config-file generation.nu initial
+      - run: |
+          use ../vm.nu *
+          request /data "workspace files survive generation changes"
+          request "/rebuild?action=test" ""
+          request /generation
+      - assert: nu --no-config-file generation.nu updated
+      - run: |
+          use ../vm.nu *
+          stop tested
+          start
+          request /generation
+      - assert: nu --no-config-file generation.nu initial
+
+      - run: |
+          use ../vm.nu *
+          request "/rebuild?action=switch" ""
+          request /generation
+          capture switched
+      - assert: nu --no-config-file generation.nu updated generation=initial
+      - run: |
+          use ../vm.nu *
+          capture before-move
+          stop stopped-before-move
+          let s = open $env.SCENARIO_STATE
+          use ../harness.nu [checked]
+          checked { kubectl patch virtualmachine $s.vm.metadata.name --type merge --patch '{"spec":{"bootMode":"Disk"}}' } | ignore
+          checked { kubectl cordon $s.snapshots.before-move.node } | ignore
+          start
+          request /generation
+      - assert: |
+          use ../vm.nu [observe]
+          use std/assert
+          use generation.nu
+          observe
+          let s = open $env.SCENARIO_STATE
+          let generation = generation updated generation=updated
+          let switched = $s.snapshots.switched.response | from json
+          assert ($s.vm.status.nodeName != $s.snapshots.before-move.node)
+          assert equal $s.vm.metadata.uid $s.snapshots.before-move.vm.metadata.uid
+          assert equal $s.vm.spec.image $env.GENERATION_IMAGE
+          assert equal ($generation | get booted-system) ($switched | get current-system)
+          assert ($generation.bootID != $switched.bootID)
+      - run: |
+          use ../vm.nu *
+          request /data
+      - assert: |
+          use std/assert
+          assert equal (open --raw ($env.SCENARIO_DATA | path join response) | str trim) "workspace files survive generation changes"
+
+      - run: |
+          use ../vm.nu *
+          request "/rebuild?action=rollback" ""
+          request /generation
+      - assert: nu --no-config-file generation.nu initial
+      - run: |
+          use ../vm.nu *
+          stop rolled-back
+          start
+          request /generation
+      - assert: nu --no-config-file generation.nu initial generation=initial
+      - run: |
+          use ../vm.nu *
+          request /data
+      - assert: |
+          use std/assert
+          assert equal (open --raw ($env.SCENARIO_DATA | path join response)) "workspace files survive generation changes"
+      - run: |
+          use ../vm.nu *
+          stop final
+
+  - name: firmware
+    env:
+      GENERATION_IMAGE: ${ROAMVM_TEST_FIRMWARE_IMAGE}
+      GENERATION_BOOT_MODE: Disk
+    steps: *generation_steps

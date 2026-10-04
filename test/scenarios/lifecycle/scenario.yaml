@@ -1,0 +1,180 @@
+lab: ../../libvirt/config.nix
+requires: [ROAMVM_TEST_NODE_FAILURE]
+steps:
+  - cleanup: |
+      use ../vm.nu
+      vm cleanup
+  - run: |
+      use ../vm.nu *
+      init
+  - cleanup: |
+      use ../harness.nu [checked state]
+      let nodes = (state).snapshots | values | get node | uniq
+      for node in $nodes { checked { kubectl uncordon $node } | ignore }
+  - cleanup: |
+      use faults.nu *
+      restore-worker
+  - cleanup: |
+      use faults.nu *
+      resume-store
+  # Registered before any object mutation; a failed assertion still repairs S3.
+  - cleanup: |
+      use faults.nu *
+      repair
+
+  - run: |
+      use ../vm.nu *
+      create vm.yaml
+      expose
+      ready
+  - assert: nu --no-config-file assert.nu runtime
+  - run: |
+      use ../vm.nu *
+      request "/dns?name=kubernetes.default.svc.cluster.local"
+  - assert: |
+      use std/assert
+      assert ((open --raw ($env.SCENARIO_DATA | path join response) | str length) >= 5)
+  - run: |
+      use ../vm.nu *
+      random durable 1048576
+      write-data durable
+  - assert: bash data.sh durable
+  - run: |
+      use ../vm.nu *
+      stop first
+
+  # Force cross-node restoration, not a local-cache restart.
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      let node = (open $env.SCENARIO_STATE).snapshots.first.node
+      use ../harness.nu [checked]
+      checked { kubectl cordon $node } | ignore
+      start
+  - assert: nu --no-config-file assert.nu away first
+  - run: |
+      use ../vm.nu *
+      read-data
+  - assert: bash data.sh durable
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      use ../harness.nu [checked]
+      checked { kubectl uncordon (open $env.SCENARIO_STATE).snapshots.first.node } | ignore
+
+  # Confirm newer local bytes exist, then fence and lose that worker.
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      capture fenced
+      text-data uncommitted "uncommitted changes may be discarded"
+      write-data uncommitted
+  - assert: bash data.sh uncommitted
+  - run: |
+      use ../vm.nu *
+      read-data
+  - assert: bash data.sh uncommitted
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      let node = (open $env.SCENARIO_STATE).snapshots.fenced.node
+      use ../harness.nu [checked]
+      checked { kubectl cordon $node } | ignore
+      stop-worker $node
+  - assert: nu --no-config-file assert.nu retained fenced
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      recover fenced
+      power Running
+      start-worker (open $env.SCENARIO_STATE).snapshots.fenced.node
+      ready
+  - assert: nu --no-config-file assert.nu away fenced
+  - run: |
+      use ../vm.nu *
+      read-data
+  - assert: bash data.sh durable
+
+  # The worker boots in parallel while the survivor exercises sidecar failure.
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      capture before-sidecar
+      kill-container runtime
+  - assert: nu --no-config-file assert.nu sidecar before-sidecar
+    eventually: true
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      runtime-ready
+      ready
+      read-data
+  - assert: bash data.sh durable
+  - assert: nu --no-config-file assert.nu runner
+
+  # S3 outage: stop locally, then resume and commit exactly once.
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      append-data durable
+      write-data durable
+  - assert: bash data.sh durable
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      store true
+      power Stopped
+      phase Stopped
+      sleep 3sec
+  - assert: nu --no-config-file assert.nu local
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      store false
+      stop retry
+  - assert: nu --no-config-file assert.nu generation first 1
+  - run: |
+      use ../vm.nu *
+      start
+      read-data
+  - assert: bash data.sh durable
+
+  # Crash checkpoint, corrupt remote bytes, reject before hypervisor startup.
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      capture before-crash
+      append-data durable
+      write-data durable
+  - assert: bash data.sh durable
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      kill-hypervisor
+      stop crashed
+  - assert: nu --no-config-file assert.nu generation before-crash 1
+  - assert: nu --no-config-file assert.nu generation first 2
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      use ../harness.nu [checked]
+      checked { kubectl cordon (open $env.SCENARIO_STATE).snapshots.crashed.node } | ignore
+      corrupt crashed
+      wait-worker (open $env.SCENARIO_STATE).snapshots.fenced.node
+      checked { kubectl uncordon (open $env.SCENARIO_STATE).snapshots.fenced.node } | ignore
+      power Running
+      phase RecoveryRequired
+      save-logs
+  - assert: nu --no-config-file assert.nu corruption
+  - run: |
+      use ../vm.nu *
+      use faults.nu *
+      capture damaged
+      repair
+      recover damaged
+      start
+      read-data
+  - assert: bash data.sh durable
+  - run: |
+      use ../vm.nu *
+      stop final

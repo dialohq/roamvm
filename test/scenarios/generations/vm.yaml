@@ -1,0 +1,12 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-generation
+  namespace: default
+spec:
+  powerState: Running
+  image: ${GENERATION_IMAGE}
+  bootMode: ${GENERATION_BOOT_MODE}
+  hostname: generation-workspace
+  memory: 1Gi
+  readinessPort: 8080

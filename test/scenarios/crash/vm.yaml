@@ -1,0 +1,6 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-crash
+spec:
+  powerState: Running

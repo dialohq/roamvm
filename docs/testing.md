@@ -1,8 +1,8 @@
 # Local validation
 
-The lab uses Docker Compose for the registry and S3 fixture, kind for a three-node
-Kubernetes cluster, Kustomize for installation, Nix for the guest image, and Go's
-standard test and benchmark runners. It requires a Linux x86-64 host with real
+The E2E lab uses libvirt, NixOS and Terranix, with YAML scenarios executed by
+Nushell. The older kind/Compose lab remains available for runtime experiments
+and the Go startup benchmark. Both require a Linux x86-64 host with real
 `/dev/kvm`; VM execution is never mocked.
 
 VM Pods use read-only image volumes and retained VM-owned PVCs from kind's
@@ -13,11 +13,17 @@ it does not implement a provisioner or test runner.
 
 ## Run native NixOS nodes under libvirt
 
-`test/libvirt/node.nix` declares three NixOS machines: a K3s control plane with
-registry/MinIO, and two workers running the device plugin as a systemd service.
-`lab.sh` defines their libvirt domains, disks and isolated bridge; Kubernetes runs
-directly on NixOS, not inside kind or Docker. The runtime image is also built with
-Nix and imported into containerd. Dependencies are pinned by `flake.lock`.
+`test/libvirt/config.nix` is one lab definition, parameterized by an instance slot:
+a K3s control plane with registry/MinIO and two workers.
+Nix builds the node systems and runtime; Terranix generates the Terraform JSON.
+The runtime image uses Nixpkgs' headless `qemu_test` build, retaining KVM, virtio,
+QCOW2 and firmware boot without loading GUI/audio libraries for every guest.
+OpenTofu (the Terraform-compatible CLI pinned in the dev shell) owns domain
+definitions and a NAT network through `dmacvicar/libvirt` 0.9.9. The harness owns
+working disk contents, snapshot capture/restore and Nushell scenario execution.
+It never undefines or recreates domains during reset. Dependencies are pinned by
+`flake.lock` and `test/libvirt/terraform.lock.hcl`. No handwritten domain XML or
+host TAP/iptables setup is needed. Kubernetes runs directly on NixOS.
 DNS, storage provisioning and the RoamVM controller stay on the control
 plane so deliberately powering off a worker does not remove cluster services.
 The lab omits metrics-server (the scenarios read CPU cgroup counters directly)
@@ -28,12 +34,35 @@ limit, above the 512 MiB guest's reservation but below node capacity, and checks
 that recovery did not rely on a node-wide OOM kill.
 
 Use a Linux x86-64 host with nested KVM, Nix, sudo, at least 16 GiB RAM and ample
-disk space (64 GiB recommended for all fixtures). Each of the three domains has
-2 GiB RAM and four vCPUs, totaling 6 GiB assigned RAM (previously 8 GiB).
+disk space (64 GiB recommended for all fixtures). Each domain has 2 GiB RAM,
+totaling 6 GiB, and four vCPUs. The CPU test pins a worker to two host CPUs and
+runs two four-vCPU guests, including explicit quota and checkpoint checks.
+Expose vCPUs as cores in one socket, not separate sockets. On AMD hosts without
+an exposed invariant TSC, multiple sockets make Linux mark TSC unsynchronized.
+This does not guarantee stable clocks across nested save/restore; do not force
+`tsc=reliable` to suppress a watchdog failure.
 They use sparse 16 GiB root disks and share the host Nix store read-only via
 virtiofs. Do not put all three disks in tmpfs: image unpacking competes with guest
-RAM. Session libvirt needs working `newuidmap`/`newgidmap` helpers and subordinate
-UID/GID ranges. The Nix wrapper includes NixOS's `/run/wrappers/bin` on their PATH.
+RAM. Provisioning requires an accessible system libvirt connection, including
+its network driver, and a QEMU user that can access the lab directory. On a
+dedicated NixOS host import `(import ./test/libvirt/host.nix {labUser = "coder";})`
+into the host configuration, substituting your user. This enables libvirt and
+runs QEMU as that unprivileged user without changing disk ownership. Host changes
+are an administrator step, not a hidden side effect of `make libvirt-up`.
+Virtiofs also needs working user-namespace helpers/subordinate UID/GID ranges.
+
+The domains use 2 MiB huge pages for their shared RAM. Ordinary shared `memfd`
+RAM can remain backed by 4 KiB pages even when anonymous transparent huge pages
+are enabled, substantially slowing nested KVM. The host module reserves 3,072
+huge pages (6 GiB) at boot; set its `labInstances` argument to the number of
+concurrent labs. This pool is unavailable to ordinary host allocations even
+while labs are stopped. Guest memory limits stay unchanged; snapshots remain
+persistent on disk.
+On other Linux hosts, reserve the same pool as an administrator before starting
+the lab, for example `sudo sysctl -w vm.nr_hugepages=3072` for one instance.
+Check `HugePages_Total` in `/proc/meminfo`: runtime allocation can fall short on
+a fragmented host. Boot parameters `hugepagesz=2M hugepages=3072` reserve it early.
+Budget additional pages for any other huge-page users; never shrink their pool.
 
 Leave several GiB free beyond the frozen baseline for migration and generation
 tests, which hold images on both workers. A full host filesystem makes libvirt
@@ -45,14 +74,13 @@ make libvirt-up libvirt-install
 source test/libvirt/env
 make test
 make libvirt-fixtures
-export ROAMVM_TEST_RESIZE_IMAGE=$(cat .lab/libvirt/nixos-ref)
-export ROAMVM_TEST_GENERATION_IMAGE=$(cat .lab/libvirt/generation-ref)
-export ROAMVM_TEST_FIRMWARE_IMAGE=$(cat .lab/libvirt/firmware-ref)
-ROAMVM_TEST_NETWORK_POLICY=1 make integration
+make libvirt-freeze-warm
+make integration
 ```
 
-Omit `libvirt-fixtures` and those three exports for a smaller run; resize and
-generation tests will explicitly skip. The full run needs all three fixtures.
+For a smaller run, omit `libvirt-fixtures` and run
+`make test-scenario SCENARIO=lifecycle` instead of the full suite. Resize and
+generation scenarios require those additional fixtures; missing fixtures fail.
 
 The environment enables the destructive **disposable worker** failure test.
 The CPU test pins the worker's vCPU threads and restores their original affinity.
@@ -60,17 +88,58 @@ Lab configuration lives in `test/libvirt`; generated XML, disks, unique SSH keys
 kubeconfig and fixture references live in `.lab/libvirt`. Inspect a node with
 `bash test/libvirt/lab.sh ssh roamvm-libvirt-worker systemctl --failed`.
 
-`make libvirt-down` powers off and undefines only these lab domains and removes
-their TAPs/bridge/firewall rules; it retains disks and keys. `make libvirt-up`
-reuses them. Run `make libvirt-install` after each startup to reapply the pinned
-Kubernetes settings. For NixOS configuration changes, take the lab down and up again;
-for runtime changes, run `make build libvirt-install`. Do not run two suites
-against the same lab concurrently.
+The setup has three owners: NixOS declares node services; Terranix declares
+libvirt hardware/networking; Nix-generated Kubernetes manifests declare runtime
+resources, warm volumes and add-on image/placement overrides. `install.sh` waits
+for K3s's bundled add-ons before applying those overrides, taking ownership only
+of the declared fields. Shell handles image import, readiness, freeze/restore and
+running scenarios; YAML owns sequences, scripts own actions and assertions, and Nushell
+only executes scripts, deadlines, retries and cleanup. Every scenario starts
+from the frozen baseline, not the previous scenario's running cluster.
+
+`make libvirt-plan` builds the declaration and shows the Terraform plan (exit 2
+means changes). `make libvirt-up` applies it and boots the nodes. `make
+libvirt-down` only powers them off; `make libvirt-destroy` removes Terraform-owned
+domains and networking, retaining disks and baselines. Keep the Terraform state
+under the instance directory until destruction completes. Do not delete state to
+work around a failed apply. `up` refuses to take over untracked domain/network names.
+
+All mutating entry points take the same per-instance lock. Terraform intentionally
+does not manage running/stopped state, so test power cycles and snapshot restores
+do not need an apply. Run `make libvirt-down` before applying infrastructure
+changes: replacing a network does not reconnect already-running guest TAPs.
+Definition changes invalidate existing baselines; prepare new baselines after
+applying infrastructure or node-system changes. Runtime
+changes are node-system changes too: the device plugin runs an immutable Nix
+binary, not a shared mutable `bin/roamvm` from the checkout.
+
+### Run multiple instances of the same lab
+
+`ROAMVM_LAB_SLOT` selects an instance (0 by default, 0–99 supported). Slot 0 uses
+`.lab/libvirt`; other slots use `.lab/libvirt-N`. Domain names, subnets, bridges,
+MACs, Terraform state, SSH keys, snapshots, kubeconfig and locks are slot-specific.
+All instances share one libvirt daemon; libvirt allocates their VM sockets.
+Select a free slot across all checkouts on the host. The fixed three-node topology
+and test code are reused; there are no per-scenario lab definitions.
+
+```sh
+# Prepare once per instance (repeat for slot 2).
+ROAMVM_LAB_SLOT=1 make libvirt-up libvirt-install libvirt-fixtures libvirt-freeze-warm
+# Independent workers may run concurrently; each restores its own baseline.
+ROAMVM_LAB_SLOT=1 make libvirt-scenario SCENARIO=lifecycle &
+ROAMVM_LAB_SLOT=2 make libvirt-scenario SCENARIO=network &
+wait
+```
+
+Sequential scenarios reuse an instance; destructive scenarios must not share a
+running cluster concurrently. Budget 6 GiB assigned node RAM per instance, plus
+host overhead, persistent snapshots and disk headroom. Prepared bundles retain
+their slot identity and can be moved to another host using that same slot.
 
 This is a trusted local test fixture, not a production cluster. It uses public
 test credentials, password-disabled root SSH with a generated key, and the
-private subnet `192.168.124.0/24`. Reserve that subnet and the `rvm-lab` bridge
-for this lab. The VMs can read this checkout and the host Nix store. Do not expose
+private subnet `192.168.(124 + slot).0/24`. Reserve that subnet and the `rvm-labN`
+bridge for the instance. VMs can read their lab directory and the host Nix store. Do not expose
 its unauthenticated registry or test MinIO outside the isolated bridge.
 
 ### Run isolated scenarios from a frozen baseline
@@ -90,17 +159,127 @@ make libvirt-scenarios
 
 Scenarios are `crash`, `lifecycle`, `network`, `cpu`, `resize`, and `generations`.
 The last two require `make libvirt-fixtures` **before freezing**; missing fixtures
-cause an error rather than a silently skipped test. These run the existing Go
-E2E tests, including real node failure and NetworkPolicy enforcement.
+cause an error rather than a silently skipped test. Nushell executes the
+directory-based scenarios, including real node failure and
+NetworkPolicy enforcement.
+
+`nix develop` puts `te2e` on PATH. It works from any directory inside the
+checkout and uses the live checkout's harness, so edits need no CLI rebuild:
+
+```sh
+nix develop
+te2e list
+te2e run lifecycle
+te2e run all
+te2e --slot 2 run network
+te2e --help
+```
+
+Lab commands are explicit: `te2e lab up`, `lab install`, `lab fixtures`,
+and `lab freeze-warm` prepare a new lab; `lab reset` restores it. `lab plan`,
+`lab check`, `lab down`, and `lab destroy` expose the existing lab operations.
+`--slot` overrides `ROAMVM_LAB_SLOT`; without either, slot 0 is used. Run tests
+only after preparing a baseline. The CLI does not silently provision or rebuild
+the lab. Existing Make targets remain supported.
+
+Both commands use the existing slot lock and frozen reset. Each directory under
+`test/scenarios` owns its `scenario.yaml`, manifests and assertion scripts.
+Each YAML references its lab definition relative to the scenario directory and
+declares any additional image fixtures:
+
+```yaml
+lab: ../../libvirt/config.nix
+fixtures:
+  ROAMVM_TEST_RESIZE_IMAGE: nixos
+cases:
+  # Test sequences and assertions follow.
+```
+
+The libvirt runner validates that reference against its shared lab before reset;
+missing or different definitions fail. Provisioning remains explicit through
+`make libvirt-up` and baseline capture. The suite discovers scenario directories
+directly, so adding a scenario does not require editing the lab definition.
+`test-scenario` aliases `libvirt-scenario`; `integration` aliases
+`libvirt-scenarios`. The runner in `test/runner.nu` knows
+nothing about Kubernetes, S3, libvirt or VMs. The old Go scenario sequences are removed;
+only the startup benchmark and its supporting code remain Go. `make test` exercises
+the harness with `test/runner-test.nu`, including failures, timeouts, retries,
+reverse-order cleanup and case isolation, without launching a lab.
+
+Each step is `run`, `assert`, or `cleanup`, with a script as its value.
+All expectations are Bash or Nushell scripts: exit zero
+passes, any other exit fails and reports stdout/stderr. `assert` takes a string:
+a `.sh`/`.nu` file, an executable, or inline Nushell. No shell selector or custom
+YAML tags:
+
+```yaml
+- run: kubectl cordon roamvm-libvirt-worker
+- assert: check.sh
+- assert: executable
+- assert: check.nu
+- assert: |
+    use std/assert
+    let state = open $env.SCENARIO_STATE
+    assert equal $state.head.state "Stopped"
+```
+
+Inline code always runs in Nushell. A bare file is resolved relative to the
+scenario; bare executables can also come from PATH. To pass arguments, write an
+ordinary Nushell command such as `assert: bash data.sh durable`. A boolean value
+alone is not an assertion: use `assert` from `std/assert` or `exit 1` to fail.
+Scripts run with the scenario directory as their working directory.
+The runner supplies a per-case scratch directory (`SCENARIO_DATA`), an initially
+empty JSON object (`SCENARIO_STATE`), and the checkout path (`SCENARIO_ROOT`).
+It never interprets or refreshes that state. The ordinary test module `vm.nu`
+provides `observe`, which writes JSON containing `vm`,
+`pod`, `pvc`, `head`, `objects`, the HTTP `probe`, fixture `values`, and named
+`snapshots` (VM, Pod, node, head and text response; binary responses use
+`responseFile` to preserve bytes without duplicating them in JSON). `SCENARIO_DATA` contains
+`response`, `logs`, and `payload-NAME` files. While the object store is paused,
+S3 observations are unavailable. Add `eventually: true` beside `assert` to retry
+the script for up to 180 seconds; the script must refresh its own observations.
+`timeout: 30s` changes that deadline; all script steps support a timeout.
+The test module's `sample /storage` opts into guest JSON observations while Running.
+Otherwise an assertion runs once. Scripts are
+trusted test code, not sandboxed. User shell startup configuration is disabled.
+
+Node reboot can start before other steps and be awaited
+later. Scenarios register cleanup before injecting faults. Failures stop the sequence
+and retain its workload; step names/timings and assertions go to standard output.
+Unknown fields, multiple operations per step and missing script bodies are rejected.
+There is no YAML expression language or VM operation vocabulary. `vm.nu` is
+test-owned Nushell code, not part of the runner. Its `create` function fills VM
+defaults, expands `${ENV}` in manifests and registers resource cleanup; `stop`
+waits for durability and runs `stopped.nu`. Kubernetes operations such as cordon
+and patch are ordinary `kubectl` commands. Multi-command Nu blocks use
+`checked { external-command }` so an early nonzero exit cannot be masked by a
+later successful command.
+Top-level `cases` give independently cleaned-up runs with per-case `env` values;
+ordinary YAML anchors share identical sequences, as in crash and generations.
+Scenario-specific setup, fault injection, measurements and assertions all live
+in their scenario directories, not Go helpers. `run` uses the same script syntax
+as `assert`; `cleanup` registers a script to run at case teardown in reverse order,
+including on failure. A failed cleanup does not prevent later cleanup scripts.
+`SCENARIO_FAILED=1` allows resource cleanup to retain failed workloads for debugging;
+fault-recovery cleanup runs regardless. Shared test modules provide transports,
+polling and scratch-state helpers; changing them never requires extending the runner.
 
 **Warm snapshots save RAM as well as disks.** `libvirt-freeze-warm` verifies the
-running NixOS configurations, builds/installs current RoamVM, restarts the device
+running NixOS configurations against the current declaration, installs RoamVM, restarts the device
 plugins, and pulls/unpacks the small guest shared by most scenarios on both
-workers before checking service readiness. Its image transfer is paid at capture,
-rather than on the first VM start after every reset. The large optional NixOS
+workers before checking service readiness. It also caches the curl probe on the
+control plane and the provisioner's configured PVC helper image on both workers.
+Image transfer and unpacking are paid at capture, rather than repeated after
+every reset; a registry mirror alone would not eliminate unpacking. Large optional NixOS
 fixtures stay in the registry until their scenarios pull them: preloading all of
 them added roughly 6 GiB of worker image caches to the baseline. PVC creation and
 guest boot still happen normally inside each scenario.
+The declaration also supplies eight empty, node-affine local-path volumes per
+worker. These avoid launching a provisioning Pod for each new VM. Consumed
+volumes use the provisioner's normal deletion path and are never rebound with
+old guest data; exhaustion falls back to dynamic provisioning. Reset restores
+the empty capacity along with the cluster. This caches test storage preparation,
+not guest boot, checkpoint upload, restore, or PVC binding.
 Before capture it creates a stopped probe VM, waits for reconciliation, and
 deletes it; a process health check alone does not prove the controller has
 acquired leadership. It pauses all nodes before
@@ -144,8 +323,9 @@ changes, restore the cold baseline first, take the lab down, remove only
 `.lab/libvirt/warm`, then run `make libvirt-up libvirt-install libvirt-fixtures
 libvirt-freeze-warm` (omit `libvirt-fixtures` when not using optional fixtures).
 Never remove a baseline while working disks still reference it. Without a cold
-baseline, recreate the disposable lab instead. Existing 9p lab domains must be recreated
-with `make libvirt-down libvirt-up` before capturing RAM.
+baseline, recreate the disposable lab instead. Old session-libvirt/XML-managed
+labs are not adopted automatically: stop/remove those domains with the old
+harness before provisioning this version. Their old RAM snapshots cannot be reused.
 
 Cold startup waits for all three named nodes to exist and become Ready, and
 installation waits for the storage/DNS deployments to be created. Waiting for
@@ -158,10 +338,10 @@ copy-on-write overlays avoid another full disk copy. Filesystems may replay thei
 journals on boot. Each reset restores all three disks together, including the
 Kubernetes database, object store, registry, kubelet settings and local PVCs.
 Captured domain definitions and NixOS store roots keep the node systems fixed.
-With a cold baseline, each scenario builds/installs the **current RoamVM** before
-testing it against that infrastructure baseline.
+Cold resets reinstall the runtime. A baseline's node-system definitions must
+still match the Terraform-owned domains; reset never rolls infrastructure back.
 
-Freeze after `make build libvirt-install` and fixture publication have completed,
+Freeze after `make libvirt-up libvirt-install` and fixture publication have completed,
 so the baseline already contains unpacked runtime images and the pinned K3s
 configuration. Installation caches the image manifest digest by immutable Nix
 archive path under `.lab/libvirt/runtime-digests`, outside the resettable disks.
@@ -210,7 +390,11 @@ steps. They measure lab reset, not startup of a guest VM inside the lab.
 **Reset discards all changes in the working lab**, including failed-test VMs.
 A scenario leaves its working disks available for debugging until the next
 reset; logs, revision, tracked diff and exit status remain under
-`.lab/libvirt/runs`. The scenario loop stops on failure. Baseline/scenario
+`.lab/libvirt/runs`. Each run records JSON Lines in `events.json`: step scripts,
+results with exit codes and elapsed milliseconds, cleanup results, and named
+case outcomes. The harness requires every declared case to pass exactly once;
+exit zero without those outcomes is not a successful scenario.
+The scenario loop stops on failure. Baseline/scenario
 operations are locked against each other; do not run manual lab commands or
 other tests concurrently.
 
@@ -321,28 +505,29 @@ checkout with the same `flake.lock`, enter `nix develop`, then:
 
 ```sh
 make libvirt-import BUNDLE=/path/to/prepared-lab
-make libvirt-reset-cold          # Boot and install the current checkout's runtime
+make libvirt-up libvirt-install  # Terraform creates new identities and boots the disks
 make libvirt-freeze-warm         # Capture a host-local RAM baseline once
 make libvirt-scenario SCENARIO=network
 ```
 
 Import checks SHA-256 hashes, disk structure, absence of external backing files
-and the Nix pin before creating the lab. It refuses an existing `.lab/libvirt`
+and the Nix pin before creating the lab. Use the producer's `ROAMVM_LAB_SLOT`.
+It refuses an existing instance directory
 or any lab domain already defined on that host. It imports/roots the bundled OS
-closures and generates new domain definitions for the destination checkout and
-host tools. The first boot generates a new client SSH key and reads kubeconfig
+closures; the first Terraform apply generates domain definitions for the new
+host and checks that the declared node systems match the bundled systems.
+The first boot generates a new client SSH key and reads kubeconfig
 from the cluster. No source-host paths, client keys or RAM files are required.
 The source revision and tracked diff are included for provenance; cold setup
-rebuilds and installs the receiving checkout's runtime rather than testing stale
-source. Normal Go/Nix dependency caches are still needed to avoid rebuilds and
+requires matching node systems rather than silently testing stale source.
+Normal Go/Nix dependency caches are still needed to avoid rebuilds and
 downloads; the bundle is not a fully offline development environment.
 
 Only accept bundles from trusted producers. They contain executable VM disks,
 cluster certificates, host SSH keys and private cluster state. Checksums detect
 corruption, not malicious producers; the local Nix cache is unsigned, so import
 uses `--no-check-sigs` while Nix still checks content hashes. Do not publish these
-bundles publicly or run copies on a shared bridged network. Each host still
-reserves the lab subnet, domain names and TAPs for one lab at a time.
+bundles publicly. Each concurrent instance reserves its own subnet and domain names.
 
 The first cold boot/install and local RAM capture are preparation costs, **not
 the approximately two-second reset**. Subsequent local scenarios use the same
@@ -385,38 +570,34 @@ with known vulnerabilities; the Nix allowance is confined to the development
 flake. Do not expose it or deploy it as your object store. Production Garage and
 Kubernetes metadata remain supported independently of this fixture.
 
-The default suite includes lifecycle/failure, Kubernetes integration, and CPU
-oversubscription tests. `test/lab/env` selects an idle worker for the CPU test.
+The default libvirt suite includes all six scenario directories. `te2e run NAME`
+resets the frozen lab and runs a scenario. For direct execution without reset,
+source `test/libvirt/env`, set that scenario's required image variables and run
+`nu --no-config-file test/runner.nu test/scenarios/NAME/scenario.yaml`.
 The QEMU unit tests also boot a paused TCG machine to exercise real QMP commands.
-Optional cases are explicit:
 
 ```sh
 # Partitioned NixOS root: grow online, preserve processes, stop and move.
-make lab-nixos-guest
-ROAMVM_TEST_RESIZE_IMAGE="$(cat .lab/nixos-guest-ref)" go test -tags=integration -race -run TestOnlineResize -v ./test/integration
+te2e run resize
 
 # GRUB generation selection, existing-image migration, and persistent rollback.
-make lab-generation-guest
-ROAMVM_TEST_GENERATION_IMAGE="$(cat .lab/generation-guest-ref)" \
-ROAMVM_TEST_FIRMWARE_IMAGE="$(cat .lab/firmware-guest-ref)" \
-  go test -tags=integration -race -run TestNixOSGenerations -v ./test/integration
+te2e run generations
 
-# Kills a kind worker container, proves fencing, and restores it afterward.
-ROAMVM_TEST_NODE_FAILURE=1 make integration
+# Kills a disposable libvirt worker, proves fencing, and restores it afterward.
+te2e run lifecycle
 
 # Root, KVM, util-linux and e2fsprogs; uses only a disposable loopback filesystem.
 # Extract the archive produced by make lab-guest, then point at its disk directory.
 ROAMVM_TEST_DISK_FULL_BASE=/absolute/path/to/disk \
   go test -tags=integration -run TestDiskFullRecovery -v ./internal/runner
 
-# On the separate kind-roamvm-cilium lab with an enforcing CNI:
-ROAMVM_TEST_NETWORK_POLICY=1 go test -tags=integration -run TestKubernetes -v ./test/integration
+te2e run network
 
 # An existing stopped SSH-enabled VM; the test leaves it stopped.
-ROAMVM_TEST_EXISTING_VM=my-vm go test -tags=integration -run TestExistingVM -v ./test/integration
+ROAMVM_TEST_EXISTING_VM=my-vm nu --no-config-file test/existing-vm.nu
 
-# Standard machine-readable test output, usable by Go test reporters.
-go test -json -tags=integration -count=1 -timeout=30m ./test/integration > test-results.json
+# Direct execution emits JSON Lines, without resetting the lab.
+nu --no-config-file test/runner.nu test/scenarios/crash/scenario.yaml > test-results.json
 
 # Actual guest response, including scheduling and storage provisioning.
 make benchmark
@@ -427,7 +608,7 @@ ROAMVM_TEST_COLD_CACHE=1 make benchmark
 
 Tests refuse unrelated contexts. Node failure and CPU tests also reject workers
 with other VMs. CPU limits/kubelet configuration and fault injections are restored
-with `t.Cleanup`; successful fixtures are removed, and failed fixtures are retained
+with cleanup scripts; successful fixtures are removed, and failed fixtures are retained
 for debugging. Stop or delete failed VM fixtures before repeating CPU tests.
 Checkpoints remain in the test bucket after VM deletion, as in the runtime's
 normal retention model. Tests run sequentially; do not run multiple suites against
@@ -440,10 +621,10 @@ go test -race -count=1 ./internal/state -run TestS3
 TEST_KUBERNETES_NAMESPACE=roamvm-system go test -race -count=1 ./internal/state
 ```
 
-For a Garage lab, provide its fixture credentials and set
+The YAML scenarios target the declared libvirt/MinIO lab and read S3 state with
+`mc`. The Go startup benchmark also supports a Garage lab with
 `STATE_BACKEND=kubernetes STATE_NAMESPACE=roamvm-system`, matching the runtime's
-object-store Secret. Go tests use the Kubernetes and S3 clients directly instead
-of shelling out to a separate state-inspection program.
+object-store Secret.
 
 `make fmt` / `make fmt-check` use gofumpt. Format Nix with
 `alejandra flake.nix nix test/guest/default.nix`. CI runs unit/race/disk tests,

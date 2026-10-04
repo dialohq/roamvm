@@ -1,0 +1,81 @@
+lab: ../../libvirt/config.nix
+steps:
+  # Restore CPU configuration after workload cleanup, even on failure.
+  - cleanup: nu --no-config-file cleanup.nu
+  - run: |
+      use ../vm.nu [init]
+      init
+      nu --no-config-file setup.nu
+  - cleanup: |
+      use ../vm.nu
+      vm cleanup
+  - run: |
+      use ../vm.nu [create expose]
+      for name in [scenario-cpu-one scenario-cpu-two] {
+        with-env {CPU_VM: $name} { create vm.yaml; expose }
+      }
+  - assert: |
+      use ../vm.nu [select-vm ready request]
+      use observe.nu
+      use assert.nu
+      for name in [scenario-cpu-one scenario-cpu-two] {
+        select-vm $name
+        ready
+        observe
+        assert runtime
+        request /data $name
+        assert response $name
+      }
+  - run: |
+      use ../vm.nu [select-vm]
+      select-vm scenario-cpu-one
+      nu --no-config-file load.nu burst
+  - assert: nu --no-config-file assert.nu burst
+  - run: nu --no-config-file load.nu parallel
+  - assert: nu --no-config-file assert.nu contention
+  - run: |
+      use ../vm.nu *
+      create pending.yaml
+      phase Pending
+  - assert: nu --no-config-file assert.nu unschedulable
+    eventually: true
+  - run: |
+      use ../vm.nu *
+      power Stopped
+      phase Stopped
+      # Submit both stops before waiting for either checkpoint.
+      select-vm scenario-cpu-one
+      power Stopped
+      select-vm scenario-cpu-two
+      power Stopped
+      select-vm scenario-cpu-one
+      stop one-stopped
+  - assert: nu --no-config-file assert.nu checkpoint
+  - run: |
+      use ../vm.nu *
+      select-vm scenario-cpu-two
+      stop two-stopped
+  - assert: nu --no-config-file assert.nu checkpoint
+  - run: |
+      use ../vm.nu *
+      use ../harness.nu [checked]
+      select-vm scenario-cpu-one
+      checked { kubectl patch virtualmachine scenario-cpu-one --type merge -p '{"spec":{"resources":{"requests":{"cpu":"125m"},"limits":{"cpu":"250m"}}}}' } | ignore
+      start
+      checked { nu --no-config-file observe.nu } | ignore
+      nu --no-config-file load.nu burst
+  - assert: nu --no-config-file assert.nu capped
+  - run: |
+      use ../vm.nu [request]
+      request /data
+  - assert: nu --no-config-file assert.nu response scenario-cpu-one
+  - run: |
+      use ../vm.nu *
+      stop one-final
+      select-vm scenario-cpu-two
+      start
+      request /data
+  - assert: nu --no-config-file assert.nu response scenario-cpu-two
+  - run: |
+      use ../vm.nu [stop]
+      stop two-final

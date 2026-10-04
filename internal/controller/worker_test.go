@@ -43,6 +43,38 @@ func localStopFixture(t *testing.T) (*Reconciler, *api.VirtualMachine, *core.Pod
 	return r, vm, pod
 }
 
+func TestLocalCheckpointStartsAfterRunnerExitWithoutWaitingForSidecar(t *testing.T) {
+	r, vm := setup(t)
+	require.NoError(t, r.createPod(t.Context(), vm))
+	pod := &core.Pod{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, pod))
+	pod.UID = "stopped-owner"
+	pod.Spec.NodeName = "node-a"
+	pod.Annotations[Phase] = "Stopped"
+	pod.Annotations[LocalStopAnnotation] = string(pod.UID)
+	require.NoError(t, r.Update(t.Context(), pod))
+	pod.Status.Phase = core.PodRunning
+	pod.Status.ContainerStatuses = []core.ContainerStatus{
+		{Name: "runner", State: core.ContainerState{Running: &core.ContainerStateRunning{}}},
+		{Name: "runtime", State: core.ContainerState{Running: &core.ContainerStateRunning{}}},
+	}
+	require.NoError(t, r.Status().Update(t.Context(), pod))
+	vm.Spec.PowerState = "Stopped"
+	require.NoError(t, r.Update(t.Context(), vm))
+	reconcileVM(t, r, vm, 2)
+	workerKey := client.ObjectKey{Namespace: vm.Namespace, Name: workerName(vm, string(pod.UID))}
+	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), workerKey, &core.Pod{})), "stopped annotation alone does not prove the runner released its lock")
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+	require.Contains(t, pod.Finalizers, Finalizer)
+	pod.Status.ContainerStatuses[0].State = core.ContainerState{Terminated: &core.ContainerStateTerminated{ExitCode: 0}}
+	require.NoError(t, r.Status().Update(t.Context(), pod))
+	reconcileVM(t, r, vm, 1)
+	require.NoError(t, r.Get(t.Context(), workerKey, &core.Pod{}), "sidecar completion must not delay upload")
+	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(pod), &core.Pod{})))
+	require.False(t, vm.Status.Local.Durable, "starting the worker does not establish remote durability")
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.Local.ClaimName}, &core.PersistentVolumeClaim{}))
+}
+
 func TestLocalStopReleasesRunnerButRetainsDiskAndRecreatesWorker(t *testing.T) {
 	r, vm, old := localStopFixture(t)
 	require.Equal(t, "Stopped", vm.Status.Phase)

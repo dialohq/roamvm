@@ -95,6 +95,11 @@ func (p *Plugin) Run(ctx context.Context, dir string) error {
 		go server.Serve(l)
 		var identity os.FileInfo
 		for ctx.Err() == nil {
+			// Kubelet removes plugin sockets on restart. Recreate ours before
+			// registering, or kubelet waits for an endpoint that cannot answer.
+			if _, e := os.Stat(socket); os.IsNotExist(e) {
+				break
+			}
 			current, e := os.Stat(filepath.Join(dir, "kubelet.sock"))
 			if e == nil && (identity == nil || !os.SameFile(current, identity)) {
 				regctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -113,9 +118,6 @@ func (p *Plugin) Run(ctx context.Context, dir string) error {
 				} else {
 					fmt.Fprintln(os.Stderr, "device registration:", e)
 				}
-			}
-			if _, e = os.Stat(socket); os.IsNotExist(e) {
-				break
 			}
 			select {
 			case <-ctx.Done():

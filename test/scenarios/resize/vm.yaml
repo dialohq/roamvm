@@ -1,0 +1,10 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-resize
+  namespace: default
+spec:
+  powerState: Running
+  image: ${ROAMVM_TEST_RESIZE_IMAGE}
+  memory: 1Gi
+  readinessPort: 8080

@@ -1,0 +1,15 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-cpu-excessive
+  namespace: default
+spec:
+  powerState: Running
+  cpus: 2
+  memory: 256Mi
+  readinessPort: 8080
+  nodeSelector:
+    kubernetes.io/hostname: ${ROAMVM_TEST_NODE}
+  resources:
+    requests:
+      cpu: "2"

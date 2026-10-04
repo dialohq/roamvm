@@ -6,8 +6,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"reflect"
@@ -19,7 +17,6 @@ import (
 	"github.com/dialohq/roamvm/internal/state"
 	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
-	networking "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -29,12 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/portforward"
-	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/client-go/transport/spdy"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -42,11 +34,11 @@ type lab struct {
 	t   testing.TB
 	ctx context.Context
 	client.Client
-	kube                  *kubernetes.Clientset
-	config                *rest.Config
-	cluster, image, probe string
-	store                 *state.S3
-	state                 state.Manager
+	kube           *kubernetes.Clientset
+	cluster, image string
+	store          *state.S3
+	state          state.Manager
+	created        []client.Object
 }
 
 func must(t testing.TB, err error) {
@@ -69,16 +61,21 @@ func newLab(t testing.TB) *lab {
 	switch raw.CurrentContext {
 	case "kind-roamvm-test", "kind-roamvm", "kind-roamvm-cilium", "kind-roamvm-crash-test", "roamvm-libvirt":
 	default:
-		t.Fatalf("refusing context %q; use the disposable kind lab", raw.CurrentContext)
+		if raw.CurrentContext != os.Getenv("ROAMVM_TEST_CONTEXT") || !strings.HasPrefix(raw.CurrentContext, "roamvm-libvirt-") {
+			t.Fatalf("refusing context %q; use a disposable lab", raw.CurrentContext)
+		}
 	}
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, &clientcmd.ConfigOverrides{}).
 		ClientConfig()
 	must(t, err)
 	cfg.Timeout = 20 * time.Second
+	// The default 5 QPS throttles our 100ms polling and subsequent mutations.
+	// Keep a bounded budget with room for startup's multiple observations.
+	cfg.QPS = 50
+	cfg.Burst = 100
 	scheme := runtime.NewScheme()
 	must(t, core.AddToScheme(scheme))
 	must(t, api.AddToScheme(scheme))
-	must(t, networking.AddToScheme(scheme))
 	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	must(t, err)
 	k, err := kubernetes.NewForConfig(cfg)
@@ -90,11 +87,10 @@ func newLab(t testing.TB) *lab {
 		ctx:     ctx,
 		Client:  c,
 		kube:    k,
-		config:  cfg,
 		cluster: strings.TrimPrefix(raw.CurrentContext, "kind-"),
 		image:   os.Getenv("ROAMVM_TEST_IMAGE"),
 	}
-	if l.image == "" && os.Getenv("ROAMVM_TEST_EXISTING_VM") == "" {
+	if l.image == "" {
 		t.Fatal("set ROAMVM_TEST_IMAGE to the test guest digest")
 	}
 	return l
@@ -158,13 +154,26 @@ func (l *lab) get(obj client.Object) {
 func (l *lab) create(obj client.Object) {
 	l.t.Helper()
 	must(l.t, l.Create(l.ctx, obj))
+	l.created = append(l.created, obj)
+	if len(l.created) > 1 {
+		return
+	}
+	// Register at the first fixture, preserving earlier host-restoration cleanup.
+	// Kubernetes can tear down independent resources together; do not serialize
+	// their termination waits. PVC protection still fences in-use volumes.
 	l.t.Cleanup(func() {
 		if l.t.Failed() {
-			l.t.Logf("retained %T %s for debugging", obj, obj.GetName())
+			for _, obj := range l.created {
+				l.t.Logf("retained %T %s for debugging", obj, obj.GetName())
+			}
 			return
 		}
-		must(l.t, client.IgnoreNotFound(l.Delete(l.ctx, obj)))
-		l.gone(obj)
+		for _, obj := range l.created {
+			must(l.t, client.IgnoreNotFound(l.Delete(l.ctx, obj)))
+		}
+		for _, obj := range l.created {
+			l.gone(obj)
+		}
 	})
 }
 
@@ -181,8 +190,6 @@ func (l *lab) vm(name string) *api.VirtualMachine {
 	l.get(v)
 	return v
 }
-
-func (l *lab) pod(name string) *core.Pod { p := &core.Pod{ObjectMeta: meta(name)}; l.get(p); return p }
 
 func (l *lab) spec(prefix string) *api.VirtualMachine {
 	return &api.VirtualMachine{
@@ -237,106 +244,6 @@ func (l *lab) service(v *api.VirtualMachine, kind core.ServiceType) *core.Servic
 	return s
 }
 
-func (l *lab) networkClient() {
-	if l.probe != "" {
-		return
-	}
-	l.probe = unique("probe")
-	p := &core.Pod{ObjectMeta: meta(l.probe), Spec: core.PodSpec{
-		TerminationGracePeriodSeconds: ptr.To(int64(1)),
-		AutomountServiceAccountToken: ptr.To(
-			false,
-		), NodeSelector: map[string]string{"kubernetes.io/hostname": l.cluster + "-control-plane"},
-		Tolerations: []core.Toleration{
-			{
-				Key:      "node-role.kubernetes.io/control-plane",
-				Operator: core.TolerationOpExists,
-				Effect:   core.TaintEffectNoSchedule,
-			},
-		},
-		Containers: []core.Container{
-			{Name: "curl", Image: "curlimages/curl:8.17.0", Command: []string{"sh", "-c", "exec sleep 7200"}},
-		},
-	}}
-	p.Labels = map[string]string{"roamvm.test/client": l.probe}
-	l.create(p)
-	l.wait("network probe", func() (bool, error) { return podReady(l.pod(l.probe)), nil })
-}
-
-func podReady(p *core.Pod) bool {
-	for _, c := range p.Status.Conditions {
-		if c.Type == core.PodReady && c.Status == core.ConditionTrue {
-			return true
-		}
-	}
-	return false
-}
-
-func (l *lab) exec(pod, container string, input []byte, args ...string) ([]byte, error) {
-	req := l.kube.CoreV1().
-		RESTClient().
-		Post().
-		Namespace("default").
-		Resource("pods").
-		Name(pod).
-		SubResource("exec").
-		VersionedParams(&core.PodExecOptions{Container: container, Command: args, Stdin: input != nil, Stdout: true, Stderr: true}, runtime.NewParameterCodec(l.Scheme()))
-	executor, err := remotecommand.NewSPDYExecutor(l.config, "POST", req.URL())
-	if err != nil {
-		return nil, err
-	}
-	var out, stderr bytes.Buffer
-	ctx, cancel := context.WithTimeout(l.ctx, 45*time.Second)
-	defer cancel()
-	options := remotecommand.StreamOptions{Stdout: &out, Stderr: &stderr}
-	if input != nil {
-		options.Stdin = bytes.NewReader(input)
-	}
-	err = executor.StreamWithContext(ctx, options)
-	if err != nil {
-		return out.Bytes(), fmt.Errorf("exec %s/%s: %w: %s", pod, container, err, stderr.String())
-	}
-	return out.Bytes(), nil
-}
-
-func (l *lab) http(name, path string, body []byte, options ...string) ([]byte, error) {
-	args := []string{"curl", "-fsS", "--max-time", "20"}
-	if body != nil {
-		args = append(args, "--data-binary", "@-")
-	}
-	args = append(args, options...)
-	args = append(args, "http://"+name+".default.svc.cluster.local:8080"+path)
-	return l.exec(l.probe, "curl", body, args...)
-}
-
-func (l *lab) request(name, path string, body []byte) []byte {
-	l.t.Helper()
-	data, err := l.http(name, path, body)
-	must(l.t, err)
-	return data
-}
-
-func (l *lab) ready(name string) *api.VirtualMachine {
-	l.t.Helper()
-	v := l.phase(name, "Running")
-	l.wait(
-		"guest HTTP response",
-		func() (bool, error) {
-			// Pod readiness can precede Service routing. Retry a dropped SYN
-			// rather than spending the full request timeout on that connection.
-			b, e := l.http(name, "/ready", nil, "--connect-timeout", "1")
-			return string(b) == "ready\n", e
-		},
-	)
-	return v
-}
-
-func (l *lab) start(name string) *api.VirtualMachine {
-	l.t.Helper()
-	l.power(name, "Running")
-	return l.ready(name)
-}
-
 func (l *lab) head(v *api.VirtualMachine) state.Head {
 	l.t.Helper()
 	l.storage()
@@ -352,7 +259,9 @@ func (l *lab) stop(name string) state.Head {
 	v := l.phase(name, "Stopped")
 	l.wait(name+" checkpoint durable", func() (bool, error) {
 		v = l.vm(name)
-		return apimeta.IsStatusConditionTrue(v.Status.Conditions, "CheckpointReady"), nil
+		condition := apimeta.FindStatusCondition(v.Status.Conditions, "CheckpointReady")
+		return v.Status.Phase == "Stopped" && condition != nil &&
+			condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == v.Generation, nil
 	})
 	h := l.head(v)
 	equal(l.t, "durable stopped state", h.State, "Stopped")
@@ -395,27 +304,6 @@ func (l *lab) run(input []byte, args ...string) []byte {
 	return b
 }
 
-func (l *lab) recover(v *api.VirtualMachine, owner string) {
-	cli := os.Getenv("ROAMVM_TEST_CLI")
-	if cli == "" {
-		cli = "../../bin/roamvm"
-	}
-	l.run(nil, cli, "recover", "--vm-id", string(v.UID), "--owner", owner, "--fenced")
-	l.phase(v.Name, "Stopped")
-}
-
-func (l *lab) cordon(name string, value bool) {
-	l.t.Helper()
-	must(
-		l.t,
-		l.Patch(
-			l.ctx,
-			&core.Node{ObjectMeta: metav1.ObjectMeta{Name: name}},
-			client.RawPatch(types.MergePatchType, []byte(fmt.Sprintf(`{"spec":{"unschedulable":%t}}`, value))),
-		),
-	)
-}
-
 func (l *lab) exclusiveNode(node, permittedVM string) {
 	l.t.Helper()
 	if !strings.HasPrefix(node, l.cluster+"-worker") {
@@ -428,52 +316,4 @@ func (l *lab) exclusiveNode(node, permittedVM string) {
 			l.t.Fatalf("worker %s has another VM: %s/%s", node, v.Namespace, v.Name)
 		}
 	}
-}
-
-func (l *lab) forward(pod string, port int32) (string, func()) {
-	l.t.Helper()
-	transport, upgrader, err := spdy.RoundTripperFor(l.config)
-	must(l.t, err)
-	url := l.kube.CoreV1().
-		RESTClient().
-		Post().
-		Namespace("default").
-		Resource("pods").
-		Name(pod).
-		SubResource("portforward").
-		URL()
-	stop, ready := make(chan struct{}), make(chan struct{})
-	f, err := portforward.NewOnAddresses(
-		spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", url),
-		[]string{"127.0.0.1"},
-		[]string{fmt.Sprintf("0:%d", port)},
-		stop,
-		ready,
-		io.Discard,
-		io.Discard,
-	)
-	must(l.t, err)
-	done := make(chan error, 1)
-	go func() { done <- f.ForwardPorts() }()
-	var closeOnce bool
-	cleanup := func() {
-		if !closeOnce {
-			close(stop)
-			closeOnce = true
-			<-done
-		}
-	}
-	select {
-	case <-ready:
-	case err := <-done:
-		close(stop)
-		l.t.Fatalf("port forward exited: %v", err)
-	case <-time.After(20 * time.Second):
-		cleanup()
-		l.t.Fatal("port forward readiness timeout")
-	}
-	ports, err := f.GetPorts()
-	must(l.t, err)
-	l.t.Cleanup(cleanup)
-	return fmt.Sprintf("127.0.0.1:%d", ports[0].Local), cleanup
 }

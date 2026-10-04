@@ -1,0 +1,14 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-lifecycle
+  namespace: default
+spec:
+  powerState: Running
+  cpus: 2
+  memory: 512Mi
+  readinessPort: 8080
+  shutdownTimeoutSeconds: 120
+  resources:
+    requests:
+      cpu: 250m

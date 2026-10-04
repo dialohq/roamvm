@@ -15,7 +15,9 @@ build:
 test:
 	go vet ./...
 	go test -race ./...
-	go test -tags=integration ./internal/runner ./test/integration -run '^$$'
+	go test -tags=integration ./test/integration -run '^$$'
+	nu --no-config-file test/runner-test.nu
+	nu --no-config-file test/scenarios/helpers-test.nu
 
 generate:
 	go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1 object paths=./api/... crd output:crd:artifacts:config=config/crd
@@ -56,8 +58,7 @@ lab-generation-guest: build
 	bin/roamvm image-push --plain-http --tag localhost:15001/generation-guest:local --tar .lab/generation-guest.tar.gz > .lab/generation-guest-ref
 	bin/roamvm image-push --plain-http --tag localhost:15001/firmware-guest:local --tar .lab/firmware-guest.tar.gz > .lab/firmware-guest-ref
 
-integration:
-	go test -tags=integration -race -count=1 -timeout=30m -v ./test/integration
+integration: libvirt-scenarios
 
 benchmark:
 	go test -tags=integration -run '^$$' -bench BenchmarkStartup -benchtime=5x -count=1 -timeout=30m -v ./test/integration
@@ -66,18 +67,24 @@ lab-down:
 	kind delete cluster --name roamvm-test
 	$(COMPOSE) down
 
-.PHONY: libvirt-up libvirt-install libvirt-fixtures libvirt-down libvirt-freeze libvirt-freeze-warm libvirt-reset libvirt-reset-cold libvirt-scenario libvirt-scenarios
+.PHONY: libvirt-check libvirt-up libvirt-plan libvirt-destroy libvirt-install libvirt-fixtures libvirt-down libvirt-freeze libvirt-freeze-warm libvirt-reset libvirt-reset-cold libvirt-scenario libvirt-scenarios
+libvirt-check:
+	bash test/libvirt/check.sh
+
 libvirt-up:
 	bash test/libvirt/lab.sh up
 
-libvirt-install: build
+libvirt-plan:
+	bash test/libvirt/lab.sh plan
+
+libvirt-destroy:
+	bash test/libvirt/lab.sh destroy
+
+libvirt-install:
 	bash test/libvirt/install.sh
 
-libvirt-fixtures: build
-	set -e; for fixture in nixos generation firmware; do \
-		nix build .#test-$$fixture-guest --out-link .lab/libvirt/$$fixture.tar.gz; \
-		bin/roamvm image-push --plain-http --tag 192.168.124.10:5000/$$fixture:local --tar .lab/libvirt/$$fixture.tar.gz > .lab/libvirt/$$fixture-ref; \
-	done
+libvirt-fixtures:
+	bash test/libvirt/lab.sh fixtures
 
 libvirt-down:
 	bash test/libvirt/lab.sh down
@@ -105,6 +112,7 @@ libvirt-scenario:
 	bash test/libvirt/scenario.sh run "$(SCENARIO)"
 
 libvirt-scenarios:
-	set -e; for scenario in crash lifecycle network cpu resize generations; do \
-		bash test/libvirt/scenario.sh run $$scenario; \
-	done
+	bash test/libvirt/scenario.sh run-all
+
+.PHONY: test-scenario
+test-scenario: libvirt-scenario

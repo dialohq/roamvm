@@ -219,6 +219,9 @@ func Run() error {
 			shouldStop := stopRequested || ctx.Err() != nil || time.Since(lastContact) > 30*time.Second
 			if shouldStop && stopping.IsZero() {
 				stopping = time.Now()
+				// Observe shutdown promptly without increasing the steady-state
+				// heartbeat rate or waiting a full second to notice QEMU halted.
+				tick.Reset(100 * time.Millisecond)
 				setReady(false)
 				c.status("Stopping", "")
 			}

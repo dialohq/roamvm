@@ -1,0 +1,8 @@
+apiVersion: vm.roamvm.io/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: scenario-resize-denied
+  namespace: default
+spec:
+  powerState: Running
+  readinessPort: 8080

@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export KUBECONFIG="$PWD/.lab/libvirt/kubeconfig"
-test "$(kubectl config current-context)" = roamvm-libvirt
+source "$(dirname "$0")/common.sh"
+lock_lab
+load_lab
+test "$(kubectl config current-context)" = "$cluster"
 # Take over the already-provisioned addon. Otherwise K3s can race our image pin
 # during startup. A .skip file retains resources but stops manifest reapplication.
 kubectl -n kube-system wait deployment/local-path-provisioner --for=create --timeout=180s
-bash test/libvirt/lab.sh ssh roamvm-libvirt-control-plane 'set -e; skip=/var/lib/rancher/k3s/server/manifests/local-storage.yaml.skip; if ! test -f "$skip"; then touch "$skip"; systemctl restart k3s; fi' </dev/null
-kubectl -n kube-system set image deployment/local-path-provisioner local-path-provisioner=rancher/local-path-provisioner:v0.0.37
-# Keep cluster services off workers that the failure tests deliberately power off.
-for deployment in coredns local-path-provisioner; do
+bash test/libvirt/lab.sh ssh "$control" 'set -e; skip=/var/lib/rancher/k3s/server/manifests/local-storage.yaml.skip; if ! test -f "$skip"; then touch "$skip"; systemctl restart k3s; fi' </dev/null
+mapfile -t addons < <(jq -r '.addons.items[].metadata.name' "$manifest")
+for deployment in "${addons[@]}"; do
   kubectl -n kube-system wait deployment/"$deployment" --for=create --timeout=180s
-  kubectl -n kube-system patch deployment "$deployment" --type=merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"roamvm-libvirt-control-plane"}}}}}'
+done
+# Transfer only the declared image/placement fields from K3s to the lab.
+# These are partial apply configurations; the API validates the merged objects.
+jq '.addons' "$manifest" | kubectl apply --server-side --validate=false --field-manager=roamvm-lab --force-conflicts -f -
+for deployment in "${addons[@]}"; do
   kubectl -n kube-system rollout status deployment/"$deployment" --timeout=180s
 done
-nix build .#libvirt-runtime --out-link .lab/libvirt/runtime.tar.gz
-nix build .#test-guest --out-link .lab/libvirt/guest.tar.gz
-runtime=$(readlink -f .lab/libvirt/runtime.tar.gz)
+nix build .#libvirt-runtime --out-link "$lab/runtime.tar.gz"
+nix build .#test-guest --out-link "$lab/guest.tar.gz"
+runtime=$(readlink -f "$lab/runtime.tar.gz")
 # Nix store paths are immutable. Keep the imported manifest digest on the host,
 # outside the resettable disks, but check each node's actual image on every run.
-mkdir -p .lab/libvirt/runtime-digests
-digest_file=".lab/libvirt/runtime-digests/$(basename "$runtime")"
+mkdir -p "$lab/runtime-digests"
+digest_file="$lab/runtime-digests/$(basename "$runtime")"
 expected=""
 if [[ -f "$digest_file" ]]; then
   expected=$(cat "$digest_file")
@@ -50,7 +55,7 @@ k3s ctr run --rm "$image" verify-runtime /bin/sh -ec 'ip -V; qemu-img --version;
 printf '%s\n' "$actual"
 REMOTE
 }
-nodes=(roamvm-libvirt-control-plane roamvm-libvirt-worker roamvm-libvirt-worker2)
+nodes=("${names[@]}")
 if [[ -z "$expected" ]]; then
   # Learn a new archive's digest from a successful import and smoke test, never
   # from a tag that may still refer to the previous checkout's runtime.
@@ -70,9 +75,9 @@ for pid in "${pids[@]}"; do
   wait "$pid" || status=1
 done
 test "$status" = 0
-mc alias set roamvm-libvirt http://192.168.124.10:9000 roamvm-local roamvm-local-test-only
-mc mb --ignore-existing roamvm-libvirt/roamvm
-bin/roamvm image-push --plain-http --tag 192.168.124.10:5000/test-guest:local --tar .lab/libvirt/guest.tar.gz > .lab/libvirt/guest-ref
-kubectl apply --server-side -k test/libvirt
+mc --config-dir "$lab/mc" alias set lab "http://$control_ip:9000" roamvm-local roamvm-local-test-only
+mc --config-dir "$lab/mc" mb --ignore-existing lab/roamvm
+"$binary" image-push --plain-http --tag "$control_ip:5000/test-guest:local" --tar "$lab/guest.tar.gz" > "$lab/guest-ref"
+kubectl apply --server-side -k "$lab/config"
 kubectl -n roamvm-system rollout restart deployment/controller
 kubectl -n roamvm-system rollout status deployment/controller --timeout=180s
