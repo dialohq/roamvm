@@ -92,20 +92,26 @@ type VirtualMachineSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self.filter(y, y.label == x.label).size() == 1)",message="config disk labels must be unique"
 	ConfigDisks []ConfigDisk `json:"configDisks,omitempty"`
-	// GuestServiceAccountToken is refreshed by the host runtime and exported as a
+	// GuestVaultToken is refreshed by the host runtime and exported as a
 	// read-only 9p directory with mount tag roamvm-token and a file named token.
-	// The runtime requires create permission on this account's token subresource.
-	GuestServiceAccountToken *GuestServiceAccountToken `json:"guestServiceAccountToken,omitempty"`
+	GuestVaultToken *GuestVaultToken `json:"guestVaultToken,omitempty"`
 }
 
-type GuestServiceAccountToken struct {
-	// Name selects a ServiceAccount in the VM's namespace, not the runtime identity.
+type GuestVaultToken struct {
+	// Address is the verified HTTPS Vault endpoint.
+	// +kubebuilder:validation:Pattern=`^https://[^/?#]+(:[0-9]+)?/?$`
+	Address string `json:"address"`
+	// AuthRole selects the Vault Kubernetes authentication role.
+	// +kubebuilder:validation:MinLength=1
+	AuthRole string `json:"authRole"`
+	// Role selects the Vault identity OIDC token role.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_-]+$`
+	Role string `json:"role"`
+	// CAConfigMapName selects a ConfigMap in the VM namespace containing ca.crt.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
-	Name string `json:"name"`
-	// +kubebuilder:validation:MinLength=1
-	Audience string `json:"audience"`
+	CAConfigMapName string `json:"caConfigMapName"`
 }
 
 type ConfigDisk struct {

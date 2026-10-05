@@ -355,7 +355,7 @@ func TestReleasePodPreservesOtherErrors(t *testing.T) {
 
 func TestGuestTokenShareKeepsRuntimeIdentityAndCredentialsSeparate(t *testing.T) {
 	r, vm := setup(t)
-	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "guest", Audience: "ceph-rgw"}
+	vm.Spec.GuestVaultToken = &api.GuestVaultToken{Address: "https://vault:8200", AuthRole: "cibox-workspace", Role: "ceph-rgw", CAConfigMapName: "roamvm-vault-ca"}
 	require.NoError(t, r.createPod(t.Context(), vm))
 	var pod core.Pod
 	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod))
@@ -370,18 +370,27 @@ func TestGuestTokenShareKeepsRuntimeIdentityAndCredentialsSeparate(t *testing.T)
 			}
 			if container.Name == "runner" {
 				require.NotEqual(t, "kube-api", mount.Name)
+				require.NotEqual(t, "vault-auth", mount.Name)
+			} else if mount.Name == "vault-auth" {
+				require.True(t, mount.ReadOnly)
+				require.Equal(t, "/var/run/roamvm/vault", mount.MountPath)
 			}
 		}
 		require.True(t, found)
 	}
 	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == "vault-auth" {
+			require.Equal(t, "vault", volume.Projected.Sources[0].ServiceAccountToken.Audience)
+			require.Equal(t, "roamvm-vault-ca", volume.Projected.Sources[1].ConfigMap.Name)
+			require.Equal(t, []core.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}}, volume.Projected.Sources[1].ConfigMap.Items)
+		}
 		if volume.Name == "guest-token" {
 			require.NotNil(t, volume.EmptyDir)
 			require.Equal(t, core.StorageMediumMemory, volume.EmptyDir.Medium)
 		}
 	}
 	r, vm = setup(t)
-	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "roamvm-runtime", Audience: "ceph-rgw"}
+	vm.Spec.GuestVaultToken = &api.GuestVaultToken{Role: "ceph-rgw"}
 	require.Error(t, r.createPod(t.Context(), vm))
 }
 
