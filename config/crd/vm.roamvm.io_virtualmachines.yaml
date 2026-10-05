@@ -1974,9 +1974,15 @@ spec:
                   read-only 9p directory with mount tag roamvm-token and a file named token.
                   The runtime requires create permission on this account's token subresource.
                 properties:
-                  audience:
-                    minLength: 1
-                    type: string
+                  audiences:
+                    description: Audiences identifies the recipients of the guest's
+                      ServiceAccount JWT.
+                    items:
+                      minLength: 1
+                      type: string
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
                   name:
                     description: Name selects a ServiceAccount in the VM's namespace,
                       not the runtime identity.
@@ -1985,7 +1991,7 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
                 required:
-                - audience
+                - audiences
                 - name
                 type: object
               hostname:

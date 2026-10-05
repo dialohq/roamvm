@@ -39,7 +39,7 @@ func (s *Server) refreshGuestToken(ctx context.Context, namespace string, token 
 	}
 	s.guestTokenRefresh = now.Add(time.Minute)
 	request := &authentication.TokenRequest{Spec: authentication.TokenRequestSpec{
-		Audiences: []string{token.Audience}, ExpirationSeconds: ptr.To(int64(3600)),
+		Audiences: token.Audiences, ExpirationSeconds: ptr.To(int64(3600)),
 	}}
 	account := &core.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: token.Name, Namespace: namespace}}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
