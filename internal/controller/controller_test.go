@@ -353,6 +353,38 @@ func TestReleasePodPreservesOtherErrors(t *testing.T) {
 	require.Equal(t, ctrl.Result{}, result)
 }
 
+func TestGuestTokenShareKeepsRuntimeIdentityAndCredentialsSeparate(t *testing.T) {
+	r, vm := setup(t)
+	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "guest", Audience: "ceph-rgw"}
+	require.NoError(t, r.createPod(t.Context(), vm))
+	var pod core.Pod
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod))
+	require.Equal(t, "roamvm-runtime", pod.Spec.ServiceAccountName)
+	for _, container := range pod.Spec.Containers {
+		var found bool
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == "guest-token" {
+				found = true
+				require.Equal(t, "/run/roamvm/guest-token", mount.MountPath)
+				require.Equal(t, container.Name == "runner", mount.ReadOnly)
+			}
+			if container.Name == "runner" {
+				require.NotEqual(t, "kube-api", mount.Name)
+			}
+		}
+		require.True(t, found)
+	}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == "guest-token" {
+			require.NotNil(t, volume.EmptyDir)
+			require.Equal(t, core.StorageMediumMemory, volume.EmptyDir.Medium)
+		}
+	}
+	r, vm = setup(t)
+	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "roamvm-runtime", Audience: "ceph-rgw"}
+	require.Error(t, r.createPod(t.Context(), vm))
+}
+
 func TestGuestCannotProjectRuntimeCredentials(t *testing.T) {
 	for _, source := range []core.VolumeProjection{
 		{Secret: &core.SecretProjection{LocalObjectReference: core.LocalObjectReference{Name: "roamvm-object-store"}}},

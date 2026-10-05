@@ -255,6 +255,16 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			{Name: "kube-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
 		},
 	}
+	if token := vm.Spec.GuestServiceAccountToken; token != nil {
+		if token.Name == "" || token.Name == "roamvm-runtime" || token.Audience == "" {
+			return fmt.Errorf("guest token requires a separate service account and audience")
+		}
+		mount("guest-token", "/run/roamvm/guest-token", core.VolumeSource{
+			EmptyDir: &core.EmptyDirVolumeSource{Medium: core.StorageMediumMemory},
+		}, true)
+		runtimeContainer.VolumeMounts = append(runtimeContainer.VolumeMounts,
+			core.VolumeMount{Name: "guest-token", MountPath: "/run/roamvm/guest-token"})
+	}
 	if vm.Spec.Hugepages != "" || len(vm.Spec.Devices) > 0 {
 		runner.SecurityContext.Capabilities.Add = append(runner.SecurityContext.Capabilities.Add, "IPC_LOCK")
 	}
