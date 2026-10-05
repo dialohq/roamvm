@@ -22,7 +22,7 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "vmlinux"), []byte("kernel"), 0o600))
 	p := &daemon.Prepared{Dir: dir, Base: images.Base{Dir: dir, Manifest: images.Manifest{Format: "qcow2", Cmdline: "root=/dev/vda"}}, Spec: api.VirtualMachineSpec{CPUs: 8, Memory: "2Gi", Hugepages: "2Mi", Hostname: "devbox", Disks: []api.SecondaryDisk{{Name: "shared", VolumeMode: "Filesystem", ReadOnly: true}, {Name: "data", VolumeMode: "Filesystem"}}, Devices: []api.Device{{PCIAddress: "0000:01:00.0"}}}}
-	p.Spec.GuestVaultToken = &api.GuestVaultToken{Role: "ceph-rgw"}
+	p.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "guest", Audience: "ceph-rgw"}
 	args, err := qemuArgs(t.Context(), p, filepath.Join(dir, "qmp"))
 	require.NoError(t, err)
 	text := strings.Join(args, " ")

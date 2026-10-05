@@ -94,7 +94,7 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 	for _, d := range p.Spec.Devices {
 		args = append(args, "-device", "vfio-pci,host="+d.PCIAddress)
 	}
-	if p.Spec.GuestVaultToken != nil {
+	if p.Spec.GuestServiceAccountToken != nil {
 		args = append(args,
 			"-fsdev", "local,id=guest-token,path="+daemon.GuestTokenDirectory+",security_model=none,readonly=on",
 			"-device", "virtio-9p-pci,fsdev=guest-token,mount_tag=roamvm-token")

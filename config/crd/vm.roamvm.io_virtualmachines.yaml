@@ -1968,36 +1968,25 @@ spec:
                   - volumeMode
                   type: object
                 type: array
-              guestVaultToken:
+              guestServiceAccountToken:
                 description: |-
-                  GuestVaultToken is refreshed by the host runtime and exported as a
+                  GuestServiceAccountToken is refreshed by the host runtime and exported as a
                   read-only 9p directory with mount tag roamvm-token and a file named token.
+                  The runtime requires create permission on this account's token subresource.
                 properties:
-                  address:
-                    description: Address is the verified HTTPS Vault endpoint.
-                    pattern: ^https://[^/?#]+(:[0-9]+)?/?$
-                    type: string
-                  authRole:
-                    description: AuthRole selects the Vault Kubernetes authentication
-                      role.
+                  audience:
                     minLength: 1
                     type: string
-                  caConfigMapName:
-                    description: CAConfigMapName selects a ConfigMap in the VM namespace
-                      containing ca.crt.
+                  name:
+                    description: Name selects a ServiceAccount in the VM's namespace,
+                      not the runtime identity.
                     maxLength: 253
                     minLength: 1
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                     type: string
-                  role:
-                    description: Role selects the Vault identity OIDC token role.
-                    pattern: ^[A-Za-z0-9_-]+$
-                    type: string
                 required:
-                - address
-                - authRole
-                - caConfigMapName
-                - role
+                - audience
+                - name
                 type: object
               hostname:
                 description: Hostname is applied at guest boot; it does not change
