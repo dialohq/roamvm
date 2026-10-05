@@ -57,7 +57,6 @@ type Server struct {
 	BaseDir                   string
 	mu                        sync.Mutex
 	GuestTokenDir             string
-	VaultCredentialsDir       string
 	guestTokenRefresh         time.Time
 	guestTokenExpiry          time.Time
 }
@@ -128,7 +127,7 @@ func (s *Server) handler(action string) http.HandlerFunc {
 		case "prepare":
 			response.Prepared, err = s.prepare(r.Context(), pod, vm)
 			if err == nil {
-				err = s.refreshGuestToken(r.Context(), response.Prepared.Spec.GuestVaultToken, time.Now())
+				err = s.refreshGuestToken(r.Context(), pod.Namespace, response.Prepared.Spec.GuestServiceAccountToken, time.Now())
 			}
 		case "heartbeat":
 			response.Stop = vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil ||
@@ -141,7 +140,7 @@ func (s *Server) handler(action string) http.HandlerFunc {
 			if e != nil {
 				err = e
 			} else {
-				_ = s.refreshGuestToken(r.Context(), p.Spec.GuestVaultToken, time.Now())
+				_ = s.refreshGuestToken(r.Context(), pod.Namespace, p.Spec.GuestServiceAccountToken, time.Now())
 				err = s.State.Check(r.Context(), p.Session)
 				if errors.Is(err, state.ErrOwned) {
 					response.Stop = true
