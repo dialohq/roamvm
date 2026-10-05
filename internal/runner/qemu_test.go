@@ -22,9 +22,12 @@ func TestQEMUBlockGraphAndResources(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "vmlinux"), []byte("kernel"), 0o600))
 	p := &daemon.Prepared{Dir: dir, Base: images.Base{Dir: dir, Manifest: images.Manifest{Format: "qcow2", Cmdline: "root=/dev/vda"}}, Spec: api.VirtualMachineSpec{CPUs: 8, Memory: "2Gi", Hugepages: "2Mi", Hostname: "devbox", Disks: []api.SecondaryDisk{{Name: "shared", VolumeMode: "Filesystem", ReadOnly: true}, {Name: "data", VolumeMode: "Filesystem"}}, Devices: []api.Device{{PCIAddress: "0000:01:00.0"}}}}
+	p.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "guest", Audience: "ceph-rgw"}
 	args, err := qemuArgs(t.Context(), p, filepath.Join(dir, "qmp"))
 	require.NoError(t, err)
 	text := strings.Join(args, " ")
+	require.Contains(t, args, "local,id=guest-token,path=/run/roamvm/guest-token,security_model=none,readonly=on")
+	require.Contains(t, args, "virtio-9p-pci,fsdev=guest-token,mount_tag=roamvm-token")
 	require.Contains(t, args, "socket,id=serial0,path="+filepath.Join(dir, "serial.sock")+",server=on,wait=off,logfile=/dev/stdout")
 	require.Contains(t, text, "-serial chardev:serial0")
 	require.NotContains(t, args, "stdio")

@@ -92,6 +92,20 @@ type VirtualMachineSpec struct {
 	// +listMapKey=name
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self.filter(y, y.label == x.label).size() == 1)",message="config disk labels must be unique"
 	ConfigDisks []ConfigDisk `json:"configDisks,omitempty"`
+	// GuestServiceAccountToken is refreshed by the host runtime and exported as a
+	// read-only 9p directory with mount tag roamvm-token and a file named token.
+	// The runtime requires create permission on this account's token subresource.
+	GuestServiceAccountToken *GuestServiceAccountToken `json:"guestServiceAccountToken,omitempty"`
+}
+
+type GuestServiceAccountToken struct {
+	// Name selects a ServiceAccount in the VM's namespace, not the runtime identity.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	Audience string `json:"audience"`
 }
 
 type ConfigDisk struct {

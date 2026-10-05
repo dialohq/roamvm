@@ -56,6 +56,9 @@ type Server struct {
 	State                     state.Manager
 	BaseDir                   string
 	mu                        sync.Mutex
+	GuestTokenDir             string
+	guestTokenRefresh         time.Time
+	guestTokenExpiry          time.Time
 }
 
 func (s *Server) Serve(ctx context.Context, socket string) error {
@@ -123,6 +126,9 @@ func (s *Server) handler(action string) http.HandlerFunc {
 		switch action {
 		case "prepare":
 			response.Prepared, err = s.prepare(r.Context(), pod, vm)
+			if err == nil {
+				err = s.refreshGuestToken(r.Context(), pod.Namespace, response.Prepared.Spec.GuestServiceAccountToken, time.Now())
+			}
 		case "heartbeat":
 			response.Stop = vm.Spec.PowerState == "Stopped" || vm.DeletionTimestamp != nil ||
 				pod.DeletionTimestamp != nil ||
@@ -134,6 +140,7 @@ func (s *Server) handler(action string) http.HandlerFunc {
 			if e != nil {
 				err = e
 			} else {
+				_ = s.refreshGuestToken(r.Context(), pod.Namespace, p.Spec.GuestServiceAccountToken, time.Now())
 				err = s.State.Check(r.Context(), p.Session)
 				if errors.Is(err, state.ErrOwned) {
 					response.Stop = true

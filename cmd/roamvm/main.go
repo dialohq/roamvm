@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	authentication "k8s.io/api/authentication/v1"
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,6 +50,7 @@ func env(k, fallback string) string {
 func scheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = core.AddToScheme(s)
+	_ = authentication.AddToScheme(s)
 	_ = api.AddToScheme(s)
 	return s
 }
