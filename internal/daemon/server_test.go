@@ -65,7 +65,7 @@ func TestRunnerIdentityIsBoundToPodNodeAndVM(t *testing.T) {
 }
 
 func TestQueuedIncarnationDoesNotAdoptUnaccountedSpecChanges(t *testing.T) {
-	original := api.VirtualMachineSpec{Image: "base@sha256:fixed", CPUs: 2, Memory: "1Gi", GuestServiceAccountToken: &api.GuestServiceAccountToken{Name: "original-guest", Audience: "original-service"}}
+	original := api.VirtualMachineSpec{Image: "base@sha256:fixed", CPUs: 2, Memory: "1Gi", GuestServiceAccountToken: &api.GuestServiceAccountToken{Name: "original-guest", Audiences: []string{"original-service", "second-service"}}}
 	b, e := json.Marshal(original)
 	require.NoError(t, e)
 	pod := &core.Pod{
@@ -75,7 +75,7 @@ func TestQueuedIncarnationDoesNotAdoptUnaccountedSpecChanges(t *testing.T) {
 	vm.Spec.CPUs = 8
 	vm.Spec.Memory = "16Gi"
 	vm.Spec.Hugepages = "1Gi"
-	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "different-account", Audience: "different-service"}
+	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "different-account", Audiences: []string{"different-service"}}
 	boot, e := bootSpec(vm, pod)
 	require.NoError(t, e)
 	require.Equal(t, original.GuestServiceAccountToken, boot.GuestServiceAccountToken)
@@ -93,7 +93,7 @@ func TestStoppingDoesNotDependOnGuestTokenAcquisition(t *testing.T) {
 	require.NoError(t, core.AddToScheme(scheme))
 	require.NoError(t, api.AddToScheme(scheme))
 	vm := &api.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "vm", Namespace: "a", UID: "vm-uid"}, Spec: api.VirtualMachineSpec{
-		PowerState: "Stopped", GuestServiceAccountToken: &api.GuestServiceAccountToken{Name: "guest", Audience: "rgw"},
+		PowerState: "Stopped", GuestServiceAccountToken: &api.GuestServiceAccountToken{Name: "guest", Audiences: []string{"external-service"}},
 	}}
 	pod := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "a", UID: "pod-uid"}, Spec: core.PodSpec{NodeName: "node-a"}}
 	require.NoError(t, controllerutil.SetControllerReference(vm, pod, scheme))

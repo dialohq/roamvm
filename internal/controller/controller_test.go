@@ -355,7 +355,10 @@ func TestReleasePodPreservesOtherErrors(t *testing.T) {
 
 func TestGuestTokenShareKeepsRuntimeIdentityAndCredentialsSeparate(t *testing.T) {
 	r, vm := setup(t)
-	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "guest", Audience: "ceph-rgw"}
+	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "guest", Audiences: []string{"first-service", "second-service"}}
+	copied := vm.DeepCopy()
+	copied.Spec.GuestServiceAccountToken.Audiences[0] = "changed-service"
+	require.Equal(t, []string{"first-service", "second-service"}, vm.Spec.GuestServiceAccountToken.Audiences)
 	require.NoError(t, r.createPod(t.Context(), vm))
 	var pod core.Pod
 	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod))
@@ -380,9 +383,19 @@ func TestGuestTokenShareKeepsRuntimeIdentityAndCredentialsSeparate(t *testing.T)
 			require.Equal(t, core.StorageMediumMemory, volume.EmptyDir.Medium)
 		}
 	}
-	r, vm = setup(t)
-	vm.Spec.GuestServiceAccountToken = &api.GuestServiceAccountToken{Name: "roamvm-runtime", Audience: "ceph-rgw"}
-	require.Error(t, r.createPod(t.Context(), vm))
+	for name, token := range map[string]*api.GuestServiceAccountToken{
+		"runtime identity": {Name: "roamvm-runtime", Audiences: []string{"first-service"}},
+		"missing account":  {Audiences: []string{"first-service"}},
+		"missing audience": {Name: "guest"},
+		"empty list":       {Name: "guest", Audiences: []string{}},
+		"empty entry":      {Name: "guest", Audiences: []string{"first-service", ""}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, vm := setup(t)
+			vm.Spec.GuestServiceAccountToken = token
+			require.Error(t, r.createPod(t.Context(), vm))
+		})
+	}
 }
 
 func TestGuestCannotProjectRuntimeCredentials(t *testing.T) {

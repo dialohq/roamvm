@@ -256,8 +256,13 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		},
 	}
 	if token := vm.Spec.GuestServiceAccountToken; token != nil {
-		if token.Name == "" || token.Name == "roamvm-runtime" || token.Audience == "" {
-			return fmt.Errorf("guest token requires a separate service account and audience")
+		if token.Name == "" || token.Name == "roamvm-runtime" || len(token.Audiences) == 0 {
+			return fmt.Errorf("guest token requires a separate service account and audiences")
+		}
+		for _, audience := range token.Audiences {
+			if audience == "" {
+				return fmt.Errorf("guest token audiences must not be empty")
+			}
 		}
 		mount("guest-token", "/run/roamvm/guest-token", core.VolumeSource{
 			EmptyDir: &core.EmptyDirVolumeSource{Medium: core.StorageMediumMemory},

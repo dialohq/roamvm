@@ -104,8 +104,11 @@ type GuestServiceAccountToken struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
 	Name string `json:"name"`
-	// +kubebuilder:validation:MinLength=1
-	Audience string `json:"audience"`
+	// Audiences identifies the recipients of the guest's ServiceAccount JWT.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	Audiences []string `json:"audiences"`
 }
 
 type ConfigDisk struct {

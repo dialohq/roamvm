@@ -266,11 +266,13 @@ Cloud Hypervisor deployment.
   boot. `configDisks` provides multiple separately labelled projected ISOs, for
   guests that already consume bootstrap disks. The runtime does not mutate the
   guest's root filesystem to inject settings.
-- `guestServiceAccountToken: {name: guest-account, audience: external-service}`
+- `guestServiceAccountToken: {name: guest-account, audiences: [external-service]}`
   selects an existing ServiceAccount in the VM's namespace. Grant the runtime
   `create` on `serviceaccounts/token`, restricted by `resourceNames` to that
   exact account. RoamVM does not grant this permission automatically, and rejects
-  selecting `roamvm-runtime` itself. The runtime requests a one-hour token before
+  selecting `roamvm-runtime` itself. Audiences is a nonempty list passed to
+  Kubernetes unchanged; one JWT is valid for those recipients. It does not grant
+  Kubernetes permissions to the guest account. The runtime requests a one-hour token before
   boot and refreshes at 80% of the returned lifetime. Failed requests retry once
   per minute, preserve a still-valid token, and remove it at expiry. Token refresh
   failure does not stop an already-running guest or block graceful shutdown.

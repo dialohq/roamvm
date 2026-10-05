@@ -32,7 +32,7 @@ func TestGuestTokenRotationFailureExpiryAndRestart(t *testing.T) {
 			require.Equal(t, "workspace-a", obj.GetNamespace())
 			require.Equal(t, "guest-a", obj.GetName())
 			request := body.(*authentication.TokenRequest)
-			require.Equal(t, []string{"ceph-rgw"}, request.Spec.Audiences)
+			require.Equal(t, []string{"vault", "another-service"}, request.Spec.Audiences)
 			require.EqualValues(t, 3600, *request.Spec.ExpirationSeconds)
 			require.Nil(t, request.Spec.BoundObjectRef)
 			if failure {
@@ -42,7 +42,7 @@ func TestGuestTokenRotationFailureExpiryAndRestart(t *testing.T) {
 			return nil
 		},
 	}).Build()
-	config := &api.GuestServiceAccountToken{Name: "guest-a", Audience: "ceph-rgw"}
+	config := &api.GuestServiceAccountToken{Name: "guest-a", Audiences: []string{"vault", "another-service"}}
 	refresh := func(at time.Time) error { return s.refreshGuestToken(t.Context(), "workspace-a", config, at) }
 	path := filepath.Join(s.GuestTokenDir, "token")
 	read := func() string {
@@ -110,7 +110,7 @@ func TestGuestTokenInitialFailureAndInvalidResponses(t *testing.T) {
 					return nil
 				},
 			}).Build()
-			config := &api.GuestServiceAccountToken{Name: "guest", Audience: "rgw"}
+			config := &api.GuestServiceAccountToken{Name: "guest", Audiences: []string{"external-service"}}
 			require.Error(t, s.refreshGuestToken(t.Context(), "workspace", config, now))
 			require.Error(t, s.refreshGuestToken(t.Context(), "workspace", config, now.Add(time.Second)))
 			_, err := os.Stat(filepath.Join(s.GuestTokenDir, "token"))
