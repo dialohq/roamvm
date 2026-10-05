@@ -255,10 +255,17 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			{Name: "kube-api", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
 		},
 	}
-	if token := vm.Spec.GuestServiceAccountToken; token != nil {
-		if token.Name == "" || token.Name == "roamvm-runtime" || token.Audience == "" {
-			return fmt.Errorf("guest token requires a separate service account and audience")
+	if token := vm.Spec.GuestVaultToken; token != nil {
+		if token.Address == "" || token.AuthRole == "" || token.Role == "" || token.CAConfigMapName == "" {
+			return fmt.Errorf("guest Vault token requires address, authRole, role and caConfigMapName")
 		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: "vault-auth", VolumeSource: core.VolumeSource{
+			Projected: &core.ProjectedVolumeSource{Sources: []core.VolumeProjection{
+				{ServiceAccountToken: &core.ServiceAccountTokenProjection{Audience: "vault", Path: "token", ExpirationSeconds: ptr.To(int64(3600))}},
+				{ConfigMap: &core.ConfigMapProjection{LocalObjectReference: core.LocalObjectReference{Name: token.CAConfigMapName}, Items: []core.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}}}},
+			}},
+		}})
+		runtimeContainer.VolumeMounts = append(runtimeContainer.VolumeMounts, core.VolumeMount{Name: "vault-auth", MountPath: "/var/run/roamvm/vault", ReadOnly: true})
 		mount("guest-token", "/run/roamvm/guest-token", core.VolumeSource{
 			EmptyDir: &core.EmptyDirVolumeSource{Medium: core.StorageMediumMemory},
 		}, true)

@@ -1,119 +1,170 @@
 package daemon
 
 import (
-	"context"
-	"errors"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/stretchr/testify/require"
-	authentication "k8s.io/api/authentication/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+func testJWT(expiry time.Time) string {
+	return "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, expiry.Unix()))) + ".c2ln"
+}
+
+func vaultFixture(t *testing.T, handler http.HandlerFunc) (*Server, *api.GuestVaultToken) {
+	t.Helper()
+	vault := httptest.NewTLSServer(handler)
+	t.Cleanup(vault.Close)
+	s := &Server{GuestTokenDir: t.TempDir(), VaultCredentialsDir: t.TempDir()}
+	require.NoError(t, os.WriteFile(filepath.Join(s.VaultCredentialsDir, "ca.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: vault.Certificate().Raw}), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(s.VaultCredentialsDir, "token"), []byte("projected-first"), 0o600))
+	return s, &api.GuestVaultToken{Address: vault.URL, AuthRole: "cibox-workspace", Role: "ceph-rgw", CAConfigMapName: "roamvm-vault-ca"}
+}
+
 func TestGuestTokenRotationFailureExpiryAndRestart(t *testing.T) {
-	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	now := time.Now().Truncate(time.Second)
 	calls := 0
 	failure := false
-	jwt := "first-jwt"
 	expiry := now.Add(10 * time.Minute)
-	s := &Server{GuestTokenDir: t.TempDir()}
-	s.Client = fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithInterceptorFuncs(interceptor.Funcs{
-		SubResourceCreate: func(_ context.Context, _ client.Client, subresource string, obj, body client.Object, _ ...client.SubResourceCreateOption) error {
+	jwt := testJWT(expiry)
+	projected := "projected-first"
+	s, config := vaultFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/kubernetes/login":
 			calls++
-			require.Equal(t, "token", subresource)
-			require.Equal(t, "workspace-a", obj.GetNamespace())
-			require.Equal(t, "guest-a", obj.GetName())
-			request := body.(*authentication.TokenRequest)
-			require.Equal(t, []string{"ceph-rgw"}, request.Spec.Audiences)
-			require.EqualValues(t, 3600, *request.Spec.ExpirationSeconds)
-			require.Nil(t, request.Spec.BoundObjectRef)
+			require.Equal(t, http.MethodPost, r.Method)
+			require.Empty(t, r.Header.Get("X-Vault-Token"))
+			var body map[string]string
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, map[string]string{"role": "cibox-workspace", "jwt": projected}, body)
 			if failure {
-				return errors.New("API unavailable")
+				http.Error(w, "secret failure body", 403)
+				return
 			}
-			request.Status = authentication.TokenRequestStatus{Token: jwt, ExpirationTimestamp: metav1.NewTime(expiry)}
-			return nil
-		},
-	}).Build()
-	config := &api.GuestServiceAccountToken{Name: "guest-a", Audience: "ceph-rgw"}
-	refresh := func(at time.Time) error { return s.refreshGuestToken(t.Context(), "workspace-a", config, at) }
+			fmt.Fprint(w, `{"auth":{"client_token":"private-access-token"}}`)
+		case "/v1/identity/oidc/token/ceph-rgw":
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, "private-access-token", r.Header.Get("X-Vault-Token"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"token": jwt, "ttl": 3600}})
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	refresh := func(at time.Time) error { return s.refreshGuestToken(t.Context(), config, at) }
 	path := filepath.Join(s.GuestTokenDir, "token")
-	read := func() string {
-		b, err := os.ReadFile(path)
-		require.NoError(t, err)
-		return string(b)
-	}
+	read := func() string { b, err := os.ReadFile(path); require.NoError(t, err); return string(b) }
 	require.NoError(t, refresh(now))
-	require.Equal(t, "first-jwt", read())
+	require.Equal(t, jwt, read())
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o444), info.Mode().Perm())
+	require.Equal(t, now.Add(8*time.Minute), s.guestTokenRefresh, "JWT expiry, not Vault ttl, determines refresh")
 	require.NoError(t, refresh(now.Add(479*time.Second)))
 	require.Equal(t, 1, calls)
 	old, err := os.Open(path)
 	require.NoError(t, err)
 	defer old.Close()
-	jwt, expiry = "rotated-jwt", now.Add(20*time.Minute)
+	projected = "projected-rotated"
+	require.NoError(t, os.WriteFile(filepath.Join(s.VaultCredentialsDir, "token"), []byte(projected), 0o600))
+	expiry = now.Add(20 * time.Minute)
+	jwt = testJWT(expiry)
 	require.NoError(t, refresh(now.Add(480*time.Second)))
 	require.Equal(t, 2, calls)
-	require.Equal(t, "rotated-jwt", read())
+	require.Equal(t, jwt, read())
 	oldInfo, err := old.Stat()
 	require.NoError(t, err)
 	newInfo, err := os.Stat(path)
 	require.NoError(t, err)
-	require.False(t, os.SameFile(oldInfo, newInfo), "rotation must replace the file atomically")
-
+	require.False(t, os.SameFile(oldInfo, newInfo))
 	failure = true
-	require.Error(t, refresh(now.Add(18*time.Minute)))
-	require.Equal(t, "rotated-jwt", read())
+	err = refresh(now.Add(18 * time.Minute))
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "secret failure body")
+	require.Equal(t, jwt, read())
 	require.NoError(t, refresh(now.Add(18*time.Minute+30*time.Second)))
-	require.Equal(t, 3, calls, "failed requests must be throttled")
+	require.Equal(t, 3, calls)
 	require.Error(t, refresh(expiry))
 	_, err = os.Stat(path)
-	require.True(t, os.IsNotExist(err), "expired tokens must be removed")
-	failure, jwt, expiry = false, "recovered-jwt", now.Add(time.Hour)
+	require.True(t, os.IsNotExist(err))
+	failure = false
+	jwt = testJWT(now.Add(time.Hour))
 	require.NoError(t, refresh(now.Add(21*time.Minute)))
-	require.Equal(t, "recovered-jwt", read())
-	partial, err := filepath.Glob(filepath.Join(s.GuestTokenDir, ".token-*"))
+	require.Equal(t, jwt, read())
+	restarted := &Server{GuestTokenDir: s.GuestTokenDir, VaultCredentialsDir: s.VaultCredentialsDir}
+	jwt = testJWT(now.Add(2 * time.Hour))
+	require.NoError(t, restarted.refreshGuestToken(t.Context(), config, now.Add(22*time.Minute)))
+	require.Equal(t, jwt, read())
+	files, err := os.ReadDir(s.GuestTokenDir)
 	require.NoError(t, err)
-	require.Empty(t, partial)
-
-	restarted := &Server{Client: s.Client, GuestTokenDir: s.GuestTokenDir}
-	jwt = "restart-jwt"
-	require.NoError(t, restarted.refreshGuestToken(t.Context(), "workspace-a", config, now.Add(22*time.Minute)))
-	require.Equal(t, "restart-jwt", read())
+	require.Len(t, files, 1, "only guest JWT is exported, never access or login credentials")
 }
 
 func TestGuestTokenInitialFailureAndInvalidResponses(t *testing.T) {
-	for _, name := range []string{"API failure", "empty token", "expired token"} {
+	for _, name := range []string{"TLS", "HTTP", "redirect", "empty login", "empty JWT", "malformed JWT", "expired JWT", "oversized", "invalid JSON"} {
 		t.Run(name, func(t *testing.T) {
 			now := time.Now()
-			s := &Server{GuestTokenDir: t.TempDir()}
-			s.Client = fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
-				SubResourceCreate: func(_ context.Context, _ client.Client, _ string, _, body client.Object, _ ...client.SubResourceCreateOption) error {
-					if name == "API failure" {
-						return errors.New("denied")
+			calls := 0
+			s, config := vaultFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if name == "HTTP" {
+					http.Error(w, "private-access-token", 500)
+					return
+				}
+				if name == "redirect" {
+					w.Header().Set("Location", "/redirect-target")
+					w.WriteHeader(307)
+					return
+				}
+				if name == "oversized" {
+					fmt.Fprint(w, strings.Repeat("x", (1<<20)+1))
+					return
+				}
+				if name == "invalid JSON" {
+					fmt.Fprint(w, "private-access-token")
+					return
+				}
+				if r.URL.Path == "/v1/auth/kubernetes/login" {
+					if name == "empty login" {
+						fmt.Fprint(w, `{"auth":{}}`)
+						return
 					}
-					response := body.(*authentication.TokenRequest)
-					response.Status.ExpirationTimestamp = metav1.NewTime(now.Add(time.Hour))
-					if name == "expired token" {
-						response.Status.Token = "expired"
-						response.Status.ExpirationTimestamp = metav1.NewTime(now)
-					}
-					return nil
-				},
-			}).Build()
-			config := &api.GuestServiceAccountToken{Name: "guest", Audience: "rgw"}
-			require.Error(t, s.refreshGuestToken(t.Context(), "workspace", config, now))
-			require.Error(t, s.refreshGuestToken(t.Context(), "workspace", config, now.Add(time.Second)))
-			_, err := os.Stat(filepath.Join(s.GuestTokenDir, "token"))
+					fmt.Fprint(w, `{"auth":{"client_token":"private-access-token"}}`)
+					return
+				}
+				jwt := ""
+				if name == "malformed JWT" {
+					jwt = "malformed"
+				}
+				if name == "expired JWT" {
+					jwt = testJWT(now.Add(-time.Minute))
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"token": jwt}})
+			})
+			if name == "TLS" {
+				// The CA is trusted, but the certificate does not cover localhost.
+				config.Address = strings.Replace(config.Address, "127.0.0.1", "localhost", 1)
+			}
+			err := s.refreshGuestToken(t.Context(), config, now)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "private-access-token")
+			if name == "TLS" {
+				require.Zero(t, calls, "TLS verification must prevent sending login credentials")
+			}
+			if name == "redirect" {
+				require.Equal(t, 1, calls)
+			}
+			require.Error(t, s.refreshGuestToken(t.Context(), config, now.Add(time.Second)))
+			_, err = os.Stat(filepath.Join(s.GuestTokenDir, "token"))
 			require.True(t, os.IsNotExist(err))
 		})
 	}

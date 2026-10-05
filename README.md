@@ -266,25 +266,24 @@ Cloud Hypervisor deployment.
   boot. `configDisks` provides multiple separately labelled projected ISOs, for
   guests that already consume bootstrap disks. The runtime does not mutate the
   guest's root filesystem to inject settings.
-- `guestServiceAccountToken: {name: guest-account, audience: external-service}`
-  selects an existing ServiceAccount in the VM's namespace. Grant the runtime
-  `create` on `serviceaccounts/token`, restricted by `resourceNames` to that
-  exact account. RoamVM does not grant this permission automatically, and rejects
-  selecting `roamvm-runtime` itself. The runtime requests a one-hour token before
-  boot and refreshes at 80% of the returned lifetime. Failed requests retry once
+- `guestVaultToken: {address: "https://vault-active.vault.svc.cluster.local:8200", authRole: cibox-workspace, role: ceph-rgw, caConfigMapName: roamvm-vault-ca}`
+  selects a Vault identity OIDC token role. The CA ConfigMap in the VM namespace
+  must contain `ca.crt`. Configure Vault Kubernetes auth to accept the
+  `roamvm-runtime` Pod ServiceAccount with audience `vault`, and authorize its
+  auth role to read `identity/oidc/token/ceph-rgw`. The runtime projects a
+  kubelet-refreshed login JWT and CA into a runtime-only directory, verifies
+  HTTPS, logs in afresh on each refresh, and exports only the identity JWT.
+  Vault access tokens are never persisted. Initial acquisition must succeed
+  before boot; refresh occurs at 80% of the JWT's actual expiry. Failed requests retry once
   per minute, preserve a still-valid token, and remove it at expiry. Token refresh
   failure does not stop an already-running guest or block graceful shutdown.
-  A runtime restart reacquires the token. The token is unbound to a Pod because
-  the guest and runtime ServiceAccounts differ; offline OIDC verifiers do not
-  observe object deletion before JWT expiry.
+  A runtime restart reacquires the token.
   Mount `roamvm-token` as a read-only 9p filesystem with
   `trans=virtio,version=9p2000.L,cache=none,ro`; read its `token` file afresh when
   renewing external credentials. Only this Pod-local memory directory is shared,
   not the runtime Kubernetes credentials, socket or storage. The token is readable
   by guest users; the VM, not each guest process, is the isolation boundary.
-  TokenRequest uses the host's Kubernetes credentials, so the guest needs no
-  Kubernetes credentials or API connectivity. The shared runtime identity can
-  request tokens for every account explicitly authorized through additive RBAC.
+  The guest needs no Vault credentials or Vault/Kubernetes network connectivity.
 - Secondary PVCs use native Kubernetes attachment/mounting. Block PVCs are exposed
   as raw virtio disks; filesystem PVCs must contain `disk.img`. Their own storage
   topology/access-mode restrictions still apply. Only the root is portable via S3.
