@@ -22,12 +22,22 @@ func DiskBytes(size string) (int64, error) {
 	return n, nil
 }
 
-// WorkingBytes reserves space for the live overlay plus filesystem/QCOW2
-// metadata. Checkpoints stream from that overlay; the immutable base lives elsewhere.
-func WorkingBytes(size string) (int64, error) {
-	n, err := DiskBytes(size)
-	if err != nil || n == 0 {
+// WorkingBytes includes the live disk, filesystem metadata, and worst-case RAM
+// snapshot space. The immutable base lives outside the working PVC.
+func WorkingBytes(spec VirtualMachineSpec) (int64, error) {
+	n, err := DiskBytes(spec.RootDiskSize)
+	if err != nil {
 		return 0, err
+	}
+	if spec.Hibernate {
+		memory, err := resource.ParseQuantity(spec.Memory)
+		if err != nil || memory.Sign() <= 0 {
+			return 0, fmt.Errorf("invalid guest memory %q", spec.Memory)
+		}
+		n += memory.Value() + (128 << 20)
+	}
+	if n == 0 {
+		return 0, nil
 	}
 	return n + (1 << 30), nil
 }

@@ -6,7 +6,7 @@
       root = ../..;
       fileset = pkgs.lib.fileset.unions [../../go.mod ../../go.sum ../../api ../../cmd ../../internal];
     };
-    vendorHash = "sha256-P1t0NmWQAjtvR6t3K+2MyWHt8ymeua4eR78RjYF3GuA=";
+    vendorHash = "sha256-MSba2gyW31761DMzSWxHOOuNI3iT5WS/D5Up2EDy6Pg=";
     subPackages = ["cmd/roamvm"];
     env.CGO_ENABLED = "0";
     doCheck = false;

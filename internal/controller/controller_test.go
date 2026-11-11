@@ -21,11 +21,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
+func setup(t *testing.T, v2 ...bool) (*Reconciler, *api.VirtualMachine) {
 	t.Helper()
 	s := runtime.NewScheme()
 	core.AddToScheme(s)
-	api.AddToScheme(s)
+	if len(v2) > 0 && v2[0] {
+		api.AddV2ToScheme(s)
+	} else {
+		api.AddToScheme(s)
+	}
 	vm := &api.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "devbox",
@@ -46,6 +50,30 @@ func setup(t *testing.T) (*Reconciler, *api.VirtualMachine) {
 	vm.Status.PodName = "devbox-runner"
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&api.VirtualMachine{}).WithObjects(vm).Build()
 	return &Reconciler{Client: c, Scheme: s, Image: "runner:test"}, vm
+}
+
+func TestV2IsOptInAndUsesIsolatedRuntime(t *testing.T) {
+	legacy, vm := setup(t)
+	vm.Spec.Hibernate = true
+	require.ErrorContains(t, legacy.createPod(t.Context(), vm), "v2 API")
+	var pods core.PodList
+	require.NoError(t, legacy.List(t.Context(), &pods))
+	require.Empty(t, pods.Items)
+
+	v2, vm := setup(t, true)
+	vm.Spec.Hibernate = true
+	require.NoError(t, v2.createPod(t.Context(), vm))
+	require.NoError(t, v2.List(t.Context(), &pods))
+	require.Len(t, pods.Items, 1)
+	pod := pods.Items[0]
+	require.Equal(t, api.V2GroupVersion.String(), pod.OwnerReferences[0].APIVersion)
+	require.Equal(t, "roamvm-v2-runtime", pod.Spec.ServiceAccountName)
+	for _, container := range pod.Spec.Containers {
+		require.Equal(t, "--experimental-v2", container.Args[0])
+	}
+	runtime := pod.Spec.Containers[1]
+	require.Equal(t, "roamvm-v2-runtime", runtime.EnvFrom[0].ConfigMapRef.Name)
+	require.Equal(t, "roamvm-v2-object-store", runtime.EnvFrom[1].SecretRef.Name)
 }
 
 func TestPodUsesSchedulerResourcesAndRetainedRoot(t *testing.T) {

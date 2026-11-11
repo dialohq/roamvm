@@ -1994,6 +1994,14 @@ spec:
                 - audiences
                 - name
                 type: object
+              hibernate:
+                description: |-
+                  Hibernate preserves RAM and processes when stopped. Disable to deliberately
+                  cold boot the retained disk instead. Requires a root-only, migratable guest.
+                type: boolean
+                x-kubernetes-validations:
+                - message: hibernation requires the experimental v2 API
+                  rule: self == false
               hostname:
                 description: Hostname is applied at guest boot; it does not change
                   the Pod's DNS name.
@@ -2359,9 +2367,29 @@ spec:
             properties:
               checkpoint:
                 properties:
+                  format:
+                    description: Empty denotes a legacy whole-file checkpoint. chunks-v1
+                      hashes the manifest.
+                    type: string
                   generation:
                     format: int64
                     type: integer
+                  hibernation:
+                    description: |-
+                      Hibernation pins the machine whose RAM is in the root disk's internal snapshot.
+                      Restoring a different machine is rejected, not silently converted into a boot.
+                    properties:
+                      config:
+                        type: string
+                      cpu:
+                        type: string
+                      qemu:
+                        type: string
+                    required:
+                    - config
+                    - cpu
+                    - qemu
+                    type: object
                   key:
                     type: string
                   sha256:

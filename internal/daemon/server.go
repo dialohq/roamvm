@@ -18,6 +18,7 @@ import (
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/disk"
 	"github.com/dialohq/roamvm/internal/fileio"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/state"
 	core "k8s.io/api/core/v1"
@@ -34,12 +35,13 @@ type Request struct {
 	ResizeError string `json:"resizeError,omitempty"`
 }
 type Prepared struct {
-	Session state.Session
-	Base    images.Base
-	Dir     string
-	Spec    api.VirtualMachineSpec
-	PodUID  string
-	Stopped bool
+	Session     state.Session
+	Base        images.Base
+	Dir         string
+	Spec        api.VirtualMachineSpec
+	PodUID      string
+	Stopped     bool
+	Hibernation *api.Hibernation
 }
 type Response struct {
 	Prepared    *Prepared `json:"prepared,omitempty"`
@@ -181,7 +183,7 @@ func (s *Server) incarnation(ctx context.Context) (*core.Pod, *api.VirtualMachin
 		return nil, nil, errors.New("runner incarnation changed")
 	}
 	owner := metav1.GetControllerOf(&pod)
-	if owner == nil || owner.Kind != "VirtualMachine" || owner.APIVersion != api.GroupVersion.String() || string(owner.UID) != s.VMUID {
+	if owner == nil || owner.Kind != "VirtualMachine" || owner.APIVersion != api.APIVersion(s.Client.Scheme()) || string(owner.UID) != s.VMUID {
 		return nil, nil, errors.New("not a VM runner")
 	}
 	var vm api.VirtualMachine
@@ -250,6 +252,12 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	if err != nil {
 		return nil, err
 	}
+	if spec.Hibernate && !api.IsV2(s.Client.Scheme()) {
+		return nil, errors.New("hibernation requires --experimental-v2 and the v2 API")
+	}
+	if err = hibernate.Validate(spec); err != nil {
+		return nil, err
+	}
 	if err := s.annotate(ctx, pod, "Restoring", "", nil); err != nil {
 		return nil, err
 	}
@@ -261,7 +269,12 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	if pod.Annotations[controller.LocalOwnerAnnotation] != "" {
 		return s.resumeLocal(ctx, pod, vm, base, spec)
 	}
-	session, err := s.State.Acquire(ctx, string(vm.UID), vm.Spec.Image, string(pod.UID), s.Node)
+	session, err := s.State.Acquire(ctx, string(vm.UID), vm.Spec.Image, string(pod.UID), s.Node, func(cp *api.Checkpoint) error {
+		if cp == nil {
+			return nil
+		}
+		return hibernate.Check(ctx, spec, cp.Hibernation)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -287,6 +300,9 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 		}
 	}
 	prepared := Prepared{Session: session, Base: base, Dir: dir, Spec: spec, PodUID: string(pod.UID)}
+	if session.Head.Checkpoint != nil {
+		prepared.Hibernation = session.Head.Checkpoint.Hibernation
+	}
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}

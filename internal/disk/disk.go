@@ -7,9 +7,11 @@ import (
 
 	"github.com/dialohq/roamvm/internal/images"
 	"github.com/dialohq/roamvm/internal/qcow"
+	"github.com/dialohq/roamvm/internal/timing"
 )
 
 func run(ctx context.Context, args ...string) error {
+	defer timing.Start("disk." + args[0])()
 	out, err := exec.CommandContext(ctx, "qemu-img", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("qemu-img %s: %w: %s", args[0], err, out)

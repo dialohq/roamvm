@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -14,7 +15,8 @@ import (
 )
 
 // Kubernetes stores only ownership and the current checkpoint pointer in etcd.
-// Disk bytes remain in S3. ConfigMaps deliberately outlive VM deletion.
+// Disk bytes remain in S3. Legacy ConfigMaps outlive VM deletion; v2 purges them
+// only after runners exit and a deletion tombstone fences further publication.
 type Kubernetes struct {
 	Client    client.Client
 	Namespace string
@@ -30,6 +32,28 @@ func (s *Kubernetes) Delete(ctx context.Context, key string) error {
 		return errors.New("cannot delete durable ownership state")
 	}
 	return s.Objects.Delete(ctx, key)
+}
+
+func (s *Kubernetes) PurgePrefix(ctx context.Context, prefix string) error {
+	name, ok := headName(prefix + "head.json")
+	if !ok {
+		return errors.New("invalid VM prefix")
+	}
+	var cm core.ConfigMap
+	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: name}, &cm); err != nil {
+		return err
+	}
+	var head Head
+	if err := json.Unmarshal([]byte(cm.Data["head.json"]), &head); err != nil {
+		return err
+	}
+	if head.State != "Deleting" || head.Owner != "" {
+		return errors.New("ownership state is not fenced for deletion")
+	}
+	if err := purgePrefix(ctx, s.Objects, prefix); err != nil {
+		return err
+	}
+	return client.IgnoreNotFound(s.Client.Delete(ctx, &cm, client.Preconditions{UID: &cm.UID, ResourceVersion: &cm.ResourceVersion}))
 }
 
 func headName(key string) (string, bool) {

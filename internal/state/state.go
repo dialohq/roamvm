@@ -16,6 +16,7 @@ import (
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/dialohq/roamvm/internal/fileio"
+	"github.com/dialohq/roamvm/internal/timing"
 )
 
 var (
@@ -88,7 +89,9 @@ func (m Manager) write(ctx context.Context, h Head, etag string) (Session, error
 	return Session{h, obj.ETag}, nil
 }
 
-func (m Manager) Acquire(ctx context.Context, id, base, owner, node string) (Session, error) {
+// Checks validate the exact checkpoint protected by the acquisition CAS, before
+// claiming ownership. Rejected restores leave the stopped head available.
+func (m Manager) Acquire(ctx context.Context, id, base, owner, node string, checks ...func(*api.Checkpoint) error) (Session, error) {
 	if id == "" || base == "" || owner == "" || node == "" {
 		return Session{}, errors.New("missing identity")
 	}
@@ -104,6 +107,11 @@ func (m Manager) Acquire(ctx context.Context, id, base, owner, node string) (Ses
 	}
 	if s.Head.Base != base {
 		return Session{}, errors.New("base digest does not match durable state")
+	}
+	for _, check := range checks {
+		if err := check(s.Head.Checkpoint); err != nil {
+			return Session{}, err
+		}
 	}
 	if s.Head.Owner != "" {
 		if s.Head.Owner == owner && s.Head.Node == node {
@@ -195,9 +203,16 @@ func (m Manager) Check(ctx context.Context, s Session) error {
 
 // Restore verifies the entire immutable object before exposing it to the VMM.
 func (m Manager) Restore(ctx context.Context, s Session, path string) error {
+	defer timing.Start("checkpoint.restore")()
 	cp := s.Head.Checkpoint
 	if cp == nil {
 		return nil
+	}
+	if cp.Format == "chunks-v1" {
+		return m.restoreChunks(ctx, s, path)
+	}
+	if cp.Format != "" {
+		return errors.New("unsupported checkpoint format")
 	}
 	obj, err := m.Store.Get(ctx, cp.Key)
 	if err != nil {
@@ -239,6 +254,7 @@ func (r contextReader) Read(p []byte) (int, error) {
 // checked. The immutable object is read back before the pointer is advanced.
 // A lost response is safe to retry: the key includes epoch and content hash.
 func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, error) {
+	defer timing.Start("checkpoint.commit")()
 	if err := m.Check(ctx, s); err != nil {
 		return Session{}, err
 	}
@@ -248,7 +264,9 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 	}
 	defer f.Close()
 	h := sha256.New()
+	hashed := timing.Start("checkpoint.hash")
 	size, err := io.Copy(h, contextReader{ctx, f})
+	hashed()
 	if err != nil {
 		return Session{}, err
 	}
@@ -261,46 +279,59 @@ func (m Manager) Commit(ctx context.Context, s Session, path string) (Session, e
 	if _, err = f.Seek(0, 0); err != nil {
 		return Session{}, err
 	}
+	uploaded := timing.Start("checkpoint.upload")
 	_, err = m.Store.Put(ctx, key, f, size, "")
+	uploaded()
 	if err != nil && !errors.Is(err, ErrConflict) {
 		return Session{}, err
 	}
+	verified := timing.Start("checkpoint.readback")
 	obj, err := m.Store.Get(ctx, key)
 	if err != nil {
+		verified()
 		return Session{}, err
 	}
 	verify := sha256.New()
 	n, readErr := io.Copy(verify, io.LimitReader(obj.Body, size+1))
 	obj.Body.Close()
+	verified()
 	if readErr != nil {
 		return Session{}, readErr
 	}
 	if n != size || hex.EncodeToString(verify.Sum(nil)) != hash {
 		return Session{}, errors.New("uploaded checkpoint failed verification")
 	}
-	h2 := s.Head
-	h2.Checkpoint = &api.Checkpoint{
+	return m.publishCheckpoint(ctx, s, &api.Checkpoint{
 		Generation: generation,
 		Key:        key,
 		SHA256:     hash,
 		Size:       size,
 		VersionID:  obj.VersionID,
-	}
+	})
+}
+
+func (m Manager) publishCheckpoint(ctx context.Context, s Session, cp *api.Checkpoint) (Session, error) {
+	h2 := s.Head
+	h2.Checkpoint = cp
 	h2.Owner = ""
 	h2.Node = ""
 	h2.State = "Stopped"
+	published := timing.Start("checkpoint.publish")
 	out, err := m.write(ctx, h2, s.ETag)
 	if err != nil {
 		// The CAS may have succeeded while the HTTP response was lost.
 		current, e := m.Read(ctx, h2.VMID)
 		if e == nil && current.Head.Epoch == h2.Epoch && current.Head.State == "Stopped" &&
 			current.Head.Checkpoint != nil &&
-			current.Head.Checkpoint.Key == key {
+			current.Head.Checkpoint.Key == cp.Key {
 			out, err = current, nil
 		}
 	}
+	published()
 	if err == nil {
+		pruned := timing.Start("checkpoint.prune")
 		err = m.Prune(ctx, out)
+		pruned()
 	}
 	return out, err
 }

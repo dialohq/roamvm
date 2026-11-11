@@ -37,7 +37,8 @@ func network(ctx context.Context) (*exec.Cmd, error) {
 	calls := [][]string{
 		{"ip", "tuntap", "add", "dev", "vm-tap", "mode", "tap"},
 		{"ip", "addr", "add", gatewayIP + "/30", "dev", "vm-tap"},
-		{"ip", "link", "set", "vm-tap", "mtu", mtu, "up"},
+		// A restored guest retains its gateway neighbor entry across Pods.
+		{"ip", "link", "set", "vm-tap", "address", "02:00:00:00:00:01", "mtu", mtu, "up"},
 		{"iptables", "-t", "nat", "-A", "POSTROUTING", "-s", GuestIP + "/32", "-o", "eth0", "-j", "MASQUERADE"},
 		{"iptables", "-t", "nat", "-A", "PREROUTING", "-i", "eth0", "-j", "DNAT", "--to-destination", GuestIP},
 		{"iptables", "-t", "nat", "-A", "OUTPUT", "-d", "127.0.0.1/32", "-j", "DNAT", "--to-destination", GuestIP},

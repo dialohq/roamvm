@@ -21,7 +21,9 @@ import (
 	"time"
 
 	"github.com/dialohq/roamvm/internal/daemon"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	"github.com/dialohq/roamvm/internal/qmp"
+	"github.com/dialohq/roamvm/internal/timing"
 	"golang.org/x/sys/unix"
 )
 
@@ -85,6 +87,7 @@ func Run() error {
 	defer cancel()
 	var response daemon.Response
 	deadline := time.Now().Add(30 * time.Second)
+	prepared := timing.Start("startup.prepare")
 	for {
 		response, err = c.Call(ctx, "prepare")
 		if err == nil {
@@ -101,6 +104,7 @@ func Run() error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+	prepared()
 	if err != nil {
 		c.status("Error", err.Error())
 		return err
@@ -119,7 +123,12 @@ func Run() error {
 		return errors.New("another local runner holds this VM")
 	}
 	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+	if err = hibernate.Clear(p.Dir); err != nil {
+		return err
+	}
+	networked := timing.Start("startup.network")
 	dns, err := network(ctx)
+	networked()
 	if err != nil {
 		c.status("Error", err.Error())
 		return err
@@ -135,7 +144,9 @@ func Run() error {
 			return e
 		}
 	}
+	configured := timing.Start("startup.qemu-config")
 	args, err := qemuArgs(ctx, p, socket)
+	configured()
 	if err != nil {
 		return err
 	}
@@ -144,9 +155,13 @@ func Run() error {
 	hypervisor.Stderr = os.Stderr
 	// A killed runner must not leave a VMM alive holding the writable disk.
 	hypervisor.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-	if err = hypervisor.Start(); err != nil {
+	launched := timing.Start("startup.qemu-launch")
+	err = hypervisor.Start()
+	launched()
+	if err != nil {
 		return err
 	}
+	guestReady := timing.Start("startup.guest-ready")
 	log.Printf("startup stage=hypervisor elapsed=%s", time.Since(started))
 	defer hypervisor.Process.Kill()
 	exited := make(chan error, 1)
@@ -162,6 +177,10 @@ func Run() error {
 	}
 	defer setReady(false)
 	q := qmp.Client(socket)
+	if err = wake(ctx, q, p); err != nil {
+		c.status("Error", "hibernation restore failed; disk retained: "+err.Error())
+		return err
+	}
 	cleanShutdown := false
 	lastContact := time.Now()
 	var lastHeartbeat time.Time
@@ -227,7 +246,15 @@ func Run() error {
 			}
 			if !stopping.IsZero() {
 				if !powerSent {
-					if e := q.Call(context.Background(), "system_powerdown", nil, nil); e == nil {
+					if p.Spec.Hibernate {
+						if e := nap(q, p); e != nil {
+							c.status("Error", "hibernation capture failed; disk retained: "+e.Error())
+							return e
+						}
+						cleanShutdown = true
+						_ = q.Call(context.Background(), "quit", nil, nil)
+						powerSent = true
+					} else if e := q.Call(context.Background(), "system_powerdown", nil, nil); e == nil {
 						powerSent = true
 					}
 				}
@@ -243,6 +270,10 @@ func Run() error {
 					conn.Close()
 					setReady(true)
 					if !runningReported {
+						if guestReady != nil {
+							guestReady()
+							guestReady = nil
+						}
 						log.Printf("startup stage=guest-ready elapsed=%s", time.Since(started))
 						runningReported = c.status("Running", "")
 						tick.Reset(time.Second)

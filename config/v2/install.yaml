@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: roamvm-v2-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller
+  namespace: roamvm-v2-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: roamvm-v2-runtime
+  namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: roamvm-v2-runtime
+  namespace: default
+data:
+  STATE_BACKEND: kubernetes
+  STATE_NAMESPACE: roamvm-v2-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roamvm-v2-controller
+rules:
+- apiGroups: [v2.vm.roamvm.io]
+  resources: [virtualmachines, virtualmachines/status, virtualmachines/finalizers]
+  verbs: [get, list, watch, update, patch]
+- apiGroups: [""]
+  resources: [pods, persistentvolumeclaims]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, patch]
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [roamvm-v2-object-store]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [roamvm-v2-runtime]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: roamvm-v2-controller
+subjects:
+- kind: ServiceAccount
+  name: controller
+  namespace: roamvm-v2-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roamvm-v2-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: leader-election
+  namespace: roamvm-v2-system
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: leader-election
+  namespace: roamvm-v2-system
+subjects:
+- kind: ServiceAccount
+  name: controller
+  namespace: roamvm-v2-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: leader-election
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: roamvm-v2-daemon
+rules:
+- apiGroups: [v2.vm.roamvm.io]
+  resources: [virtualmachines]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, update, patch]
+- apiGroups: [""]
+  resources: [secrets, persistentvolumeclaims]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: roamvm-v2-daemon
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: roamvm-v2-runtime
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: roamvm-v2-daemon
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: state
+  namespace: roamvm-v2-system
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get, create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: state
+  namespace: roamvm-v2-system
+subjects:
+- kind: ServiceAccount
+  name: roamvm-v2-runtime
+  namespace: default
+- kind: ServiceAccount
+  name: controller
+  namespace: roamvm-v2-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: state
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller
+  namespace: roamvm-v2-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: roamvm-v2-controller}
+  template:
+    metadata:
+      labels: {app: roamvm-v2-controller}
+    spec:
+      serviceAccountName: controller
+      containers:
+      - name: controller
+        image: roamvm:dev
+        imagePullPolicy: IfNotPresent
+        args: [--experimental-v2, controller]
+        env:
+        - name: RUNNER_IMAGE
+          value: roamvm:dev
+        - name: GOMEMLIMIT
+          value: 128MiB
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {memory: 256Mi}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        readinessProbe:
+          httpGet: {path: /readyz, port: 8081}
+        livenessProbe:
+          httpGet: {path: /healthz, port: 8081}

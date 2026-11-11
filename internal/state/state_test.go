@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	api "github.com/dialohq/roamvm/api/v1alpha1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -142,6 +143,14 @@ func TestStopRestoreOnAnotherNode(t *testing.T) {
 	if committed.Head.State != "Stopped" || committed.Head.Owner != "" || committed.Head.Checkpoint.Generation != 1 {
 		t.Fatalf("bad commit %+v", committed)
 	}
+	_, e = m.Acquire(ctx, s.Head.VMID, s.Head.Base, "incompatible", "node-b", func(cp *api.Checkpoint) error {
+		require.Equal(t, committed.Head.Checkpoint, cp)
+		return errors.New("incompatible machine")
+	})
+	require.ErrorContains(t, e, "incompatible machine")
+	unchanged, e := m.Read(ctx, s.Head.VMID)
+	require.NoError(t, e)
+	require.Equal(t, committed, unchanged, "rejected restore must not claim ownership")
 	next, e := m.Acquire(ctx, s.Head.VMID, s.Head.Base, "pod-2", "node-b")
 	require.NoError(t, e)
 	restored := filepath.Join(t.TempDir(), "overlay")

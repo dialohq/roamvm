@@ -8,9 +8,45 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/dialohq/roamvm/internal/timing"
 )
 
 type Client string
+
+// Snapshot waits for the asynchronous QEMU job, including its error result.
+// Callers stop CPUs first and do not resume them after a save.
+func (c Client) Snapshot(ctx context.Context, action, tag string) error {
+	defer timing.Start("qmp." + action)()
+	args := map[string]any{"job-id": action, "tag": tag, "devices": []string{"root"}}
+	if action != "snapshot-delete" {
+		args["vmstate"] = "root"
+	}
+	if err := c.Call(ctx, action, args, nil); err != nil {
+		return err
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var jobs []struct{ ID, Status, Error string }
+		if err := c.Call(ctx, "query-jobs", nil, &jobs); err != nil {
+			return err
+		}
+		for _, job := range jobs {
+			if job.ID == action && job.Status == "concluded" {
+				if job.Error != "" {
+					return fmt.Errorf("%s: %s", action, job.Error)
+				}
+				return c.Call(ctx, "job-dismiss", map[string]any{"id": action}, nil)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
 
 func (c Client) Call(ctx context.Context, command string, arguments any, result any) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", string(c))
@@ -19,7 +55,7 @@ func (c Client) Call(ctx context.Context, command string, arguments any, result 
 	}
 	defer conn.Close()
 	deadline := time.Now().Add(3 * time.Second)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+	if d, ok := ctx.Deadline(); ok {
 		deadline = d
 	}
 	if err = conn.SetDeadline(deadline); err != nil {

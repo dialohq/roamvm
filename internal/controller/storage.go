@@ -90,7 +90,7 @@ func (r *Reconciler) ensureWorkingPVC(ctx context.Context, vm *api.VirtualMachin
 	if vm.Status.Local != nil && vm.Status.Local.ClaimName == name {
 		return fmt.Errorf("retained working PVC is missing; refusing an empty local restart")
 	}
-	size, err := workingSize(r.StorageSize, vm.Spec.RootDiskSize)
+	size, err := workingSize(r.StorageSize, vm.Spec)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (r *Reconciler) ensureWorkingPVC(ctx context.Context, vm *api.VirtualMachin
 	return r.Create(ctx, &pvc)
 }
 
-func workingSize(floor, root string) (resource.Quantity, error) {
+func workingSize(floor string, spec api.VirtualMachineSpec) (resource.Quantity, error) {
 	if floor == "" {
 		floor = "64Gi"
 	}
@@ -116,7 +116,7 @@ func workingSize(floor, root string) (resource.Quantity, error) {
 	if err != nil || size.Sign() <= 0 {
 		return size, fmt.Errorf("invalid working storage size %q", floor)
 	}
-	required, err := api.WorkingBytes(root)
+	required, err := api.WorkingBytes(spec)
 	if err != nil {
 		return size, err
 	}
@@ -130,7 +130,7 @@ func (r *Reconciler) expandWorkingPVC(ctx context.Context, vm *api.VirtualMachin
 	if vm.Spec.RootDiskSize == "" {
 		return nil
 	}
-	desired, err := workingSize(r.StorageSize, vm.Spec.RootDiskSize)
+	desired, err := workingSize(r.StorageSize, vm.Spec)
 	if err != nil {
 		return err
 	}

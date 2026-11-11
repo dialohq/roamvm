@@ -34,6 +34,21 @@ func TestWorkingPVCExpansion(t *testing.T) {
 	require.Error(t, r.expandWorkingPVC(t.Context(), vm, &pod), "accepted foreign PVC")
 }
 
+func TestHibernationReservesStorageAndRejectsUnsupportedDevices(t *testing.T) {
+	r, vm := setup(t, true)
+	r.StorageSize = "1Gi"
+	vm.Spec.RootDiskSize, vm.Spec.Memory = "2Gi", "512Mi"
+	vm.Spec.Hibernate = true
+	require.NoError(t, r.createPod(t.Context(), vm))
+	var pod core.Pod
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: vm.Status.PodName}, &pod))
+	var pvc core.PersistentVolumeClaim
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: vm.Namespace, Name: WorkingClaim(&pod)}, &pvc))
+	require.EqualValues(t, (3<<30)+(640<<20), pvc.Spec.Resources.Requests.Storage().Value())
+	vm.Spec.Disks = []api.SecondaryDisk{{Name: "data", ClaimName: "data"}}
+	require.ErrorContains(t, r.createPod(t.Context(), vm), "root-only")
+}
+
 func TestDiskSizeValidation(t *testing.T) {
 	for _, size := range []string{"0", "-1Gi", "17Ti", "513", "1m", "junk"} {
 		if _, err := api.DiskBytes(size); err == nil {

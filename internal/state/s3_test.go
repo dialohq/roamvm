@@ -26,7 +26,14 @@ func TestObjectStoreCheckpointReplacement(t *testing.T) {
 	defer cancel()
 	objects, err := NewS3(ctx, endpoint, os.Getenv("TEST_OBJECT_STORE_BUCKET"))
 	require.NoError(t, err)
-	testStoreReplacement(t, ctx, retentionManager(objects, "kubernetes"), objects)
+	m := retentionManager(objects, "kubernetes")
+	id := testStoreReplacement(t, ctx, m, objects)
+	require.NoError(t, m.DeleteVM(ctx, id))
+	keys, err := objects.List(ctx, "vm/"+id+"/")
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	_, err = m.Read(ctx, id)
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func testStoreReplacement(t *testing.T, ctx context.Context, m Manager, objects *S3) string {
@@ -103,6 +110,32 @@ func TestS3VersionedCheckpointReplacement(t *testing.T) {
 	if len(versions.Versions) != 1 || len(versions.DeleteMarkers) != 0 {
 		t.Fatal("old disk versions were hidden rather than deleted", versions)
 	}
+	// Include old overwritten versions and a hidden object. Ordinary key listing
+	// or DeleteObject without VersionId would leave both consuming storage.
+	prefix := "vm/" + id + "/"
+	key := prefix + "abandoned"
+	for range 2 {
+		_, err = store.Client.PutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &key, Body: bytes.NewReader([]byte("private"))})
+		require.NoError(t, err)
+	}
+	_, err = store.Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucket, Key: &key})
+	require.NoError(t, err)
+	other := "vm/" + id + "-other/keep"
+	_, err = store.Put(ctx, other, bytes.NewReader([]byte("keep")), 4, "")
+	require.NoError(t, err)
+	require.NoError(t, (Manager{store}).DeleteVM(ctx, id))
+	versions, err = store.Client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: &prefix})
+	require.NoError(t, err)
+	require.Empty(t, versions.Versions)
+	require.Empty(t, versions.DeleteMarkers)
+	require.NoError(t, (Manager{store}).DeleteVM(ctx, id), "a retry must not leave head versions or delete markers")
+	versions, err = store.Client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: &prefix})
+	require.NoError(t, err)
+	require.Empty(t, versions.Versions)
+	require.Empty(t, versions.DeleteMarkers)
+	kept, err := store.Get(ctx, other)
+	require.NoError(t, err)
+	kept.Body.Close()
 }
 
 func TestS3ConditionalAndMultipart(t *testing.T) {

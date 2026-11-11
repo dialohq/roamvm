@@ -11,7 +11,9 @@ import (
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/disk"
 	"github.com/dialohq/roamvm/internal/fileio"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	"github.com/dialohq/roamvm/internal/images"
+	"github.com/dialohq/roamvm/internal/timing"
 	"golang.org/x/sys/unix"
 	core "k8s.io/api/core/v1"
 )
@@ -36,6 +38,7 @@ func lockDisk(dir string) (*os.File, error) {
 // stopLocal is called only after QEMU exits, while the caller holds runner.lock.
 // No object-store operation is needed to acknowledge a local stop.
 func (s *Server) stopLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) error {
+	defer timing.Start("disk.local-stop")()
 	p, err := s.load(string(pod.UID))
 	if err != nil {
 		return err
@@ -48,6 +51,10 @@ func (s *Server) stopLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMa
 		return err
 	}
 	if err = fileio.SyncClose(f, nil); err != nil {
+		return err
+	}
+	p.Hibernation, err = hibernate.Load(p.Dir, string(pod.UID))
+	if err != nil {
 		return err
 	}
 	p.Stopped = true
@@ -91,6 +98,7 @@ func (s *Server) stoppedLocal(owner string, vm *api.VirtualMachine) (Prepared, e
 }
 
 func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine, base images.Base, spec api.VirtualMachineSpec) (*Prepared, error) {
+	defer timing.Start("disk.local-resume")()
 	owner := pod.Annotations[controller.LocalOwnerAnnotation]
 	p, err := s.stoppedLocal(owner, vm)
 	if err != nil {
@@ -98,6 +106,9 @@ func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.Virtual
 	}
 	if controller.WorkingClaim(pod) != vm.Status.Local.ClaimName {
 		return nil, errors.New("local checkpoint claim mismatch")
+	}
+	if err = hibernate.Check(ctx, spec, p.Hibernation); err != nil {
+		return nil, err
 	}
 	lock, err := lockDisk(p.Dir)
 	if err != nil {
@@ -114,6 +125,7 @@ func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.Virtual
 		return nil, err
 	}
 	prepared := Prepared{Session: session, Base: base, Dir: p.Dir, Spec: spec, PodUID: string(pod.UID)}
+	prepared.Hibernation = p.Hibernation
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
@@ -162,7 +174,11 @@ func (s *Server) CheckpointLocal(ctx context.Context) error {
 		}
 		path := filepath.Join(p.Dir, "overlay.qcow2")
 		if err = disk.Check(ctx, path); err == nil {
-			current, err = s.State.Commit(ctx, p.Session, path)
+			if api.IsV2(s.Client.Scheme()) {
+				current, err = s.State.Snapshot(ctx, p.Session, path, p.Hibernation)
+			} else {
+				current, err = s.State.Commit(ctx, p.Session, path)
+			}
 		}
 	}
 	if err != nil {

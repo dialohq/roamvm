@@ -35,10 +35,15 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 		pages := resource.MustParse(p.Spec.Hugepages)
 		args = append(args, "-object", "memory-backend-memfd,id=ram,size="+strconv.FormatInt(memory.Value(), 10)+",hugetlb=on,hugetlbsize="+strconv.FormatInt(pages.Value(), 10)+",prealloc=on,share=on", "-machine", "memory-backend=ram")
 	}
+	if p.Hibernation != nil && p.Spec.Hibernate {
+		args = append(args, "-S")
+	}
 	file := func(path string, writable bool) map[string]any {
 		node := map[string]any{"driver": "file", "filename": path}
 		if writable {
-			node["cache"] = map[string]any{"direct": true, "no-flush": false}
+			// RAM restore makes many small reads. Retain the node's evictable
+			// page cache for hibernating roots, while honoring every guest flush.
+			node["cache"] = map[string]any{"direct": !p.Spec.Hibernate, "no-flush": false}
 		}
 		return node
 	}

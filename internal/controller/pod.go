@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -17,10 +18,16 @@ import (
 )
 
 func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) error {
+	if vm.Spec.Hibernate && !api.IsV2(r.Scheme) {
+		return fmt.Errorf("hibernation requires --experimental-v2 and the v2 API")
+	}
+	if err := hibernate.Validate(vm.Spec); err != nil {
+		return err
+	}
 	for _, disk := range vm.Spec.ProjectedDisks() {
 		for _, source := range disk.Projection.Sources {
 			if source.ServiceAccountToken != nil || source.PodCertificate != nil ||
-				(source.Secret != nil && source.Secret.Name == "roamvm-object-store") {
+				(source.Secret != nil && (source.Secret.Name == "roamvm-object-store" || source.Secret.Name == "roamvm-v2-object-store")) {
 				return fmt.Errorf("VM configuration cannot project runtime credentials")
 			}
 		}
@@ -112,7 +119,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		return err
 	}
 	pod.Spec = core.PodSpec{
-		ServiceAccountName:            "roamvm-runtime",
+		ServiceAccountName:            runtimeName(r.Scheme, "runtime"),
 		RestartPolicy:                 core.RestartPolicyNever,
 		AutomountServiceAccountToken:  ptr.To(false),
 		TerminationGracePeriodSeconds: ptr.To(int64(3600)),
@@ -131,7 +138,15 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 			Name:            "runner",
 			Image:           r.Image,
 			ImagePullPolicy: core.PullIfNotPresent,
-			Args:            []string{"runner"},
+			Args:            runtimeArgs(r.Scheme, "runner"),
+			Env: []core.EnvVar{
+				fieldEnv("POD_UID", "metadata.uid"),
+				{Name: "VM_UID", Value: string(vm.UID)},
+				{Name: "ORBVM_TRACE", ValueFrom: &core.EnvVarSource{ConfigMapKeyRef: &core.ConfigMapKeySelector{
+					LocalObjectReference: core.LocalObjectReference{Name: runtimeName(r.Scheme, "runtime")},
+					Key:                  "ORBVM_TRACE", Optional: ptr.To(true),
+				}}},
+			},
 			Resources:       resources,
 			SecurityContext: containerSecurityContext("NET_ADMIN", "NET_RAW"),
 			ReadinessProbe: &core.Probe{
@@ -217,7 +232,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		Name:            "runtime",
 		Image:           r.Image,
 		ImagePullPolicy: core.PullIfNotPresent,
-		Args:            []string{"daemon"},
+		Args:            runtimeArgs(r.Scheme, "daemon"),
 		RestartPolicy:   ptr.To(core.ContainerRestartPolicyOnFailure),
 		Env: []core.EnvVar{
 			fieldEnv("NODE_NAME", "spec.nodeName"),
@@ -230,13 +245,13 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		EnvFrom: []core.EnvFromSource{
 			{
 				ConfigMapRef: &core.ConfigMapEnvSource{
-					LocalObjectReference: core.LocalObjectReference{Name: "roamvm-runtime"},
+					LocalObjectReference: core.LocalObjectReference{Name: runtimeName(r.Scheme, "runtime")},
 					Optional:             ptr.To(true),
 				},
 			},
 			{
 				SecretRef: &core.SecretEnvSource{
-					LocalObjectReference: core.LocalObjectReference{Name: "roamvm-object-store"},
+					LocalObjectReference: core.LocalObjectReference{Name: runtimeName(r.Scheme, "object-store")},
 				},
 			},
 		},
@@ -256,7 +271,7 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		},
 	}
 	if token := vm.Spec.GuestServiceAccountToken; token != nil {
-		if token.Name == "" || token.Name == "roamvm-runtime" || len(token.Audiences) == 0 {
+		if token.Name == "" || token.Name == "roamvm-runtime" || token.Name == "roamvm-v2-runtime" || len(token.Audiences) == 0 {
 			return fmt.Errorf("guest token requires a separate service account and audiences")
 		}
 		for _, audience := range token.Audiences {

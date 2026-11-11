@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -47,7 +48,11 @@ type Reconciler struct {
 }
 
 func (r *Reconciler) Setup(m ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(m).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Owns(&core.PersistentVolumeClaim{}).Complete(r)
+	options := controlleroptions.Options{}
+	if api.IsV2(r.Scheme) {
+		options.MaxConcurrentReconciles = 4
+	}
+	return ctrl.NewControllerManagedBy(m).WithOptions(options).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Owns(&core.PersistentVolumeClaim{}).Complete(r)
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -151,6 +156,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				}
 				if len(workers) > 0 {
 					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				if api.IsV2(r.Scheme) {
+					if err := r.cleanup(ctx, &vm); err != nil {
+						return ctrl.Result{}, err
+					}
 				}
 				if vm.Status.Local != nil {
 					pvc := &core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: vm.Status.Local.ClaimName, Namespace: vm.Namespace}}

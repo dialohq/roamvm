@@ -11,14 +11,33 @@ import (
 )
 
 var (
-	GroupVersion  = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
-	SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
+	GroupVersion   = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
+	V2GroupVersion = schema.GroupVersion{Group: "v2.vm.roamvm.io", Version: "v1alpha1"}
+	SchemeBuilder  = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
 		s.AddKnownTypes(GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
 		metav1.AddToGroupVersion(s, GroupVersion)
 		return nil
 	})
 )
 var AddToScheme = SchemeBuilder.AddToScheme
+
+// AddV2ToScheme registers the experimental API instead of the legacy API.
+// They are distinct resources, not converted versions of the same CRD. A
+// process registers only one group so typed clients cannot select the other.
+func AddV2ToScheme(s *runtime.Scheme) error {
+	s.AddKnownTypes(V2GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
+	metav1.AddToGroupVersion(s, V2GroupVersion)
+	return nil
+}
+
+func IsV2(s *runtime.Scheme) bool { return s.Recognizes(V2GroupVersion.WithKind("VirtualMachine")) }
+
+func APIVersion(s *runtime.Scheme) string {
+	if IsV2(s) {
+		return V2GroupVersion.String()
+	}
+	return GroupVersion.String()
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -42,6 +61,10 @@ type VirtualMachineSpec struct {
 	// +kubebuilder:validation:Enum=Running;Stopped
 	// +kubebuilder:default=Stopped
 	PowerState string `json:"powerState"`
+	// Hibernate preserves RAM and processes when stopped. Disable to deliberately
+	// cold boot the retained disk instead. Requires a root-only, migratable guest.
+	// +kubebuilder:validation:XValidation:rule="self == false",message="hibernation requires the experimental v2 API"
+	Hibernate bool `json:"hibernate,omitempty"`
 	// Image is an OCI image containing /disk/root.raw or root.qcow2 and boot files.
 	// +kubebuilder:validation:Pattern=`^.+@sha256:[a-f0-9]{64}$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="the immutable base cannot change; create a new VM"
@@ -142,6 +165,17 @@ type Checkpoint struct {
 	SHA256     string `json:"sha256"`
 	Size       int64  `json:"size"`
 	VersionID  string `json:"versionID,omitempty"`
+	// Empty denotes a legacy whole-file checkpoint. chunks-v1 hashes the manifest.
+	Format      string       `json:"format,omitempty"`
+	Hibernation *Hibernation `json:"hibernation,omitempty"`
+}
+
+// Hibernation pins the machine whose RAM is in the root disk's internal snapshot.
+// Restoring a different machine is rejected, not silently converted into a boot.
+type Hibernation struct {
+	Config string `json:"config"`
+	QEMU   string `json:"qemu"`
+	CPU    string `json:"cpu"`
 }
 
 // LocalCheckpoint identifies the retained, node-local working disk containing

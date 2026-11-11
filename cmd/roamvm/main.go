@@ -47,25 +47,38 @@ func env(k, fallback string) string {
 	return fallback
 }
 
-func scheme() *runtime.Scheme {
+func scheme(v2 bool) *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = core.AddToScheme(s)
 	_ = authentication.AddToScheme(s)
-	_ = api.AddToScheme(s)
+	if v2 {
+		_ = api.AddV2ToScheme(s)
+	} else {
+		_ = api.AddToScheme(s)
+	}
 	return s
 }
 
-func kubeClient() (client.Client, error) {
-	return client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme()})
+func kubeClient(v2 bool) (client.Client, error) {
+	return client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme(v2)})
 }
 
 func run() error {
-	if len(os.Args) < 2 {
-		return errors.New("usage: roamvm controller|daemon|checkpoint|checkpoint-worker|runner|device-plugin|start|stop|image-push|state|recover")
+	args := os.Args[1:]
+	v2 := len(args) > 0 && args[0] == "--experimental-v2"
+	if v2 {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return errors.New("usage: roamvm [--experimental-v2] controller|daemon|checkpoint|checkpoint-worker|runner|device-plugin|start|stop|image-push|state|recover")
 	}
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	ctx := ctrl.SetupSignalHandler()
-	switch os.Args[1] {
+	prefix := "roamvm"
+	if v2 {
+		prefix = "roamvm-v2"
+	}
+	switch args[0] {
 	case "runner":
 		return runner.Run()
 	case "device-plugin":
@@ -74,10 +87,11 @@ func run() error {
 		m, err := ctrl.NewManager(
 			ctrl.GetConfigOrDie(),
 			ctrl.Options{
-				Scheme:                  scheme(),
+				Scheme:                  scheme(v2),
+				Client:                  client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&core.Secret{}, &core.ConfigMap{}}}},
 				LeaderElection:          true,
-				LeaderElectionID:        "roamvm-controller",
-				LeaderElectionNamespace: env("POD_NAMESPACE", "roamvm-system"),
+				LeaderElectionID:        prefix + "-controller",
+				LeaderElectionNamespace: env("POD_NAMESPACE", prefix+"-system"),
 				Metrics:                 metrics.Options{BindAddress: ":8080"},
 				HealthProbeBindAddress:  ":8081",
 			},
@@ -99,7 +113,7 @@ func run() error {
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
 	case "daemon", "checkpoint", "checkpoint-worker":
-		c, err := kubeClient()
+		c, err := kubeClient(v2)
 		if err != nil {
 			return err
 		}
@@ -127,7 +141,7 @@ func run() error {
 		}
 		// Local stop and same-node resume do not need the object data path.
 		// Validate it in the independent upload process instead of blocking boot.
-		if os.Args[1] != "daemon" {
+		if args[0] != "daemon" {
 			if kubernetes, ok := backend.(*state.Kubernetes); ok {
 				probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 				err = kubernetes.CheckObjects(probeCtx, "runtime-probes/"+rand.Text())
@@ -139,23 +153,23 @@ func run() error {
 				return fmt.Errorf("unsafe or unavailable object store: %w", err)
 			}
 		}
-		if os.Args[1] == "checkpoint-worker" {
+		if args[0] == "checkpoint-worker" {
 			return server.CheckpointLocal(ctx)
 		}
-		if os.Args[1] == "checkpoint" {
+		if args[0] == "checkpoint" {
 			return server.CheckpointTerminatedRunner(ctx)
 		}
 		return server.Serve(ctx, "/run/roamvm/runtime.sock")
 	case "start", "stop":
-		f := flag.NewFlagSet(os.Args[1], flag.ContinueOnError)
+		f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		ns := f.String("namespace", "default", "VM namespace")
-		if err := f.Parse(os.Args[2:]); err != nil {
+		if err := f.Parse(args[1:]); err != nil {
 			return err
 		}
 		if f.NArg() != 1 {
 			return errors.New("specify one VM name")
 		}
-		c, err := kubeClient()
+		c, err := kubeClient(v2)
 		if err != nil {
 			return err
 		}
@@ -165,18 +179,18 @@ func run() error {
 		}
 		before := vm.DeepCopy()
 		vm.Spec.PowerState = "Running"
-		if os.Args[1] == "stop" {
+		if args[0] == "stop" {
 			vm.Spec.PowerState = "Stopped"
 		}
 		return c.Patch(ctx, &vm, client.MergeFrom(before))
 	case "image-push":
-		return push(ctx, os.Args[2:])
+		return push(ctx, args[1:])
 	case "state", "recover":
-		f := flag.NewFlagSet(os.Args[1], flag.ContinueOnError)
+		f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		id := f.String("vm-id", "", "Kubernetes VM UID")
 		owner := f.String("owner", "", "exact previous Pod UID")
 		fenced := f.Bool("fenced", false, "confirm the previous VMM is terminated or its node physically fenced")
-		if err := f.Parse(os.Args[2:]); err != nil {
+		if err := f.Parse(args[1:]); err != nil {
 			return err
 		}
 		if *id == "" {
@@ -187,8 +201,8 @@ func run() error {
 			return err
 		}
 		var c client.Client
-		if os.Args[1] == "recover" || os.Getenv("STATE_BACKEND") == "kubernetes" {
-			c, err = kubeClient()
+		if args[0] == "recover" || os.Getenv("STATE_BACKEND") == "kubernetes" {
+			c, err = kubeClient(v2)
 			if err != nil {
 				return err
 			}
@@ -199,7 +213,7 @@ func run() error {
 		}
 		m := state.Manager{Store: backend}
 		var session state.Session
-		if os.Args[1] == "recover" {
+		if args[0] == "recover" {
 			if !*fenced || *owner == "" {
 				return errors.New("recovery requires --fenced and the exact --owner; a timeout is not fencing")
 			}
@@ -212,7 +226,7 @@ func run() error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(session.Head)
 	default:
-		return fmt.Errorf("unknown command %q", os.Args[1])
+		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
@@ -224,7 +238,11 @@ func metadataStore(objects state.Store, c client.Client) (state.Store, error) {
 		if c == nil {
 			return nil, errors.New("Kubernetes metadata requires a Kubernetes client")
 		}
-		return &state.Kubernetes{Client: c, Namespace: env("STATE_NAMESPACE", "roamvm-system"), Objects: objects}, nil
+		namespace := "roamvm-system"
+		if api.IsV2(c.Scheme()) {
+			namespace = "roamvm-v2-system"
+		}
+		return &state.Kubernetes{Client: c, Namespace: env("STATE_NAMESPACE", namespace), Objects: objects}, nil
 	default:
 		return nil, errors.New("STATE_BACKEND must be s3 or kubernetes")
 	}
