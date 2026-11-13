@@ -22,6 +22,8 @@ import (
 
 	"github.com/dialohq/roamvm/internal/daemon"
 	"github.com/dialohq/roamvm/internal/hibernate"
+	"github.com/dialohq/roamvm/internal/pager"
+	"github.com/dialohq/roamvm/internal/qcow"
 	"github.com/dialohq/roamvm/internal/qmp"
 	"github.com/dialohq/roamvm/internal/timing"
 	"golang.org/x/sys/unix"
@@ -126,6 +128,21 @@ func Run() error {
 	if err = hibernate.Clear(p.Dir); err != nil {
 		return err
 	}
+	p.PagerDir = "/run/roamvm/pager"
+	files, unmount, err := pager.Mount(ctx, chunkSource{client: c.HTTP}, p.Dir, p.PagerDir, []string{"overlay.qcow2", hibernate.RAM})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := unmount(); err != nil {
+			log.Printf("unmount pager: %v", err)
+		}
+	}()
+	if files["overlay.qcow2"] != nil {
+		if err = qcow.Validate(storagePath(p, "overlay.qcow2"), false); err != nil {
+			return err
+		}
+	}
 	networked := timing.Start("startup.network")
 	dns, err := network(ctx)
 	networked()
@@ -180,6 +197,9 @@ func Run() error {
 	if err = wake(ctx, q, p); err != nil {
 		c.status("Error", "hibernation restore failed; disk retained: "+err.Error())
 		return err
+	}
+	for name, file := range files {
+		log.Printf("startup stage=restored file=%s fetched_bytes=%d", name, file.Fetched())
 	}
 	cleanShutdown := false
 	lastContact := time.Now()
@@ -247,7 +267,7 @@ func Run() error {
 			if !stopping.IsZero() {
 				if !powerSent {
 					if p.Spec.Hibernate {
-						if e := nap(q, p); e != nil {
+						if e := nap(q, p, hypervisor.Process.Pid); e != nil {
 							c.status("Error", "hibernation capture failed; disk retained: "+e.Error())
 							return e
 						}
@@ -275,6 +295,9 @@ func Run() error {
 							guestReady = nil
 						}
 						log.Printf("startup stage=guest-ready elapsed=%s", time.Since(started))
+						for name, file := range files {
+							log.Printf("startup stage=guest-ready file=%s fetched_bytes=%d", name, file.Fetched())
+						}
 						runningReported = c.status("Running", "")
 						tick.Reset(time.Second)
 					}

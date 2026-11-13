@@ -165,6 +165,10 @@ spec:
         env:
         - name: RUNNER_IMAGE
           value: roamvm:dev
+        - name: WARM_CACHE_TTL
+          value: 1h
+        - name: WARM_CACHE_SIZE
+          value: 256Gi
         - name: GOMEMLIMIT
           value: 128MiB
         resources:

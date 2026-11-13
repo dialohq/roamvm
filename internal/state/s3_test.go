@@ -101,7 +101,7 @@ func TestS3VersionedCheckpointReplacement(t *testing.T) {
 	if _, err = store.Client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{Bucket: &bucket, VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled}}); err != nil {
 		t.Fatal(err)
 	}
-	id := testStoreReplacement(t, ctx, Manager{store}, store)
+	id := testStoreReplacement(t, ctx, Manager{Store: store}, store)
 	versions, err := store.Client.ListObjectVersions(
 		ctx,
 		&s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: aws.String("vm/" + id + "/overlay/")},
@@ -123,12 +123,12 @@ func TestS3VersionedCheckpointReplacement(t *testing.T) {
 	other := "vm/" + id + "-other/keep"
 	_, err = store.Put(ctx, other, bytes.NewReader([]byte("keep")), 4, "")
 	require.NoError(t, err)
-	require.NoError(t, (Manager{store}).DeleteVM(ctx, id))
+	require.NoError(t, (Manager{Store: store}).DeleteVM(ctx, id))
 	versions, err = store.Client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: &prefix})
 	require.NoError(t, err)
 	require.Empty(t, versions.Versions)
 	require.Empty(t, versions.DeleteMarkers)
-	require.NoError(t, (Manager{store}).DeleteVM(ctx, id), "a retry must not leave head versions or delete markers")
+	require.NoError(t, (Manager{Store: store}).DeleteVM(ctx, id), "a retry must not leave head versions or delete markers")
 	versions, err = store.Client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: &bucket, Prefix: &prefix})
 	require.NoError(t, err)
 	require.Empty(t, versions.Versions)

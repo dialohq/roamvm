@@ -30,6 +30,9 @@ func (m Manager) DeleteVM(ctx context.Context, id string) error {
 			return err
 		}
 	}
+	if err := m.pruneShared(ctx, s, true); err != nil {
+		return err
+	}
 	return purgePrefix(ctx, m.Store, "vm/"+id+"/")
 }
 

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -63,5 +64,19 @@ func (r *Reconciler) cleanup(ctx context.Context, vm *api.VirtualMachine) error 
 	default:
 		return fmt.Errorf("STATE_BACKEND must be s3 or kubernetes")
 	}
-	return (state.Manager{Store: store}).DeleteVM(ctx, string(vm.UID))
+	m := state.Manager{Store: store}
+	if vm.Spec.CloneFrom != nil && vm.Status.Checkpoint == nil && vm.Status.Local == nil && vm.Status.PodName == "" {
+		// No runner can start before the first clone checkpoint commits. Copy
+		// workers have all exited; fencing their CAS needs no hypervisor recovery.
+		head, err := m.Read(ctx, string(vm.UID))
+		if err != nil && !errors.Is(err, state.ErrNotFound) {
+			return err
+		}
+		if head.Head.Owner == "clone-"+string(vm.UID) {
+			if _, err := m.Recover(ctx, string(vm.UID), head.Head.Owner); err != nil {
+				return err
+			}
+		}
+	}
+	return m.DeleteVM(ctx, string(vm.UID))
 }

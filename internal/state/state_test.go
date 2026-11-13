@@ -105,7 +105,7 @@ func (s *memoryStore) Put(ctx context.Context, key string, r io.ReadSeeker, size
 func fixture(t *testing.T) (context.Context, Manager, Session, string) {
 	t.Helper()
 	ctx := context.Background()
-	m := Manager{newMemory()}
+	m := Manager{Store: newMemory()}
 	s, e := m.Acquire(ctx, "vm-1", "registry/base@sha256:abc", "pod-1", "node-a")
 	require.NoError(t, e)
 	file := filepath.Join(t.TempDir(), "overlay")
@@ -115,7 +115,7 @@ func fixture(t *testing.T) (context.Context, Manager, Session, string) {
 
 func TestExclusiveOwnership(t *testing.T) {
 	ctx := context.Background()
-	m := Manager{newMemory()}
+	m := Manager{Store: newMemory()}
 	var winners atomic.Int32
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {

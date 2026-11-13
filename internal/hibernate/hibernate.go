@@ -17,7 +17,17 @@ import (
 	"github.com/dialohq/roamvm/internal/fileio"
 )
 
-const Tag = "roamvm-hibernate"
+const (
+	Tag      = "roamvm-hibernate"
+	External = "external-v1"
+	Private  = "external-private-v1"
+	RAM      = "ram.bin"
+	Devices  = "devices.bin"
+)
+
+func HasExternalRAM(saved *api.Hibernation) bool {
+	return saved != nil && (saved.Layout == External || saved.Layout == Private)
+}
 
 func Validate(spec api.VirtualMachineSpec) error {
 	if spec.Hibernate && (len(spec.Disks) != 0 || len(spec.Devices) != 0 || len(spec.ProjectedDisks()) != 0 || spec.GuestServiceAccountToken != nil) {
@@ -38,7 +48,8 @@ func Identity(ctx context.Context, spec api.VirtualMachineSpec) (api.Hibernation
 	config, err := json.Marshal(struct {
 		Image, BootMode, Hostname, Memory, Hugepages, RootDiskSize string
 		CPUs                                                       int32
-	}{spec.Image, spec.BootMode, spec.Hostname, spec.Memory, spec.Hugepages, spec.RootDiskSize, spec.CPUs})
+		GuestAgent                                                 bool `json:"GuestAgent,omitempty"`
+	}{spec.Image, spec.BootMode, spec.Hostname, spec.Memory, spec.Hugepages, spec.RootDiskSize, spec.CPUs, spec.GuestAgent})
 	if err != nil {
 		return api.Hibernation{}, err
 	}
@@ -132,6 +143,10 @@ func Check(ctx context.Context, spec api.VirtualMachineSpec, saved *api.Hibernat
 	if err != nil {
 		return err
 	}
+	if saved.Layout != "" && !HasExternalRAM(saved) {
+		return errors.New("unsupported hibernation layout")
+	}
+	current.Layout = saved.Layout
 	if current != *saved {
 		return errors.New("hibernation configuration, QEMU or CPU changed; disable hibernation to deliberately cold boot")
 	}

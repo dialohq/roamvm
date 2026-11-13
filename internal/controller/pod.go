@@ -67,8 +67,8 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		deviceCounts[core.ResourceName(device.ResourceName)]++
 	}
 	for key, n := range deviceCounts {
-		if key == "vm.roamvm.io/kvm" {
-			return fmt.Errorf("reserved KVM resource")
+		if key == "vm.roamvm.io/kvm" || key == "vm.roamvm.io/fuse" {
+			return fmt.Errorf("reserved runtime device resource")
 		}
 		q, ok := resources.Limits[key]
 		if !ok || q.Value() < n {
@@ -77,6 +77,10 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 	}
 	resources.Requests["vm.roamvm.io/kvm"] = resource.MustParse("1")
 	resources.Limits["vm.roamvm.io/kvm"] = resource.MustParse("1")
+	if api.IsV2(r.Scheme) {
+		resources.Requests["vm.roamvm.io/fuse"] = resource.MustParse("1")
+		resources.Limits["vm.roamvm.io/fuse"] = resource.MustParse("1")
+	}
 	if q, ok := resources.Requests[core.ResourceMemory]; !ok {
 		resources.Requests[core.ResourceMemory] = required
 	} else if q.Cmp(required) < 0 {
@@ -177,6 +181,11 @@ func (r *Reconciler) createPod(ctx context.Context, vm *api.VirtualMachine) erro
 		}
 	}
 	runner := &pod.Spec.Containers[0]
+	if api.IsV2(r.Scheme) {
+		// Mount only inside the runner's namespace; neither privileged mode nor
+		// host mount propagation is needed for the disk/RAM fault server.
+		runner.SecurityContext.Capabilities.Add = append(runner.SecurityContext.Capabilities.Add, "SYS_ADMIN")
+	}
 	mount := func(name, path string, source core.VolumeSource, readOnly bool) {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, core.Volume{Name: name, VolumeSource: source})
 		runner.VolumeMounts = append(

@@ -22,8 +22,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"golang.org/x/sync/errgroup"
 	authentication "k8s.io/api/authentication/v1"
 	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -79,11 +81,38 @@ func run() error {
 		prefix = "roamvm-v2"
 	}
 	switch args[0] {
+	case "orb-dispatch":
+		if !v2 {
+			return errors.New("orb-dispatch requires --experimental-v2")
+		}
+		return orbDispatch(ctx)
+	case "guest-bootstrap":
+		return guestBootstrap(ctx, args[1:])
 	case "runner":
 		return runner.Run()
 	case "device-plugin":
-		return (&device.Plugin{Slots: 1024}).Run(ctx, "/var/lib/kubelet/device-plugins")
+		if !v2 {
+			return (&device.Plugin{Slots: 1024}).Run(ctx, "/var/lib/kubelet/device-plugins")
+		}
+		group, ctx := errgroup.WithContext(ctx)
+		group.Go(func() error { return (&device.Plugin{Slots: 1024}).Run(ctx, "/var/lib/kubelet/device-plugins") })
+		group.Go(func() error {
+			return (&device.Plugin{Slots: 1024, Fuse: true}).Run(ctx, "/var/lib/kubelet/device-plugins")
+		})
+		return group.Wait()
 	case "controller":
+		warmTTL := "0s"
+		if v2 {
+			warmTTL = "1h"
+		}
+		ttl, err := time.ParseDuration(env("WARM_CACHE_TTL", warmTTL))
+		if err != nil || ttl < 0 {
+			return errors.New("WARM_CACHE_TTL must be a nonnegative duration")
+		}
+		budget, err := resource.ParseQuantity(env("WARM_CACHE_SIZE", "0"))
+		if err != nil || budget.Sign() < 0 {
+			return errors.New("WARM_CACHE_SIZE must be a nonnegative storage quantity")
+		}
 		m, err := ctrl.NewManager(
 			ctrl.GetConfigOrDie(),
 			ctrl.Options{
@@ -105,6 +134,8 @@ func run() error {
 			Image:        env("RUNNER_IMAGE", "roamvm:dev"),
 			StorageClass: os.Getenv("WORKING_STORAGE_CLASS"),
 			StorageSize:  env("WORKING_STORAGE_SIZE", "64Gi"),
+			WarmTTL:      ttl,
+			WarmBytes:    budget.Value(),
 		}
 		if err = r.Setup(m); err != nil {
 			return err
@@ -112,7 +143,7 @@ func run() error {
 		_ = m.AddHealthzCheck("healthz", healthz.Ping)
 		_ = m.AddReadyzCheck("readyz", healthz.Ping)
 		return m.Start(ctx)
-	case "daemon", "checkpoint", "checkpoint-worker":
+	case "daemon", "checkpoint", "checkpoint-worker", "clone-worker":
 		c, err := kubeClient(v2)
 		if err != nil {
 			return err
@@ -133,7 +164,7 @@ func run() error {
 			VMUID:   os.Getenv("VM_UID"),
 			Pod:     types.NamespacedName{Namespace: os.Getenv("POD_NAMESPACE"), Name: os.Getenv("POD_NAME")},
 			Root:    root,
-			State:   state.Manager{Store: backend},
+			State:   state.Manager{Store: backend, Shared: v2},
 			BaseDir: "/base/disk",
 		}
 		if server.Node == "" || server.PodUID == "" || server.VMUID == "" || server.Pod.Name == "" || server.Pod.Namespace == "" || store.Bucket == "" {
@@ -152,6 +183,9 @@ func run() error {
 			if err != nil {
 				return fmt.Errorf("unsafe or unavailable object store: %w", err)
 			}
+		}
+		if args[0] == "clone-worker" {
+			return server.CloneDisk(ctx)
 		}
 		if args[0] == "checkpoint-worker" {
 			return server.CheckpointLocal(ctx)

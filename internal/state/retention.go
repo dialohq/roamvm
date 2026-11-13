@@ -34,6 +34,9 @@ func (m Manager) Prune(ctx context.Context, committed Session) error {
 	if err != nil {
 		return fmt.Errorf("list superseded checkpoints: %w", err)
 	}
+	if err = m.pruneShared(ctx, committed, false); err != nil {
+		return err
+	}
 	if err = m.pruneChunks(ctx, committed, epoch); err != nil {
 		return err
 	}

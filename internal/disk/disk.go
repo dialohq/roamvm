@@ -46,4 +46,14 @@ func Rebase(ctx context.Context, base images.Base, path string) error {
 	}
 	return Check(ctx, path)
 }
+
+// Export preserves the current guest disk but excludes internal snapshots and
+// saved RAM. Keep the immutable backing image rather than flattening its bytes.
+func Export(ctx context.Context, base images.Base, input, output string) error {
+	if err := run(ctx, "convert", "-f", "qcow2", "-O", "qcow2", "-B", base.Disk(), "-F", base.Manifest.Format, input, output); err != nil {
+		return err
+	}
+	return Check(ctx, output)
+}
+
 func Check(ctx context.Context, path string) error { return run(ctx, "check", "-f", "qcow2", path) }

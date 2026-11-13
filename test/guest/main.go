@@ -39,9 +39,13 @@ func main() {
 				return
 			}
 			memory.payload = make([]byte, n)
-			if _, err = rand.Read(memory.payload); err != nil {
-				http.Error(w, err.Error(), 500)
-				return
+			// Bound each vDSO RNG call: a reseed retries the entire call, and
+			// filling hundreds of MiB under nested KVM can exceed that interval.
+			for offset := 0; offset < n; offset += 1 << 20 {
+				if _, err = rand.Read(memory.payload[offset:min(offset+1<<20, n)]); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
 			}
 		}
 		digest := sha256.Sum256(memory.payload)

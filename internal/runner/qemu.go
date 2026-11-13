@@ -9,6 +9,8 @@ import (
 	"strconv"
 
 	"github.com/dialohq/roamvm/internal/daemon"
+	"github.com/dialohq/roamvm/internal/fileio"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -31,15 +33,48 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 		"-device", "virtio-net-pci,netdev=net0,mac=02:00:00:00:00:02",
 		"-device", "virtio-rng-pci",
 	}
+	if p.Spec.GuestAgent {
+		args = append(args,
+			"-uuid", p.Session.Head.VMID,
+			"-chardev", "socket,id=qga,path="+filepath.Join(p.Dir, "guest-agent.sock")+",server=on,wait=off",
+			"-device", "virtio-serial-pci",
+			"-device", "virtserialport,chardev=qga,name=org.qemu.guest_agent.0")
+	}
 	if p.Spec.Hugepages != "" {
 		pages := resource.MustParse(p.Spec.Hugepages)
 		args = append(args, "-object", "memory-backend-memfd,id=ram,size="+strconv.FormatInt(memory.Value(), 10)+",hugetlb=on,hugetlbsize="+strconv.FormatInt(pages.Value(), 10)+",prealloc=on,share=on", "-machine", "memory-backend=ram")
 	}
-	if p.Hibernation != nil && p.Spec.Hibernate {
+	if p.ExternalRAM {
+		ramSize := ((memory.Value() + (1 << 20) - 1) >> 20) << 20
+		if p.Hibernation == nil {
+			f, err := os.OpenFile(filepath.Join(p.Dir, hibernate.RAM), os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+			if err != nil {
+				return nil, err
+			}
+			if err = fileio.SyncClose(f, f.Truncate(ramSize)); err != nil {
+				return nil, err
+			}
+		}
+		sharing := "share=on,readonly=off"
+		if privateRAM(p) {
+			// Guest writes become anonymous CoW pages, never filesystem writeback.
+			sharing = "share=off,readonly=on"
+		}
+		args = append(args, "-object", "memory-backend-file,id=pc.ram,size="+strconv.FormatInt(ramSize, 10)+",mem-path="+storagePath(p, hibernate.RAM)+","+sharing+",rom=off,prealloc=off,discard-data=off,x-use-canonical-path-for-ramblock-id=off", "-machine", "memory-backend=pc.ram")
+		if p.Hibernation != nil {
+			args = append(args, "-incoming", "defer")
+		}
+	}
+	if (p.Hibernation != nil && p.Spec.Hibernate) || privateRAM(p) {
 		args = append(args, "-S")
 	}
 	file := func(path string, writable bool) map[string]any {
 		node := map[string]any{"driver": "file", "filename": path}
+		if p.PagerDir != "" && filepath.Dir(path) == p.PagerDir {
+			// runner.lock and the ownership CAS already exclude another writer.
+			// The fault-served file does not implement host advisory locks.
+			node["locking"] = "off"
+		}
 		if writable {
 			// RAM restore makes many small reads. Retain the node's evictable
 			// page cache for hibernating roots, while honoring every guest flush.
@@ -51,7 +86,7 @@ func qemuArgs(ctx context.Context, p *daemon.Prepared, socket string) ([]string,
 	if p.Base.Manifest.Format == "qcow2" {
 		base["backing"] = nil
 	}
-	root := map[string]any{"driver": "qcow2", "node-name": "root", "file": file(filepath.Join(p.Dir, "overlay.qcow2"), true), "backing": base}
+	root := map[string]any{"driver": "qcow2", "node-name": "root", "file": file(storagePath(p, "overlay.qcow2"), true), "backing": base}
 	addDisk := func(node map[string]any, name string) error {
 		encoded, err := json.Marshal(node)
 		if err != nil {

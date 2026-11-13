@@ -8,11 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	api "github.com/dialohq/roamvm/api/v1alpha1"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	"github.com/dialohq/roamvm/internal/state"
 	"github.com/stretchr/testify/require"
 	core "k8s.io/api/core/v1"
@@ -48,7 +51,9 @@ func TestHibernation(t *testing.T) {
 	// A new Pod gets new NAT state; pre-nap TCP sessions are not portable. Test
 	// guest state and new requests, rather than reusing a previous incarnation's
 	// pooled connection (which can stall even after readiness succeeds).
-	httpClient := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	// Hashing the entire random payload faults in the working set. Measure
+	// startup separately using /ready, not this deliberately exhaustive scan.
+	httpClient := &http.Client{Timeout: time.Minute, Transport: &http.Transport{DisableKeepAlives: true}}
 	request := func(method, path string, body io.Reader) ([]byte, error) {
 		req, err := http.NewRequestWithContext(l.ctx, method, address+path, body)
 		if err != nil {
@@ -82,10 +87,10 @@ func TestHibernation(t *testing.T) {
 	require.True(t, l.vm(v.Name).Spec.Hibernate, "install the current CRD; old schemas prune hibernate")
 	ready()
 	// Generating incompressible RAM under nested KVM is setup, not resume time.
-	httpClient.Timeout = time.Minute
+	httpClient.Timeout = 3 * time.Minute
 	sentinel, err := request("POST", "/memory?bytes=536870912", nil)
 	must(t, err)
-	httpClient.Timeout = 10 * time.Second
+	httpClient.Timeout = time.Minute
 	var want map[string]any
 	must(t, json.Unmarshal(sentinel, &want))
 	require.EqualValues(t, 536870912, want["bytes"])
@@ -112,7 +117,8 @@ func TestHibernation(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		head := l.stop(v.Name)
 		require.NotNil(t, head.Checkpoint.Hibernation)
-		require.Equal(t, "chunks-v1", head.Checkpoint.Format)
+		require.Equal(t, "chunks-v2", head.Checkpoint.Format)
+		require.Equal(t, hibernate.Private, head.Checkpoint.Hibernation.Layout)
 		started := time.Now()
 		l.power(v.Name, "Running")
 		ready()
@@ -137,6 +143,35 @@ func TestHibernation(t *testing.T) {
 	t.Logf("cross-node cold recovery actual guest response: %s", time.Since(started))
 	logs()
 	require.Equal(t, other, l.vm(v.Name).Status.NodeName)
+	current := l.vm(v.Name)
+	b, err := l.kube.CoreV1().Pods("default").GetLogs(current.Status.PodName, &core.PodLogOptions{Container: "runner"}).DoRaw(l.ctx)
+	must(t, err)
+	match := regexp.MustCompile(`stage=guest-ready file=ram.bin fetched_bytes=([0-9]+)`).FindSubmatch(b)
+	require.Len(t, match, 2, "cold resume did not exercise the RAM pager")
+	fetched, err := strconv.ParseInt(string(match[1]), 10, 64)
+	must(t, err)
+	require.Less(t, fetched, int64(536870912), "resume eagerly downloaded the entire random RAM payload before TCP readiness")
+	// Check the cache again after actual HTTP readiness, before the exhaustive
+	// hash. Every fetched chunk is written here; allocated bytes also include
+	// guest writes, making this a conservative upper bound on startup downloads.
+	blocks := strings.TrimSpace(string(l.run(nil, "kubectl", "exec", current.Status.PodName, "-c", "runtime", "--", "stat", "-c", "%b", "/var/lib/roamvm/running/"+string(v.UID)+"/ram.bin")))
+	allocated, err := strconv.ParseInt(blocks, 10, 64)
+	must(t, err)
+	t.Logf("cold RAM cache allocated at HTTP readiness: %d bytes", allocated*512)
+	require.Less(t, allocated*512, int64(536870912), "HTTP readiness required materializing the entire random RAM payload")
+	verify()
+	// Replace live process memory after a lazy restore, then capture and restore
+	// it again. This catches missing mmap writeback, not just read-only paging.
+	// As with initial setup, generating random memory is not resume latency.
+	httpClient.Timeout = 3 * time.Minute
+	sentinel, err = request("POST", "/memory?bytes=134217728", nil)
+	must(t, err)
+	httpClient.Timeout = time.Minute
+	must(t, json.Unmarshal(sentinel, &want))
+	l.stop(v.Name)
+	l.exclusiveNode(nodeName, "")
+	must(t, l.Patch(l.ctx, l.vm(v.Name), client.RawPatch(types.MergePatchType, []byte(fmt.Sprintf(`{"spec":{"nodeSelector":{"kubernetes.io/hostname":%q},"powerState":"Running"}}`, nodeName)))))
+	ready()
 	verify()
 	l.stop(v.Name)
 	// Explicitly opting out must boot the retained disk, not restore old RAM.

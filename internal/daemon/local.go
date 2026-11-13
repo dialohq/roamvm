@@ -57,6 +57,9 @@ func (s *Server) stopLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMa
 	if err != nil {
 		return err
 	}
+	if p.Spec.Hibernate && p.Hibernation == nil {
+		return errors.New("hibernating runner exited without a coherent RAM capture; explicit recovery required")
+	}
 	p.Stopped = true
 	if err = s.save(p); err != nil {
 		return err
@@ -121,11 +124,16 @@ func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.Virtual
 	if err != nil {
 		return nil, err
 	}
-	if err = disk.Rebase(ctx, base, filepath.Join(p.Dir, "overlay.qcow2")); err != nil {
+	path := filepath.Join(p.Dir, "overlay.qcow2")
+	if _, err = os.Stat(path + ".lazy"); os.IsNotExist(err) {
+		err = disk.Rebase(ctx, base, path)
+	}
+	if err != nil {
 		return nil, err
 	}
 	prepared := Prepared{Session: session, Base: base, Dir: p.Dir, Spec: spec, PodUID: string(pod.UID)}
 	prepared.Hibernation = p.Hibernation
+	prepared.ExternalRAM = spec.Hibernate && p.ExternalRAM
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
@@ -173,6 +181,14 @@ func (s *Server) CheckpointLocal(ctx context.Context) error {
 			return err
 		}
 		path := filepath.Join(p.Dir, "overlay.qcow2")
+		if err = s.State.Materialize(ctx, path); err != nil {
+			return err
+		}
+		if p.ExternalRAM {
+			if err = s.State.Materialize(ctx, filepath.Join(p.Dir, hibernate.RAM)); err != nil {
+				return err
+			}
+		}
 		if err = disk.Check(ctx, path); err == nil {
 			if api.IsV2(s.Client.Scheme()) {
 				current, err = s.State.Snapshot(ctx, p.Session, path, p.Hibernation)

@@ -151,6 +151,8 @@ The opt-in [experimental v2 operator](docs/v2.md) runs alongside this operator
 using a separate API group. It adds process-preserving hibernation, sparse
 content-addressed checkpoints, and deletion of private VM objects on CR deletion.
 The legacy API and its checkpoint-retention behavior remain unchanged.
+The [Kubernetes Amp provider](k8s-amp-provider/README.md) packages the Amp dispatch
+setup, provider permissions and verification tools on top of that operator.
 
 The example provisions the runtime ServiceAccount and namespace-scoped RoleBinding
 in `default`. For another VM namespace, create the same `roamvm-runtime` account

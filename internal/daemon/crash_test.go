@@ -69,6 +69,36 @@ func TestCrashCheckpointRetriesAfterCommitWithoutDiscardingDisk(t *testing.T) {
 	}
 }
 
+func TestHibernatingCrashCannotPublishDiskOnlySuccess(t *testing.T) {
+	s, pod, _ := crashFixture(t)
+	pod.Spec.Volumes = []core.Volume{{Name: "working", VolumeSource: core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: "retained"}}}}
+	if err := s.Client.Update(t.Context(), pod); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.load(s.PodUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Spec.Hibernate = true
+	p.Session.Head.VMID, p.Session.Head.Owner, p.Session.Head.Node = s.VMUID, s.PodUID, s.Node
+	if err = s.save(p); err != nil {
+		t.Fatal(err)
+	}
+	err = s.CheckpointTerminatedRunner(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "coherent RAM capture") {
+		t.Fatalf("accepted a hibernating crash as disk-only success: %v", err)
+	}
+	if err = s.Client.Get(t.Context(), client.ObjectKeyFromObject(pod), pod); err != nil {
+		t.Fatal(err)
+	}
+	if pod.Annotations[controller.Phase] != "RecoveryRequired" {
+		t.Fatal(pod.Annotations)
+	}
+	if _, err = os.Stat(filepath.Join(s.Root, "overlay.qcow2")); err != nil {
+		t.Fatal("lost working disk", err)
+	}
+}
+
 func TestCrashCheckpointRequiresTerminatedSameIncarnation(t *testing.T) {
 	for _, kind := range []string{"running", "uid", "node", "owner", "restart", "metadata", "locked"} {
 		t.Run(kind, func(t *testing.T) {

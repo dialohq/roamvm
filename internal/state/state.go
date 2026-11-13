@@ -53,7 +53,10 @@ type Session struct {
 	Head Head
 	ETag string
 }
-type Manager struct{ Store Store }
+type Manager struct {
+	Store  Store
+	Shared bool
+}
 
 func HeadKey(id string) string { return "vm/" + id + "/head.json" }
 
@@ -208,7 +211,7 @@ func (m Manager) Restore(ctx context.Context, s Session, path string) error {
 	if cp == nil {
 		return nil
 	}
-	if cp.Format == "chunks-v1" {
+	if cp.Format == "chunks-v1" || cp.Format == "chunks-v2" {
 		return m.restoreChunks(ctx, s, path)
 	}
 	if cp.Format != "" {

@@ -22,14 +22,14 @@ func retentionManager(objects Store, backend string) Manager {
 		scheme := runtime.NewScheme()
 		core.AddToScheme(scheme)
 		return Manager{
-			&Kubernetes{
+			Store: &Kubernetes{
 				Client:    fake.NewClientBuilder().WithScheme(scheme).Build(),
 				Namespace: "state",
 				Objects:   objects,
 			},
 		}
 	}
-	return Manager{objects}
+	return Manager{Store: objects}
 }
 
 func TestVMDeletionFencesRetriesAndRemovesOnlyItsObjects(t *testing.T) {

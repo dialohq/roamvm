@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -525,4 +527,50 @@ func TestCompletedPodDoesNotOverwriteNewStart(t *testing.T) {
 	if vm.Spec.PowerState != "Running" {
 		t.Fatal("old crash canceled a newer start")
 	}
+}
+
+func TestDeletedVMReconciliationDoesNotRecreateOwnership(t *testing.T) {
+	r, vm := setup(t, true)
+	vm.Spec.PowerState = "Stopped"
+	require.NoError(t, r.Update(t.Context(), vm))
+	require.NoError(t, r.Delete(t.Context(), vm))
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(vm), vm))
+	stale := vm.DeepCopy()
+	vm.Finalizers = nil
+	require.NoError(t, r.Update(t.Context(), vm))
+	actual := r.Client
+	r.APIReader = actual
+	r.Client = interceptor.NewClient(actual.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if out, ok := obj.(*api.VirtualMachine); ok {
+				stale.DeepCopyInto(out)
+				return nil
+			}
+			if key.Namespace == "state" {
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		w.Write([]byte(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><IsTruncated>false</IsTruncated></ListBucketResult>`))
+	}))
+	defer objects.Close()
+	require.NoError(t, actual.Create(t.Context(), &core.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "roamvm-v2-runtime", Namespace: vm.Namespace},
+		Data:       map[string]string{"STATE_BACKEND": "kubernetes", "STATE_NAMESPACE": "state"},
+	}))
+	require.NoError(t, actual.Create(t.Context(), &core.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "roamvm-v2-object-store", Namespace: vm.Namespace},
+		Data: map[string][]byte{
+			"S3_ENDPOINT": []byte(objects.URL), "S3_BUCKET": []byte("test"),
+			"AWS_ACCESS_KEY_ID": []byte("test"), "AWS_SECRET_ACCESS_KEY": []byte("test"),
+		},
+	}))
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)})
+	var ownership core.ConfigMapList
+	require.NoError(t, actual.List(t.Context(), &ownership, client.InNamespace("state")))
+	require.Empty(t, ownership.Items, "a stale deletion recreated ownership after the VM was gone")
+	require.NoError(t, err)
 }

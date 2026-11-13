@@ -36,7 +36,7 @@ func (s *Kubernetes) Delete(ctx context.Context, key string) error {
 
 func (s *Kubernetes) PurgePrefix(ctx context.Context, prefix string) error {
 	name, ok := headName(prefix + "head.json")
-	if !ok {
+	if !ok || !strings.HasPrefix(prefix, "vm/") {
 		return errors.New("invalid VM prefix")
 	}
 	var cm core.ConfigMap
@@ -58,8 +58,11 @@ func (s *Kubernetes) PurgePrefix(ctx context.Context, prefix string) error {
 
 func headName(key string) (string, bool) {
 	parts := strings.Split(key, "/")
-	if len(parts) != 3 || parts[0] != "vm" || parts[1] == "" || parts[2] != "head.json" {
+	if len(parts) != 3 || (parts[0] != "vm" && parts[0] != "shared") || parts[1] == "" || parts[2] != "head.json" {
 		return "", false
+	}
+	if parts[0] == "shared" {
+		return "roamvm-chunk-" + parts[1], true
 	}
 	return "roamvm-" + parts[1], true
 }

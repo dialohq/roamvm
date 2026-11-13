@@ -19,3 +19,8 @@ patches:
         value: [rvm2]
       - op: remove
         path: /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/hibernate/x-kubernetes-validations
+      - op: replace
+        path: /spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/cloneFrom/x-kubernetes-validations
+        value:
+          - rule: self == oldSelf
+            message: cloneFrom is immutable

@@ -42,6 +42,8 @@ type Prepared struct {
 	PodUID      string
 	Stopped     bool
 	Hibernation *api.Hibernation
+	ExternalRAM bool
+	PagerDir    string `json:"-"`
 }
 type Response struct {
 	Prepared    *Prepared `json:"prepared,omitempty"`
@@ -61,6 +63,7 @@ type Server struct {
 	GuestTokenDir             string
 	guestTokenRefresh         time.Time
 	guestTokenExpiry          time.Time
+	readChunk                 func(context.Context, string) ([]byte, error)
 }
 
 func (s *Server) Serve(ctx context.Context, socket string) error {
@@ -80,6 +83,7 @@ func (s *Server) Serve(ctx context.Context, socket string) error {
 	for _, action := range []string{"prepare", "heartbeat", "status", "finish"} {
 		mux.HandleFunc("POST /"+action, s.handler(action))
 	}
+	mux.HandleFunc("GET /chunk", s.chunk)
 	parent := ctx
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
@@ -237,6 +241,9 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	if vm.Spec.PowerState != "Running" || vm.DeletionTimestamp != nil || pod.DeletionTimestamp != nil {
 		return nil, errors.New("VM no longer requests a start")
 	}
+	if vm.Status.Local != nil && vm.Status.Local.Evicting {
+		return nil, errors.New("local checkpoint is being evicted; wait for a cold start")
+	}
 	if p, err := s.load(string(pod.UID)); err == nil {
 		if p.Stopped {
 			return nil, errors.New("this runner incarnation already stopped")
@@ -287,10 +294,19 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 	// Once save() succeeds, retries return above and never overwrite working data.
 	_ = os.Remove(overlay + ".partial")
 	if session.Head.Checkpoint != nil {
-		if err = s.State.Restore(ctx, session, overlay); err != nil {
+		if api.IsV2(s.Client.Scheme()) {
+			err = s.State.RestoreLazy(ctx, session, overlay)
+		} else {
+			err = s.State.Restore(ctx, session, overlay)
+		}
+		if err != nil {
 			return nil, err
 		}
-		if err = disk.Rebase(ctx, base, overlay); err != nil {
+		if _, err = os.Stat(overlay + ".lazy"); os.IsNotExist(err) {
+			if err = disk.Rebase(ctx, base, overlay); err != nil {
+				return nil, err
+			}
+		} else if err != nil {
 			return nil, err
 		}
 	} else {
@@ -300,8 +316,12 @@ func (s *Server) prepare(ctx context.Context, pod *core.Pod, vm *api.VirtualMach
 		}
 	}
 	prepared := Prepared{Session: session, Base: base, Dir: dir, Spec: spec, PodUID: string(pod.UID)}
+	prepared.ExternalRAM = spec.Hibernate && spec.Hugepages == ""
 	if session.Head.Checkpoint != nil {
 		prepared.Hibernation = session.Head.Checkpoint.Hibernation
+		if prepared.Hibernation != nil {
+			prepared.ExternalRAM = spec.Hibernate && hibernate.HasExternalRAM(prepared.Hibernation)
+		}
 	}
 	if err = s.save(prepared); err != nil {
 		return nil, err

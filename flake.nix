@@ -68,6 +68,7 @@
   in {
     lib.mkLibvirtLab = slot: (mkLab slot).config;
     nixosModules.online-grow = import ./nix/online-grow.nix;
+    nixosModules.remote-builders = import ./nix/remote-builders.nix;
     nixosConfigurations = (mkLab 0).nodes;
     packages.x86_64-linux.libvirt-config = (mkLab 0).config;
     packages.x86_64-linux.test-firmware-guest = import ./test/guest/generations.nix {
@@ -76,6 +77,7 @@
     };
     packages.x86_64-linux.test-generation-guest = import ./test/guest/generations.nix {inherit pkgs nixpkgs;};
     packages.x86_64-linux.libvirt-runtime = runtime;
+    packages.x86_64-linux.orb-image = import ./nix/orb-image.nix {inherit pkgs nixpkgs;};
     packages.x86_64-linux.test-nixos-guest = import ./test/guest/nixos.nix {inherit pkgs nixpkgs;};
     packages.x86_64-linux.test-guest = import ./test/guest {inherit pkgs;};
     packages.x86_64-linux.test-store = pkgs.dockerTools.buildLayeredImage {

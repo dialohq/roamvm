@@ -1,0 +1,52 @@
+diff --git a/migration/options.c b/migration/options.c
+index e78324b..e2eb495 100644
+--- a/migration/options.c
++++ b/migration/options.c
+@@ -269 +269,9 @@ bool migrate_ignore_shared(void)
+-    return s->capabilities[MIGRATION_CAPABILITY_X_IGNORE_SHARED];
++    return s->capabilities[MIGRATION_CAPABILITY_X_IGNORE_SHARED] ||
++           migrate_ignore_file_backed();
++}
++
++bool migrate_ignore_file_backed(void)
++{
++    MigrationState *s = migrate_get_current();
++
++    return s->capabilities[MIGRATION_CAPABILITY_X_ROAMVM_EXTERNAL_RAM];
+diff --git a/migration/options.h b/migration/options.h
+index a7b3262..ed07663 100644
+--- a/migration/options.h
++++ b/migration/options.h
+@@ -33,0 +34 @@ bool migrate_ignore_shared(void);
++bool migrate_ignore_file_backed(void);
+diff --git a/migration/ram.c b/migration/ram.c
+index 29f016c..39ca644 100644
+--- a/migration/ram.c
++++ b/migration/ram.c
+@@ -234,2 +234,2 @@ bool migrate_ram_is_ignored(RAMBlock *block)
+-           (migrate_ignore_shared() && qemu_ram_is_shared(block)
+-                                    && qemu_ram_is_named_file(block));
++           (migrate_ignore_shared() && qemu_ram_is_named_file(block) &&
++            (qemu_ram_is_shared(block) || migrate_ignore_file_backed()));
+diff --git a/migration/savevm.c b/migration/savevm.c
+index 62cc2ce..01a3b99 100644
+--- a/migration/savevm.c
++++ b/migration/savevm.c
+@@ -281,0 +282 @@ static bool should_validate_capability(int capability)
++    case MIGRATION_CAPABILITY_X_ROAMVM_EXTERNAL_RAM:
+diff --git a/qapi/migration.json b/qapi/migration.json
+index cf023bd..546cf90 100644
+--- a/qapi/migration.json
++++ b/qapi/migration.json
+@@ -529,0 +530,7 @@
++# @x-roamvm-external-ram: Skip named file RAM, including private
++#     mappings.  The caller must stop the VM, capture its live RAM
++#     separately (not the backing file), and bind that capture
++#     to the CPU/device stream before publishing a checkpoint.  Both
++#     ends must enable this capability.  Incompatible with postcopy.
++#     This is a RoamVM extension, disabled by default.  (since 10.2)
++#
+@@ -550 +557,2 @@
+-           'dirty-limit', 'mapped-ram'] }
++           'dirty-limit', 'mapped-ram',
++           { 'name': 'x-roamvm-external-ram', 'features': [ 'unstable' ] }] }
