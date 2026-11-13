@@ -969,6 +969,28 @@ spec:
                 - Image
                 - Disk
                 type: string
+              cloneFrom:
+                description: |-
+                  CloneFrom copies a durable disk checkpoint in this namespace. RAM and
+                  internal snapshots are stripped; the clone owns an independent checkpoint.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                  uid:
+                    description: UID prevents a deleted/recreated source name from
+                      selecting other data.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+                x-kubernetes-validations:
+                - message: cloneFrom is immutable
+                  rule: self == oldSelf
+                - message: cloning requires the experimental v2 API
+                  rule: "false"
               config:
                 description: |-
                   Projected files become a read-only ISO disk labelled ROAMVM_CONFIG.
@@ -1968,6 +1990,10 @@ spec:
                   - volumeMode
                   type: object
                 type: array
+              guestAgent:
+                description: GuestAgent exposes a private QEMU guest-agent socket
+                  to the host runner.
+                type: boolean
               guestServiceAccountToken:
                 description: |-
                   GuestServiceAccountToken is refreshed by the host runtime and exported as a
@@ -1994,6 +2020,14 @@ spec:
                 - audiences
                 - name
                 type: object
+              hibernate:
+                description: |-
+                  Hibernate preserves RAM and processes when stopped. Disable to deliberately
+                  cold boot the retained disk instead. Requires a root-only, migratable guest.
+                type: boolean
+                x-kubernetes-validations:
+                - message: hibernation requires the experimental v2 API
+                  rule: self == false
               hostname:
                 description: Hostname is applied at guest boot; it does not change
                   the Pod's DNS name.
@@ -2355,13 +2389,37 @@ spec:
             x-kubernetes-validations:
             - message: rootDiskSize cannot be removed
               rule: '!has(oldSelf.rootDiskSize) || has(self.rootDiskSize)'
+            - message: cloneFrom is creation-only
+              rule: has(self.cloneFrom) == has(oldSelf.cloneFrom)
           status:
             properties:
               checkpoint:
                 properties:
+                  format:
+                    description: Empty denotes a legacy whole-file checkpoint. chunks-v1
+                      hashes the manifest.
+                    type: string
                   generation:
                     format: int64
                     type: integer
+                  hibernation:
+                    description: |-
+                      Hibernation pins the machine and the checkpoint's RAM/device layout.
+                      Restoring a different machine is rejected, not silently converted into a boot.
+                    properties:
+                      config:
+                        type: string
+                      cpu:
+                        type: string
+                      layout:
+                        type: string
+                      qemu:
+                        type: string
+                    required:
+                    - config
+                    - cpu
+                    - qemu
+                    type: object
                   key:
                     type: string
                   sha256:
@@ -2442,9 +2500,18 @@ spec:
                     type: string
                   durable:
                     type: boolean
+                  evicting:
+                    description: Evicting fences local starts before deleting a remotely
+                      durable cache.
+                    type: boolean
                   nodeName:
                     type: string
                   owner:
+                    type: string
+                  stoppedAt:
+                    description: StoppedAt starts a new warm-retention interval for
+                      each local capture.
+                    format: date-time
                     type: string
                 required:
                 - claimName

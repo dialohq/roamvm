@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controlleroptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -44,10 +45,23 @@ type Reconciler struct {
 	Image        string
 	StorageClass string
 	StorageSize  string
+	APIReader    client.Reader
+	WarmTTL      time.Duration
+	WarmBytes    int64
 }
 
 func (r *Reconciler) Setup(m ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(m).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Owns(&core.PersistentVolumeClaim{}).Complete(r)
+	options := controlleroptions.Options{}
+	if api.IsV2(r.Scheme) {
+		options.MaxConcurrentReconciles = 4
+		r.APIReader = m.GetAPIReader()
+		if r.WarmTTL > 0 || r.WarmBytes > 0 {
+			if err := m.Add(&warmCache{r}); err != nil {
+				return err
+			}
+		}
+	}
+	return ctrl.NewControllerManagedBy(m).WithOptions(options).For(&api.VirtualMachine{}).Owns(&core.Pod{}).Owns(&core.PersistentVolumeClaim{}).Complete(r)
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -62,6 +76,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	var vm api.VirtualMachine
 	if err := r.Get(ctx, req.NamespacedName, &vm); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if api.IsV2(r.Scheme) && vm.DeletionTimestamp != nil {
+		// Cached deletion events can outlive the VM and its ownership metadata.
+		if err := r.reader().Get(ctx, req.NamespacedName, &vm); err != nil {
+			return ctrl.Result{}, client.IgnoreNotFound(err)
+		}
+	}
+	if api.IsV2(r.Scheme) && vm.Status.Local != nil && vm.Status.Local.Evicting {
+		return r.evictLocal(ctx, &vm)
 	}
 	if vm.DeletionTimestamp == nil && !controllerutil.ContainsFinalizer(&vm, Finalizer) {
 		before := vm.DeepCopy()
@@ -86,6 +109,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		} else {
 			runners = append(runners, pods.Items[i])
 		}
+	}
+	if vm.Spec.CloneFrom != nil && vm.Status.Checkpoint == nil && vm.DeletionTimestamp == nil {
+		if len(runners) != 0 || vm.Status.Local != nil || vm.Status.PodName != "" {
+			return r.status(ctx, &vm, "Blocked", "cannot clone into an existing runtime", nil)
+		}
+		return r.clone(ctx, &vm, workers)
 	}
 	// Accept completion only from the worker for the currently retained owner.
 	for i := range workers {
@@ -134,7 +163,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			if vm.Status.Local != nil && !vm.Status.Local.Durable {
 				return r.status(ctx, &vm, "Stopped", vm.Status.Message, nil)
 			}
-			if vm.Status.Local == nil && vm.Status.Phase != "" && vm.Status.Phase != "Stopped" {
+			if vm.Status.Local == nil && vm.Status.Phase != "" && vm.Status.Phase != "Stopped" &&
+				!(vm.DeletionTimestamp != nil && vm.Spec.CloneFrom != nil && vm.Status.Checkpoint == nil) {
 				return r.status(
 					ctx,
 					&vm,
@@ -151,6 +181,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				}
 				if len(workers) > 0 {
 					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				if api.IsV2(r.Scheme) {
+					if err := r.cleanup(ctx, &vm); err != nil {
+						return ctrl.Result{}, err
+					}
 				}
 				if vm.Status.Local != nil {
 					pvc := &core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: vm.Status.Local.ClaimName, Namespace: vm.Namespace}}
@@ -288,7 +323,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				vm.Spec.PowerState = "Stopped"
 				return ctrl.Result{}, r.Patch(ctx, &vm, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 			}
-			local := &api.LocalCheckpoint{ClaimName: WorkingClaim(pod), NodeName: pod.Spec.NodeName, Owner: owner}
+			now := metav1.Now()
+			local := &api.LocalCheckpoint{ClaimName: WorkingClaim(pod), NodeName: pod.Spec.NodeName, Owner: owner, StoppedAt: &now}
 			if vm.Status.Local == nil || vm.Status.Local.Owner != owner {
 				vm.Status.Local = local
 				if err := r.Status().Update(ctx, &vm); err != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dialohq/roamvm/internal/images"
@@ -55,6 +56,17 @@ func testOverlayPortability(t *testing.T, format string) {
 		t.Fatalf("write: %v %s", e, out)
 	}
 	require.NoError(t, Check(ctx, overlay))
+	// A project clone keeps current writes/zeroes, not an older internal snapshot.
+	require.NoError(t, run(ctx, "snapshot", "-c", "old", overlay))
+	out, e = exec.Command("qemu-io", "-f", "qcow2", "-c", "write -P 0x63 256k 64k", overlay).CombinedOutput()
+	require.NoError(t, e, string(out))
+	exported := filepath.Join(a, "export.qcow2")
+	require.NoError(t, Export(ctx, base, overlay, exported))
+	out, e = exec.Command("qemu-img", "compare", "-f", "qcow2", "-F", "qcow2", overlay, exported).CombinedOutput()
+	require.NoError(t, e, string(out))
+	out, e = exec.Command("qemu-img", "snapshot", "-l", exported).CombinedOutput()
+	require.NoError(t, e, string(out))
+	require.Empty(t, strings.TrimSpace(string(out)), "clone retained internal snapshots")
 	other := images.Base{Dir: b, Manifest: base.Manifest}
 	require.NoError(t, os.WriteFile(other.Disk(), baseData, 0o444))
 	data, e := os.ReadFile(overlay)

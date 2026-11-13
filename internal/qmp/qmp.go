@@ -8,9 +8,92 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/dialohq/roamvm/internal/timing"
 )
 
 type Client string
+
+func (c Client) OmitRAM(ctx context.Context, private bool) error {
+	return c.Call(ctx, "migrate-set-capabilities", map[string]any{
+		"capabilities": []map[string]any{
+			{"capability": "x-ignore-shared", "state": !private},
+			{"capability": "x-roamvm-external-ram", "state": private},
+		},
+	}, nil)
+}
+
+// Migrate serializes CPU/device state without main RAM. Private mappings require
+// RoamVM's opt-in capability and a separate stopped-memory capture by the caller.
+// Incoming QEMU must have been launched with -incoming defer.
+func (c Client) Migrate(ctx context.Context, path string, incoming, private bool) error {
+	if err := c.OmitRAM(ctx, private); err != nil {
+		return err
+	}
+	action := "migrate"
+	if incoming {
+		action = "migrate-incoming"
+	}
+	if err := c.Call(ctx, action, map[string]any{"uri": "file:" + path}, nil); err != nil {
+		return err
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var info struct {
+			Status string `json:"status"`
+			Error  string `json:"error-desc"`
+		}
+		if err := c.Call(ctx, "query-migrate", nil, &info); err != nil {
+			return err
+		}
+		switch info.Status {
+		case "completed":
+			return nil
+		case "failed", "cancelled":
+			return fmt.Errorf("%s: %s: %s", action, info.Status, info.Error)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+// Snapshot waits for the asynchronous QEMU job, including its error result.
+// Callers stop CPUs first and do not resume them after a save.
+func (c Client) Snapshot(ctx context.Context, action, tag string) error {
+	defer timing.Start("qmp." + action)()
+	args := map[string]any{"job-id": action, "tag": tag, "devices": []string{"root"}}
+	if action != "snapshot-delete" {
+		args["vmstate"] = "root"
+	}
+	if err := c.Call(ctx, action, args, nil); err != nil {
+		return err
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var jobs []struct{ ID, Status, Error string }
+		if err := c.Call(ctx, "query-jobs", nil, &jobs); err != nil {
+			return err
+		}
+		for _, job := range jobs {
+			if job.ID == action && job.Status == "concluded" {
+				if job.Error != "" {
+					return fmt.Errorf("%s: %s", action, job.Error)
+				}
+				return c.Call(ctx, "job-dismiss", map[string]any{"id": action}, nil)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
 
 func (c Client) Call(ctx context.Context, command string, arguments any, result any) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", string(c))
@@ -19,7 +102,7 @@ func (c Client) Call(ctx context.Context, command string, arguments any, result 
 	}
 	defer conn.Close()
 	deadline := time.Now().Add(3 * time.Second)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+	if d, ok := ctx.Deadline(); ok {
 		deadline = d
 	}
 	if err = conn.SetDeadline(deadline); err != nil {

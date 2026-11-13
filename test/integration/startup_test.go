@@ -41,6 +41,7 @@ func BenchmarkStartup(b *testing.B) {
 		}
 	}
 	v := l.spec("startup")
+	v.Spec.Hibernate = os.Getenv("ROAMVM_TEST_HIBERNATE") == "1"
 	v.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": nodeName}
 	if p := os.Getenv("ROAMVM_TEST_PORT"); p != "" {
 		n, e := strconv.ParseInt(p, 10, 32)
@@ -91,6 +92,7 @@ func BenchmarkStartup(b *testing.B) {
 		b.StartTimer()
 		if i == 0 {
 			l.create(v)
+			equal(b, "persisted hibernation setting", l.vm(v.Name).Spec.Hibernate, v.Spec.Hibernate)
 		} else {
 			l.power(v.Name, "Running")
 		}
@@ -144,7 +146,7 @@ func BenchmarkStartup(b *testing.B) {
 			DoRaw(l.ctx)
 		must(b, e)
 		for _, line := range strings.Split(string(logs), "\n") {
-			if strings.Contains(line, "stage=") {
+			if strings.Contains(line, "stage=") || strings.HasPrefix(line, `{"event":"span_`) {
 				b.Log(line)
 			}
 		}

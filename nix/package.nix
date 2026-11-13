@@ -1,5 +1,5 @@
 {pkgs}: let
-  hypervisor = pkgs.qemu_kvm;
+  hypervisor = import ./qemu.nix pkgs.qemu_kvm;
 in
   pkgs.buildGoModule {
     pname = "roamvm";
@@ -8,7 +8,7 @@ in
       root = ../.;
       fileset = pkgs.lib.fileset.unions [../go.mod ../go.sum ../api ../cmd ../internal];
     };
-    vendorHash = "sha256-P1t0NmWQAjtvR6t3K+2MyWHt8ymeua4eR78RjYF3GuA=";
+    vendorHash = "sha256-h0V8BgVicx3nLLloG+hrtayClCKTKfVa8atMAaAiGx0=";
     subPackages = ["cmd/roamvm"];
     nativeBuildInputs = [pkgs.makeWrapper];
     nativeCheckInputs = [hypervisor pkgs.qemu-utils];

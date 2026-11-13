@@ -11,14 +11,33 @@ import (
 )
 
 var (
-	GroupVersion  = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
-	SchemeBuilder = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
+	GroupVersion   = schema.GroupVersion{Group: "vm.roamvm.io", Version: "v1alpha1"}
+	V2GroupVersion = schema.GroupVersion{Group: "v2.vm.roamvm.io", Version: "v1alpha1"}
+	SchemeBuilder  = runtime.NewSchemeBuilder(func(s *runtime.Scheme) error {
 		s.AddKnownTypes(GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
 		metav1.AddToGroupVersion(s, GroupVersion)
 		return nil
 	})
 )
 var AddToScheme = SchemeBuilder.AddToScheme
+
+// AddV2ToScheme registers the experimental API instead of the legacy API.
+// They are distinct resources, not converted versions of the same CRD. A
+// process registers only one group so typed clients cannot select the other.
+func AddV2ToScheme(s *runtime.Scheme) error {
+	s.AddKnownTypes(V2GroupVersion, &VirtualMachine{}, &VirtualMachineList{})
+	metav1.AddToGroupVersion(s, V2GroupVersion)
+	return nil
+}
+
+func IsV2(s *runtime.Scheme) bool { return s.Recognizes(V2GroupVersion.WithKind("VirtualMachine")) }
+
+func APIVersion(s *runtime.Scheme) string {
+	if IsV2(s) {
+		return V2GroupVersion.String()
+	}
+	return GroupVersion.String()
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -34,6 +53,7 @@ type VirtualMachine struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.rootDiskSize) || has(self.rootDiskSize)",message="rootDiskSize cannot be removed"
+// +kubebuilder:validation:XValidation:rule="has(self.cloneFrom) == has(oldSelf.cloneFrom)",message="cloneFrom is creation-only"
 type VirtualMachineSpec struct {
 	// Hostname is applied at guest boot; it does not change the Pod's DNS name.
 	// +kubebuilder:validation:MaxLength=63
@@ -42,6 +62,17 @@ type VirtualMachineSpec struct {
 	// +kubebuilder:validation:Enum=Running;Stopped
 	// +kubebuilder:default=Stopped
 	PowerState string `json:"powerState"`
+	// Hibernate preserves RAM and processes when stopped. Disable to deliberately
+	// cold boot the retained disk instead. Requires a root-only, migratable guest.
+	// +kubebuilder:validation:XValidation:rule="self == false",message="hibernation requires the experimental v2 API"
+	Hibernate bool `json:"hibernate,omitempty"`
+	// CloneFrom copies a durable disk checkpoint in this namespace. RAM and
+	// internal snapshots are stripped; the clone owns an independent checkpoint.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="cloneFrom is immutable"
+	// +kubebuilder:validation:XValidation:rule="false",message="cloning requires the experimental v2 API"
+	CloneFrom *CloneSource `json:"cloneFrom,omitempty"`
+	// GuestAgent exposes a private QEMU guest-agent socket to the host runner.
+	GuestAgent bool `json:"guestAgent,omitempty"`
 	// Image is an OCI image containing /disk/root.raw or root.qcow2 and boot files.
 	// +kubebuilder:validation:Pattern=`^.+@sha256:[a-f0-9]{64}$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="the immutable base cannot change; create a new VM"
@@ -111,6 +142,14 @@ type GuestServiceAccountToken struct {
 	Audiences []string `json:"audiences"`
 }
 
+type CloneSource struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// UID prevents a deleted/recreated source name from selecting other data.
+	// +kubebuilder:validation:MinLength=1
+	UID string `json:"uid"`
+}
+
 type ConfigDisk struct {
 	// +kubebuilder:validation:MaxLength=31
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,30}$`
@@ -142,6 +181,18 @@ type Checkpoint struct {
 	SHA256     string `json:"sha256"`
 	Size       int64  `json:"size"`
 	VersionID  string `json:"versionID,omitempty"`
+	// Empty denotes a legacy whole-file checkpoint. chunks-v1 hashes the manifest.
+	Format      string       `json:"format,omitempty"`
+	Hibernation *Hibernation `json:"hibernation,omitempty"`
+}
+
+// Hibernation pins the machine and the checkpoint's RAM/device layout.
+// Restoring a different machine is rejected, not silently converted into a boot.
+type Hibernation struct {
+	Config string `json:"config"`
+	QEMU   string `json:"qemu"`
+	CPU    string `json:"cpu"`
+	Layout string `json:"layout,omitempty"`
 }
 
 // LocalCheckpoint identifies the retained, node-local working disk containing
@@ -151,6 +202,10 @@ type LocalCheckpoint struct {
 	NodeName  string `json:"nodeName"`
 	Owner     string `json:"owner"`
 	Durable   bool   `json:"durable"`
+	// StoppedAt starts a new warm-retention interval for each local capture.
+	StoppedAt *metav1.Time `json:"stoppedAt,omitempty"`
+	// Evicting fences local starts before deleting a remotely durable cache.
+	Evicting bool `json:"evicting,omitempty"`
 }
 type VirtualMachineStatus struct {
 	RootDiskSize       int64              `json:"rootDiskSize,omitempty"`

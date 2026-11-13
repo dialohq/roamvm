@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,23 +30,60 @@ import (
 )
 
 type localObjects struct {
-	*overlayStore
-	gets  atomic.Int32
-	block chan struct{}
+	mu      sync.Mutex
+	objects map[string][]byte
+	gets    atomic.Int32
+	block   chan struct{}
+	blocked sync.Once
 }
 
 func (s *localObjects) Get(ctx context.Context, key string) (state.Object, error) {
 	s.gets.Add(1)
-	return s.overlayStore.Get(ctx, key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.objects[key]
+	if !ok {
+		return state.Object{}, state.ErrNotFound
+	}
+	return state.Object{Body: io.NopCloser(bytes.NewReader(b))}, nil
 }
 
 func (s *localObjects) Put(ctx context.Context, key string, body io.ReadSeeker, size int64, match string) (state.Object, error) {
 	if s.block != nil {
-		close(s.block)
+		s.blocked.Do(func() { close(s.block) })
 		<-ctx.Done()
 		return state.Object{}, ctx.Err()
 	}
-	return s.overlayStore.Put(ctx, key, body, size, match)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.objects[key]; ok {
+		return state.Object{}, state.ErrConflict
+	}
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return state.Object{}, err
+	}
+	s.objects[key] = b
+	return state.Object{}, nil
+}
+
+func (s *localObjects) List(_ context.Context, prefix string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var keys []string
+	for k := range s.objects {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
+func (s *localObjects) Delete(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.objects, key)
+	return nil
 }
 
 func TestLocalStopUploadAndRestart(t *testing.T) {
@@ -73,7 +112,7 @@ func TestLocalStopUploadAndRestart(t *testing.T) {
 			require.NoError(t, disk.Create(ctx, base, path))
 			out, err := exec.Command("qemu-io", "-f", "qcow2", "-c", "write -P 0x42 0 64k", "-c", "write -z 128k 64k", path).CombinedOutput()
 			require.NoError(t, err, "%s", out)
-			objects := &localObjects{overlayStore: &overlayStore{t: t, path: path}}
+			objects := &localObjects{objects: map[string][]byte{}}
 			s.State = state.Manager{Store: &state.Kubernetes{Client: c, Namespace: "default", Objects: objects}}
 			session, err := s.State.Acquire(ctx, string(vm.UID), vm.Spec.Image, string(pod.UID), s.Node)
 			require.NoError(t, err)

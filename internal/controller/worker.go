@@ -9,12 +9,27 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 func workerName(vm *api.VirtualMachine, owner string) string { return "roamvm-checkpoint-" + owner }
+
+func runtimeName(s *runtime.Scheme, suffix string) string {
+	if api.IsV2(s) {
+		return "roamvm-v2-" + suffix
+	}
+	return "roamvm-" + suffix
+}
+
+func runtimeArgs(s *runtime.Scheme, command string) []string {
+	if api.IsV2(s) {
+		return []string{"--experimental-v2", command}
+	}
+	return []string{command}
+}
 
 // Workers are reconstructible from durable Kubernetes intent, even after their
 // original runner or a previous worker disappears. They never reserve KVM/RAM
@@ -29,7 +44,7 @@ func (r *Reconciler) createWorker(ctx context.Context, vm *api.VirtualMachine) e
 		Labels:      map[string]string{Label: string(vm.UID), WorkerLabel: "true"},
 		Annotations: map[string]string{LocalOwnerAnnotation: local.Owner},
 	}, Spec: core.PodSpec{
-		ServiceAccountName: "roamvm-runtime", RestartPolicy: core.RestartPolicyOnFailure,
+		ServiceAccountName: runtimeName(r.Scheme, "runtime"), RestartPolicy: core.RestartPolicyOnFailure,
 		AutomountServiceAccountToken: ptr.To(true), TerminationGracePeriodSeconds: ptr.To(int64(5)),
 		NodeName: local.NodeName, ImagePullSecrets: vm.Spec.ImagePullSecrets,
 		Volumes: []core.Volume{
@@ -38,11 +53,11 @@ func (r *Reconciler) createWorker(ctx context.Context, vm *api.VirtualMachine) e
 		},
 		Containers: []core.Container{{
 			Name: "checkpoint-worker", Image: r.Image, ImagePullPolicy: core.PullIfNotPresent,
-			Args: []string{"checkpoint-worker"}, SecurityContext: containerSecurityContext(),
+			Args: runtimeArgs(r.Scheme, "checkpoint-worker"), SecurityContext: containerSecurityContext(),
 			Env: []core.EnvVar{fieldEnv("NODE_NAME", "spec.nodeName"), fieldEnv("POD_NAME", "metadata.name"), fieldEnv("POD_NAMESPACE", "metadata.namespace"), fieldEnv("POD_UID", "metadata.uid"), {Name: "VM_UID", Value: string(vm.UID)}, {Name: "GOMEMLIMIT", Value: "256MiB"}},
 			EnvFrom: []core.EnvFromSource{
-				{ConfigMapRef: &core.ConfigMapEnvSource{LocalObjectReference: core.LocalObjectReference{Name: "roamvm-runtime"}, Optional: ptr.To(true)}},
-				{SecretRef: &core.SecretEnvSource{LocalObjectReference: core.LocalObjectReference{Name: "roamvm-object-store"}}},
+				{ConfigMapRef: &core.ConfigMapEnvSource{LocalObjectReference: core.LocalObjectReference{Name: runtimeName(r.Scheme, "runtime")}, Optional: ptr.To(true)}},
+				{SecretRef: &core.SecretEnvSource{LocalObjectReference: core.LocalObjectReference{Name: runtimeName(r.Scheme, "object-store")}}},
 			},
 			Resources:    core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi")}, Limits: core.ResourceList{core.ResourceMemory: resource.MustParse("512Mi")}},
 			VolumeMounts: []core.VolumeMount{{Name: "base", MountPath: "/base", ReadOnly: true}, {Name: "working", MountPath: "/var/lib/roamvm"}},

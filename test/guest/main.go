@@ -24,6 +24,34 @@ import (
 
 func main() {
 	started := time.Now()
+	// A process-local sentinel: unlike /data it cannot survive a cold boot.
+	var memory struct {
+		sync.Mutex
+		payload []byte
+	}
+	http.HandleFunc("/memory", func(w http.ResponseWriter, r *http.Request) {
+		memory.Lock()
+		defer memory.Unlock()
+		if r.Method == "POST" {
+			n, err := strconv.Atoi(r.URL.Query().Get("bytes"))
+			if err != nil || n < 1 || n > 1<<30 {
+				http.Error(w, "invalid memory size", 400)
+				return
+			}
+			memory.payload = make([]byte, n)
+			// Bound each vDSO RNG call: a reseed retries the entire call, and
+			// filling hundreds of MiB under nested KVM can exceed that interval.
+			for offset := 0; offset < n; offset += 1 << 20 {
+				if _, err = rand.Read(memory.payload[offset:min(offset+1<<20, n)]); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+			}
+		}
+		digest := sha256.Sum256(memory.payload)
+		boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+		json.NewEncoder(w).Encode(map[string]any{"bytes": len(memory.payload), "sha256": hex.EncodeToString(digest[:]), "bootID": strings.TrimSpace(string(boot)), "pid": os.Getpid()})
+	})
 	http.HandleFunc("/generation", func(w http.ResponseWriter, r *http.Request) {
 		values := map[string]string{}
 		for name, path := range map[string]string{"generation": "/etc/generation-test", "cmdline": "/proc/cmdline", "bootID": "/proc/sys/kernel/random/boot_id", "hostname": "/proc/sys/kernel/hostname"} {

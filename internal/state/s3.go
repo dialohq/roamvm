@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,8 +18,8 @@ type S3 struct {
 	Bucket string
 }
 
-func NewS3(ctx context.Context, endpoint, bucket string) (*S3, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+func NewS3(ctx context.Context, endpoint, bucket string, options ...func(*config.LoadOptions) error) (*S3, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +70,96 @@ func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+// PurgePrefix removes every physical version, including delete markers. Garage
+// reports versioning disabled; use ordinary listing/deletion on that path.
+// The current ownership tombstone is always the last object removed.
+func (s *S3) PurgePrefix(ctx context.Context, prefix string) error {
+	if _, ok := headName(prefix + "head.json"); !ok {
+		return errors.New("invalid VM prefix")
+	}
+	versioning, err := s.Client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: &s.Bucket})
+	if err != nil {
+		return err
+	}
+	if versioning.Status == "" {
+		keys, err := s.List(ctx, prefix)
+		if err != nil {
+			return err
+		}
+		var objects []types.ObjectIdentifier
+		for _, key := range keys {
+			if key != prefix+"head.json" {
+				objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
+			}
+		}
+		if err = s.deleteObjects(ctx, objects); err != nil {
+			return err
+		}
+		_, err = s.Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.Bucket, Key: aws.String(prefix + "head.json")})
+		return err
+	}
+	remove := func(key, version *string) error {
+		_, err := s.Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.Bucket, Key: key, VersionId: version})
+		return err
+	}
+	var heads []types.ObjectIdentifier
+	var latest *types.ObjectIdentifier
+	pages := s3.NewListObjectVersionsPaginator(s.Client, &s3.ListObjectVersionsInput{Bucket: &s.Bucket, Prefix: &prefix})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return err
+		}
+		var objects []types.ObjectIdentifier
+		for _, v := range page.Versions {
+			if aws.ToString(v.Key) == prefix+"head.json" {
+				object := types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId}
+				if aws.ToBool(v.IsLatest) {
+					latest = &object
+				} else {
+					heads = append(heads, object)
+				}
+			} else {
+				objects = append(objects, types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+			}
+		}
+		for _, v := range page.DeleteMarkers {
+			if aws.ToString(v.Key) == prefix+"head.json" {
+				heads = append(heads, types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+			} else {
+				objects = append(objects, types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+			}
+		}
+		if err = s.deleteObjects(ctx, objects); err != nil {
+			return err
+		}
+	}
+	if latest != nil {
+		heads = append(heads, *latest)
+	}
+	for _, v := range heads {
+		if err = remove(v.Key, v.VersionId); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *S3) deleteObjects(ctx context.Context, objects []types.ObjectIdentifier) error {
+	for len(objects) > 0 {
+		n := min(len(objects), 1000)
+		out, err := s.Client.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: &s.Bucket, Delete: &types.Delete{Objects: objects[:n], Quiet: aws.Bool(true)}})
+		if err != nil {
+			return err
+		}
+		if len(out.Errors) > 0 {
+			return fmt.Errorf("object deletion failed: %s", aws.ToString(out.Errors[0].Code))
+		}
+		objects = objects[n:]
+	}
+	return nil
 }
 
 // Checkpoint keys are immutable. Delete the physical version rather than adding

@@ -20,6 +20,14 @@ import (
 type Plugin struct {
 	dp.UnimplementedDevicePluginServer
 	Slots int
+	Fuse  bool
+}
+
+func (p *Plugin) paths() []string {
+	if p.Fuse {
+		return []string{"/dev/fuse"}
+	}
+	return []string{"/dev/kvm", "/dev/net/tun"}
 }
 
 func (p *Plugin) GetDevicePluginOptions(context.Context, *dp.Empty) (*dp.DevicePluginOptions, error) {
@@ -29,11 +37,10 @@ func (p *Plugin) GetDevicePluginOptions(context.Context, *dp.Empty) (*dp.DeviceP
 func (p *Plugin) ListAndWatch(_ *dp.Empty, stream dp.DevicePlugin_ListAndWatchServer) error {
 	for {
 		health := dp.Healthy
-		if _, err := os.Stat("/dev/kvm"); err != nil {
-			health = dp.Unhealthy
-		}
-		if _, err := os.Stat("/dev/net/tun"); err != nil {
-			health = dp.Unhealthy
+		for _, path := range p.paths() {
+			if _, err := os.Stat(path); err != nil {
+				health = dp.Unhealthy
+			}
 		}
 		devices := make([]*dp.Device, p.Slots)
 		for i := range devices {
@@ -54,16 +61,17 @@ func (p *Plugin) Allocate(_ context.Context, in *dp.AllocateRequest) (*dp.Alloca
 	out := &dp.AllocateResponse{}
 	for _, req := range in.ContainerRequests {
 		if len(req.DevicesIds) != 1 {
-			return nil, errors.New("request exactly one KVM slot")
+			return nil, errors.New("request exactly one device slot")
 		}
 		n, e := strconv.Atoi(req.DevicesIds[0])
 		if e != nil || n < 0 || n >= p.Slots {
-			return nil, errors.New("invalid KVM slot")
+			return nil, errors.New("invalid device slot")
 		}
-		out.ContainerResponses = append(out.ContainerResponses, &dp.ContainerAllocateResponse{Devices: []*dp.DeviceSpec{
-			{HostPath: "/dev/kvm", ContainerPath: "/dev/kvm", Permissions: "rw"},
-			{HostPath: "/dev/net/tun", ContainerPath: "/dev/net/tun", Permissions: "rw"},
-		}})
+		response := &dp.ContainerAllocateResponse{}
+		for _, path := range p.paths() {
+			response.Devices = append(response.Devices, &dp.DeviceSpec{HostPath: path, ContainerPath: path, Permissions: "rw"})
+		}
+		out.ContainerResponses = append(out.ContainerResponses, response)
 	}
 	return out, nil
 }
@@ -83,7 +91,11 @@ func (p *Plugin) GetPreferredAllocation(
 }
 
 func (p *Plugin) Run(ctx context.Context, dir string) error {
-	socket := filepath.Join(dir, "roamvm-kvm.sock")
+	kind := "kvm"
+	if p.Fuse {
+		kind = "fuse"
+	}
+	socket := filepath.Join(dir, "roamvm-"+kind+".sock")
 	for ctx.Err() == nil {
 		_ = os.Remove(socket)
 		l, err := net.Listen("unix", socket)
@@ -109,7 +121,7 @@ func (p *Plugin) Run(ctx context.Context, dir string) error {
 				)
 				if e == nil {
 					_, e = dp.NewRegistrationClient(conn).
-						Register(regctx, &dp.RegisterRequest{Version: dp.Version, Endpoint: filepath.Base(socket), ResourceName: "vm.roamvm.io/kvm"})
+						Register(regctx, &dp.RegisterRequest{Version: dp.Version, Endpoint: filepath.Base(socket), ResourceName: "vm.roamvm.io/" + kind})
 					conn.Close()
 				}
 				cancel()

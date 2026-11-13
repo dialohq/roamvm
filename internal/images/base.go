@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/dialohq/roamvm/internal/qcow"
+	"github.com/dialohq/roamvm/internal/timing"
 )
 
 type Manifest struct {
@@ -25,6 +26,7 @@ func (b Base) Disk() string { return filepath.Join(b.Dir, "root."+b.Manifest.For
 
 // Open validates the disk payload mounted read-only by Kubernetes' image volume.
 func Open(ctx context.Context, dir string) (Base, error) {
+	defer timing.Start("image.open")()
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return Base{}, err

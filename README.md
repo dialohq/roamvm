@@ -138,7 +138,7 @@ and recovery command with the same backend; changing it requires an offline
 metadata migration, not an environment-variable rollout.
 
 ```sh
-kubectl apply --server-side -f config/crd
+kubectl apply --server-side -k config/crd
 kubectl create namespace roamvm-system
 # Create default/roamvm-object-store through Vault or your usual secret manager.
 # Required: S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
@@ -146,6 +146,13 @@ kubectl create namespace roamvm-system
 # With AWS workload identity, use the SDK credential chain instead of static keys.
 kubectl apply -f config/install.yaml
 ```
+
+The opt-in [experimental v2 operator](docs/v2.md) runs alongside this operator
+using a separate API group. It adds process-preserving hibernation, sparse
+content-addressed checkpoints, and deletion of private VM objects on CR deletion.
+The legacy API and its checkpoint-retention behavior remain unchanged.
+The [Kubernetes Amp provider](k8s-amp-provider/README.md) packages the Amp dispatch
+setup, provider permissions and verification tools on top of that operator.
 
 The example provisions the runtime ServiceAccount and namespace-scoped RoleBinding
 in `default`. For another VM namespace, create the same `roamvm-runtime` account

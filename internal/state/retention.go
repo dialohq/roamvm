@@ -8,7 +8,7 @@ import (
 	"strconv"
 )
 
-var checkpointKey = regexp.MustCompile(`^vm/([^/]+)/overlay/[0-9]{20}-([0-9]{20})-[0-9a-f]{64}\.qcow2$`)
+var checkpointKey = regexp.MustCompile(`^vm/([^/]+)/overlay/[0-9]{20}-([0-9]{20})-[0-9a-f]{64}\.(?:qcow2|json)$`)
 
 func checkpointEpoch(key, vmID string) (int64, error) {
 	parts := checkpointKey.FindStringSubmatch(key)
@@ -33,6 +33,12 @@ func (m Manager) Prune(ctx context.Context, committed Session) error {
 	keys, err := m.Store.List(ctx, "vm/"+committed.Head.VMID+"/overlay/")
 	if err != nil {
 		return fmt.Errorf("list superseded checkpoints: %w", err)
+	}
+	if err = m.pruneShared(ctx, committed, false); err != nil {
+		return err
+	}
+	if err = m.pruneChunks(ctx, committed, epoch); err != nil {
+		return err
 	}
 	for _, key := range keys {
 		candidate, err := checkpointEpoch(key, committed.Head.VMID)

@@ -1,4 +1,5 @@
 {pkgs}: let
+  hypervisor = import ../../nix/qemu.nix pkgs.qemu_test;
   runtime = pkgs.buildGoModule {
     pname = "roamvm";
     version = "lab";
@@ -6,7 +7,7 @@
       root = ../..;
       fileset = pkgs.lib.fileset.unions [../../go.mod ../../go.sum ../../api ../../cmd ../../internal];
     };
-    vendorHash = "sha256-P1t0NmWQAjtvR6t3K+2MyWHt8ymeua4eR78RjYF3GuA=";
+    vendorHash = "sha256-h0V8BgVicx3nLLloG+hrtayClCKTKfVa8atMAaAiGx0=";
     subPackages = ["cmd/roamvm"];
     env.CGO_ENABLED = "0";
     doCheck = false;
@@ -15,10 +16,10 @@ in
   pkgs.dockerTools.buildLayeredImage {
     name = "roamvm";
     tag = "libvirt-lab";
-    passthru = {inherit runtime;};
+    passthru = {inherit runtime hypervisor;};
     contents = pkgs.buildEnv {
       name = "roamvm-runtime-root";
-      paths = with pkgs; [runtime (lib.lowPrio busybox) cacert curl iproute2 iptables dnsmasq qemu_test cdrkit];
+      paths = with pkgs; [runtime (lib.lowPrio busybox) cacert curl iproute2 iptables dnsmasq hypervisor cdrkit];
       pathsToLink = ["/bin" "/etc"];
     };
     extraCommands = ''

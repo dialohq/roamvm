@@ -28,7 +28,7 @@ func (s *Server) resizeTarget(ctx context.Context, pod *core.Pod, vm *api.Virtua
 		return 0, "working PVC is not owned by VM or legacy runner"
 	}
 	capacity := pvc.Status.Capacity[core.ResourceStorage]
-	required, _ := api.WorkingBytes(vm.Spec.RootDiskSize)
+	required, _ := api.WorkingBytes(vm.Spec)
 	if capacity.Value() < required {
 		return 0, fmt.Sprintf("waiting for working PVC capacity: need %d bytes", required)
 	}

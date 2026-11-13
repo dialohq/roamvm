@@ -75,7 +75,11 @@ func newLab(t testing.TB) *lab {
 	cfg.Burst = 100
 	scheme := runtime.NewScheme()
 	must(t, core.AddToScheme(scheme))
-	must(t, api.AddToScheme(scheme))
+	if os.Getenv("ROAMVM_TEST_V2") == "1" {
+		must(t, api.AddV2ToScheme(scheme))
+	} else {
+		must(t, api.AddToScheme(scheme))
+	}
 	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	must(t, err)
 	k, err := kubernetes.NewForConfig(cfg)
@@ -193,7 +197,7 @@ func (l *lab) vm(name string) *api.VirtualMachine {
 
 func (l *lab) spec(prefix string) *api.VirtualMachine {
 	return &api.VirtualMachine{
-		TypeMeta:   metav1.TypeMeta{APIVersion: api.GroupVersion.String(), Kind: "VirtualMachine"},
+		TypeMeta:   metav1.TypeMeta{APIVersion: api.APIVersion(l.Scheme()), Kind: "VirtualMachine"},
 		ObjectMeta: meta(unique(prefix)),
 		Spec: api.VirtualMachineSpec{
 			PowerState: "Running", Image: l.image, CPUs: 2, Memory: "512Mi", ReadinessPort: 8080, ShutdownTimeoutSeconds: 120,

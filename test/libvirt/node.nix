@@ -41,6 +41,7 @@ in {
     options = lib.mkForce ["ro"];
   };
   boot.kernelParams = ["console=ttyS0" "net.ifnames=0"];
+  boot.kernelModules = ["fuse"];
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
   networking = {
     hostName = name;
@@ -113,7 +114,7 @@ in {
     wantedBy = ["multi-user.target"];
     after = ["k3s.service"];
     serviceConfig = {
-      ExecStart = "${roamvm}/bin/roamvm device-plugin";
+      ExecStart = "${roamvm}/bin/roamvm --experimental-v2 device-plugin";
       Restart = "always";
       RestartSec = 2;
     };

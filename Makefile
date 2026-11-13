@@ -18,6 +18,7 @@ test:
 	go test -tags=integration ./test/integration -run '^$$'
 	nu --no-config-file test/runner-test.nu
 	nu --no-config-file test/scenarios/helpers-test.nu
+	python3 -m unittest discover -s test -p profile_command_test.py
 
 generate:
 	go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1 object paths=./api/... crd output:crd:artifacts:config=config/crd

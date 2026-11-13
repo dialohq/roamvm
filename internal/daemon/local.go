@@ -11,7 +11,9 @@ import (
 	"github.com/dialohq/roamvm/internal/controller"
 	"github.com/dialohq/roamvm/internal/disk"
 	"github.com/dialohq/roamvm/internal/fileio"
+	"github.com/dialohq/roamvm/internal/hibernate"
 	"github.com/dialohq/roamvm/internal/images"
+	"github.com/dialohq/roamvm/internal/timing"
 	"golang.org/x/sys/unix"
 	core "k8s.io/api/core/v1"
 )
@@ -36,6 +38,7 @@ func lockDisk(dir string) (*os.File, error) {
 // stopLocal is called only after QEMU exits, while the caller holds runner.lock.
 // No object-store operation is needed to acknowledge a local stop.
 func (s *Server) stopLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine) error {
+	defer timing.Start("disk.local-stop")()
 	p, err := s.load(string(pod.UID))
 	if err != nil {
 		return err
@@ -49,6 +52,13 @@ func (s *Server) stopLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMa
 	}
 	if err = fileio.SyncClose(f, nil); err != nil {
 		return err
+	}
+	p.Hibernation, err = hibernate.Load(p.Dir, string(pod.UID))
+	if err != nil {
+		return err
+	}
+	if p.Spec.Hibernate && p.Hibernation == nil {
+		return errors.New("hibernating runner exited without a coherent RAM capture; explicit recovery required")
 	}
 	p.Stopped = true
 	if err = s.save(p); err != nil {
@@ -91,6 +101,7 @@ func (s *Server) stoppedLocal(owner string, vm *api.VirtualMachine) (Prepared, e
 }
 
 func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.VirtualMachine, base images.Base, spec api.VirtualMachineSpec) (*Prepared, error) {
+	defer timing.Start("disk.local-resume")()
 	owner := pod.Annotations[controller.LocalOwnerAnnotation]
 	p, err := s.stoppedLocal(owner, vm)
 	if err != nil {
@@ -98,6 +109,9 @@ func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.Virtual
 	}
 	if controller.WorkingClaim(pod) != vm.Status.Local.ClaimName {
 		return nil, errors.New("local checkpoint claim mismatch")
+	}
+	if err = hibernate.Check(ctx, spec, p.Hibernation); err != nil {
+		return nil, err
 	}
 	lock, err := lockDisk(p.Dir)
 	if err != nil {
@@ -110,10 +124,16 @@ func (s *Server) resumeLocal(ctx context.Context, pod *core.Pod, vm *api.Virtual
 	if err != nil {
 		return nil, err
 	}
-	if err = disk.Rebase(ctx, base, filepath.Join(p.Dir, "overlay.qcow2")); err != nil {
+	path := filepath.Join(p.Dir, "overlay.qcow2")
+	if _, err = os.Stat(path + ".lazy"); os.IsNotExist(err) {
+		err = disk.Rebase(ctx, base, path)
+	}
+	if err != nil {
 		return nil, err
 	}
 	prepared := Prepared{Session: session, Base: base, Dir: p.Dir, Spec: spec, PodUID: string(pod.UID)}
+	prepared.Hibernation = p.Hibernation
+	prepared.ExternalRAM = spec.Hibernate && p.ExternalRAM
 	if err = s.save(prepared); err != nil {
 		return nil, err
 	}
@@ -161,8 +181,20 @@ func (s *Server) CheckpointLocal(ctx context.Context) error {
 			return err
 		}
 		path := filepath.Join(p.Dir, "overlay.qcow2")
+		if err = s.State.Materialize(ctx, path); err != nil {
+			return err
+		}
+		if p.ExternalRAM {
+			if err = s.State.Materialize(ctx, filepath.Join(p.Dir, hibernate.RAM)); err != nil {
+				return err
+			}
+		}
 		if err = disk.Check(ctx, path); err == nil {
-			current, err = s.State.Commit(ctx, p.Session, path)
+			if api.IsV2(s.Client.Scheme()) {
+				current, err = s.State.Snapshot(ctx, p.Session, path, p.Hibernation)
+			} else {
+				current, err = s.State.Commit(ctx, p.Session, path)
+			}
 		}
 	}
 	if err != nil {
